@@ -1,0 +1,38 @@
+[project]
+name = "meeko"
+version = "0.1.0"
+description = "A self-hosted voice assistant built on Deepgram and Claude"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "deepgram-sdk>=6.1.1",
+    "pyaudio>=0.2.14",
+    "python-dotenv>=1.2.2",
+    "requests>=2.33.1",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+    "rapidfuzz>=3.0",
+    "ruff>=0.15.10",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that call external APIs (Deepgram, etc.)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:deepgram",
+    "ignore::DeprecationWarning:websockets",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]

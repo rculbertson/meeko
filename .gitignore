@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+
+# Logs
+meeko.log
+
+# Tool-specific config (personal)
+mise.toml
+.claude/settings.local.json
+
+# Test fixtures (generated — see README)
+tests/fixtures/
+
+# Private docs (not for public repo)
+private/

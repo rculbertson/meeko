@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": ["WebSearch", "Bash(uv *)", "WebFetch(domain:api.deepgram.com)"]
+  },
+  "enabledPlugins": {
+    "deepgram@deepgram-agent-skills": true
+  }
+}
