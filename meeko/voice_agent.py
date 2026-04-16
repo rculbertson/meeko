@@ -58,8 +58,10 @@ def build_settings(anthropic_api_key: str) -> AgentV1Settings:
                         headers={"x-api-key": anthropic_api_key},
                     ),
                     prompt=(
-                        "You are Meeko, a friendly home assistant. "
-                        "Keep responses concise and conversational."
+                        "You are Meeko, an intelligent voice assistant. "
+                        "Your responses will be spoken aloud via text-to-speech, "
+                        "so never use emojis, markdown, or other formatting. "
+                        "Keep your responses minimal."
                     ),
                 )
             ],
@@ -156,11 +158,14 @@ async def run():
             while not stop_event.is_set():
                 try:
                     data = await asyncio.wait_for(mic_queue.get(), timeout=0.1)
-                    if not agent_speaking:
+                    if agent_speaking:
+                        # Send silence to keep the WebSocket alive
+                        await connection.send_media(b"\x00" * len(data))
+                    else:
                         await connection.send_media(data)
-                        chunks_sent += 1
-                        if chunks_sent % 100 == 0:
-                            logger.debug("mic: sent %d chunks", chunks_sent)
+                    chunks_sent += 1
+                    if chunks_sent % 100 == 0:
+                        logger.debug("mic: sent %d chunks", chunks_sent)
                 except TimeoutError:
                     continue
 
