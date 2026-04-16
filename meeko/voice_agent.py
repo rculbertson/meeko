@@ -23,6 +23,8 @@ from deepgram.agent.v1.types import (
 )
 from dotenv import load_dotenv
 
+from meeko.tools.timer import get_tool_definitions, handle_function_call_request
+
 RATE = 16000
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
@@ -63,6 +65,7 @@ def build_settings(anthropic_api_key: str) -> AgentV1Settings:
                         "so never use emojis, markdown, or other formatting. "
                         "Keep your responses minimal."
                     ),
+                    functions=get_tool_definitions(),
                 )
             ],
             speak=AgentV1SettingsAgentSpeakEndpoint(
@@ -214,6 +217,8 @@ async def run():
                         mic_queue.get_nowait()
                     agent_speaking = False
                     logger.debug("mic unmuted")
+                elif msg_type == "FunctionCallRequest":
+                    await handle_function_call_request(message, connection)
                 elif msg_type == "Error":
                     logger.error("Agent error: %s", message)
                 else:

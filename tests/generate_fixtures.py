@@ -14,6 +14,10 @@ FIXTURES = [
         "filename": "hello_meeko.wav",
         "text": "Hello Meeko, what is the capital of France?",
     },
+    {
+        "filename": "set_timer.wav",
+        "text": "Set a thirty second timer for pasta.",
+    },
 ]
 
 

@@ -46,3 +46,12 @@ def wav_chunks_hello():
         f"Fixture not found: {path}. Run: uv run python tests/generate_fixtures.py"
     )
     return read_wav_as_chunks(path)
+
+
+@pytest.fixture
+def wav_chunks_set_timer():
+    path = FIXTURES_DIR / "set_timer.wav"
+    assert path.exists(), (
+        f"Fixture not found: {path}. Run: uv run python tests/generate_fixtures.py"
+    )
+    return read_wav_as_chunks(path)
