@@ -76,7 +76,7 @@ def build_settings(
             ],
             speak=AgentV1SettingsAgentSpeakEndpoint(
                 provider=AgentV1SettingsAgentSpeakEndpointProvider_Deepgram(
-                    model="aura-2-asteria-en",
+                    model=f"aura-2-{profile.voice}-en",
                 ),
             ),
             greeting=profile.greeting,

@@ -18,6 +18,7 @@ If you don't know the answer or cannot answer the question, say so briefly.\
 # [profiles.pirate]
 # wake_word = "ahoy"
 # greeting = "Ahoy matey! What can I do for ye?"
+# voice = "orion"
 # prompt = """\
 # You are a pirate voice assistant. \
 # Respond in pirate speak. Your responses will be spoken aloud \

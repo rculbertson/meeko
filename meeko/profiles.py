@@ -15,6 +15,7 @@ class Profile:
     wake_word: str
     prompt: str
     greeting: str
+    voice: str
 
 
 def load_profiles(path: str | Path = "profiles.toml") -> dict[str, Profile]:
@@ -37,6 +38,7 @@ def load_profiles(path: str | Path = "profiles.toml") -> dict[str, Profile]:
             wake_word=fields["wake_word"],
             prompt=fields["prompt"],
             greeting=fields["greeting"],
+            voice=fields.get("voice"),
         )
 
     if "default" not in profiles:
