@@ -5,13 +5,11 @@ Timers run as asyncio tasks and announce expiry via InjectAgentMessage.
 """
 
 import asyncio
-import json
 import logging
 import time
 
 from deepgram.agent.v1.types import (
     AgentV1InjectAgentMessage,
-    AgentV1SendFunctionCallResponse,
     AgentV1SettingsAgentThinkOneItemFunctionsItem,
 )
 
@@ -182,61 +180,21 @@ def get_tool_definitions() -> list[AgentV1SettingsAgentThinkOneItemFunctionsItem
     ]
 
 
-def _get(obj, key, default=""):
-    """Get a value from a dict or Pydantic model.
-
-    The Deepgram SDK sometimes deserializes messages as the wrong Pydantic
-    type (AgentV1PromptUpdated), storing actual fields as extra dict data.
-    This helper handles both dict and attribute access.
-    """
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-async def handle_function_call_request(message, connection):
-    """Handle a FunctionCallRequest from the Voice Agent.
-
-    Iterates the functions array, routes each to the appropriate handler,
-    and sends a FunctionCallResponse with the matching id.
-    """
-    functions = _get(message, "functions", [])
-    for fn in functions:
-        fn_id = _get(fn, "id")
-        fn_name = _get(fn, "name")
-        raw_args = _get(fn, "arguments", "{}")
-
-        try:
-            args = json.loads(raw_args)
-        except json.JSONDecodeError, TypeError:
-            args = {}
-
-        logger.info("Function call: %s(%s) id=%s", fn_name, args, fn_id)
-
-        if fn_name == "set_timer":
-            result = await timer_manager.set_timer(
-                duration_seconds=args.get("duration_seconds", 60),
-                duration_display=args.get("duration_display", "1 minute"),
-                label=args.get("label"),
-                connection=connection,
-            )
-        elif fn_name == "list_timers":
-            result = timer_manager.list_timers()
-        elif fn_name == "cancel_timer":
-            result = timer_manager.cancel_timer(
-                label=args.get("label", ""),
-            )
-        elif fn_name == "cancel_all_timers":
-            result = timer_manager.cancel_all_timers()
-        else:
-            result = f"Unknown function: {fn_name}"
-            logger.warning("Unknown function call: %s", fn_name)
-
-        await connection.send_function_call_response(
-            AgentV1SendFunctionCallResponse(
-                type="FunctionCallResponse",
-                id=fn_id,
-                name=fn_name,
-                content=result,
-            )
+async def handle(fn_name: str, args: dict, connection) -> str:
+    """Handle a timer-related function call."""
+    if fn_name == "set_timer":
+        return await timer_manager.set_timer(
+            duration_seconds=args.get("duration_seconds", 60),
+            duration_display=args.get("duration_display", "1 minute"),
+            label=args.get("label"),
+            connection=connection,
         )
+    elif fn_name == "list_timers":
+        return timer_manager.list_timers()
+    elif fn_name == "cancel_timer":
+        return timer_manager.cancel_timer(
+            label=args.get("label", ""),
+        )
+    elif fn_name == "cancel_all_timers":
+        return timer_manager.cancel_all_timers()
+    return f"Unknown timer function: {fn_name}"

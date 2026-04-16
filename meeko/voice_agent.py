@@ -1,6 +1,7 @@
 """Deepgram Voice Agent session with live mic input and speaker output."""
 
 import asyncio
+import functools
 import logging
 import logging.handlers
 import os
@@ -23,7 +24,13 @@ from deepgram.agent.v1.types import (
 )
 from dotenv import load_dotenv
 
-from meeko.tools.timer import get_tool_definitions, handle_function_call_request
+from meeko.profiles import Profile, load_profiles
+from meeko.tools.dispatch import ToolDispatcher
+from meeko.tools.profile import ProfileManager
+from meeko.tools.profile import get_tool_definitions as profile_tools
+from meeko.tools.profile import handle as profile_handle
+from meeko.tools.timer import get_tool_definitions as timer_tools
+from meeko.tools.timer import handle as timer_handle
 
 RATE = 16000
 CHANNELS = 1
@@ -31,7 +38,11 @@ FORMAT = pyaudio.paInt16
 CHUNK = 800  # 50ms at 16kHz (800 samples * 2 bytes = 1600 bytes per chunk)
 
 
-def build_settings(anthropic_api_key: str) -> AgentV1Settings:
+def build_settings(
+    anthropic_api_key: str,
+    profile: Profile,
+    tool_definitions: list,
+) -> AgentV1Settings:
     return AgentV1Settings(
         type="Settings",
         audio=AgentV1SettingsAudio(
@@ -59,13 +70,8 @@ def build_settings(anthropic_api_key: str) -> AgentV1Settings:
                         url="https://api.anthropic.com/v1/messages",
                         headers={"x-api-key": anthropic_api_key},
                     ),
-                    prompt=(
-                        "You are Meeko, an intelligent voice assistant. "
-                        "Your responses will be spoken aloud via text-to-speech, "
-                        "so never use emojis, markdown, or other formatting. "
-                        "Keep your responses minimal."
-                    ),
-                    functions=get_tool_definitions(),
+                    prompt=profile.prompt,
+                    functions=tool_definitions,
                 )
             ],
             speak=AgentV1SettingsAgentSpeakEndpoint(
@@ -73,7 +79,7 @@ def build_settings(anthropic_api_key: str) -> AgentV1Settings:
                     model="aura-2-asteria-en",
                 ),
             ),
-            greeting="Hello! I'm Meeko. How can I help?",
+            greeting=profile.greeting,
         ),
     )
 
@@ -107,8 +113,21 @@ async def run():
     deepgram_key = os.environ["DEEPGRAM_API_KEY"]
     anthropic_key = os.environ["CLAUDE_API_KEY"]
 
+    # Load profiles and set up tool dispatcher
+    profiles = load_profiles()
+    profile = profiles["default"]
+
+    profile_manager = ProfileManager(profiles)
+
+    dispatcher = ToolDispatcher()
+    dispatcher.register(timer_tools(), timer_handle)
+    dispatcher.register(
+        profile_tools(profiles),
+        functools.partial(profile_handle, manager=profile_manager),
+    )
+
     client = AsyncDeepgramClient(api_key=deepgram_key)
-    settings = build_settings(anthropic_key)
+    settings = build_settings(anthropic_key, profile, dispatcher.get_all_definitions())
 
     pa = pyaudio.PyAudio()
 
@@ -218,7 +237,7 @@ async def run():
                     agent_speaking = False
                     logger.debug("mic unmuted")
                 elif msg_type == "FunctionCallRequest":
-                    await handle_function_call_request(message, connection)
+                    await dispatcher.handle_function_call_request(message, connection)
                 elif msg_type == "Error":
                     logger.error("Agent error: %s", message)
                 else:

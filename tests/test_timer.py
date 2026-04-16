@@ -4,11 +4,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from meeko.tools.dispatch import ToolDispatcher, _get
 from meeko.tools.timer import (
     TimerManager,
-    _get,
-    handle_function_call_request,
+    get_tool_definitions,
     timer_manager,
+)
+from meeko.tools.timer import (
+    handle as timer_handle,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +131,9 @@ async def test_set_timer_function_call(dg_client, agent_settings, wav_chunks_set
     - Our handler sends FunctionCallResponse with correct id
     - Agent acknowledges the timer in a spoken response
     """
+    dispatcher = ToolDispatcher()
+    dispatcher.register(get_tool_definitions(), timer_handle)
+
     events = []
     function_calls = []
     settings_applied = asyncio.Event()
@@ -173,7 +179,7 @@ async def test_set_timer_function_call(dg_client, agent_settings, wav_chunks_set
                                 "arguments": _get(fn, "arguments"),
                             }
                         )
-                    await handle_function_call_request(message, connection)
+                    await dispatcher.handle_function_call_request(message, connection)
                     has_function_call = True
                 elif msg_type == "AgentAudioDone":
                     if not greeting_done.is_set():
