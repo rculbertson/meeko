@@ -34,7 +34,7 @@ CLAUDE_API_KEY=your-anthropic-api-key
 ### Running
 
 ```bash
-uv run python -m meeko.voice_agent
+uv run python -m meeko.main
 ```
 
 Speak to the assistant. Press `Ctrl+C` to quit.
@@ -61,13 +61,13 @@ Two environment variables control logging behavior.
 Example — quiet console output:
 
 ```bash
-MEEKO_LOG_LEVEL=INFO uv run python -m meeko.voice_agent
+MEEKO_LOG_LEVEL=INFO uv run python -m meeko.main
 ```
 
 Example — log to file at debug level:
 
 ```bash
-MEEKO_LOG_TARGET=file uv run python -m meeko.voice_agent
+MEEKO_LOG_TARGET=file uv run python -m meeko.main
 ```
 
 ---
