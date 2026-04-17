@@ -6,22 +6,7 @@ Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed
 
 ## Current State
 
-The prototype has been migrated off Deepgram's Voice Agent API. It now uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2, REST)** directly, with **Claude called directly via the Anthropic SDK** (`claude-sonnet-4-6`). Timers and profile switching are wired through a Claude-native tool-use loop.
-
-Module layout:
-- `meeko/voice_agent.py` — orchestrator (mic → STT → Claude → TTS → speaker, state machine, mic-mute during SPEAKING)
-- `meeko/claude_client.py` — `AsyncAnthropic` wrapper with in-memory message history and tool-use loop
-- `meeko/deepgram_stt.py` — Flux v2 live STT wrapper; yields `TurnEvent(event, transcript)`
-- `meeko/deepgram_tts.py` — Aura-2 REST synth → linear16 PCM bytes
-- `meeko/tools/{dispatch,timer,profile}.py` — Anthropic-format tool defs + handlers
-
-Current simplifications (deliberate, to be revisited):
-- Audio: PyAudio + default mic/speaker (no ReSpeaker / sounddevice / left-channel yet)
-- No barge-in: mic feeds silence into STT while SPEAKING
-- Conversation history is in-memory only for the process lifetime
-- Timer expiry speaks a fixed announcement directly via TTS — it does NOT tell Claude the timer fired (see the comment in `meeko/tools/timer.py` for the future Claude-in-the-loop path)
-
-**Not yet implemented:** SQLite session/transcript persistence, intent detection, prompt caching (`cache_control`), auto compaction, session resume, barge-in, ReSpeaker/sounddevice audio layer.
+The prototype uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2, REST)** directly, with **Claude called directly via the Anthropic SDK** (`claude-sonnet-4-6`). Timers and profile switching are wired through a Claude-native tool-use loop.
 
 ## Primary Goal
 
@@ -65,10 +50,12 @@ States: `IDLE → LISTENING → PROCESSING → SPEAKING → (barge-in back to LI
 
 Do not add: wake word detection, web/mobile UI, multi-user support, semantic search over sessions, session deletion by voice, cross-device sync. See `meeko-design.md` §9.
 
-## Environment
-
-```
-DEEPGRAM_API_KEY=...
-ANTHROPIC_API_KEY=...
-RESPEAKER_DEVICE_INDEX=...
-```
+## Git Workflow
+- Always implement features on a new branch, never directly on main
+- Branch naming: rculbertson/<short-description>
+- Commit when a discrete, working piece is complete — not speculatively.
+  Each commit should represent something that compiles/runs correctly on its own.
+- When implementation is complete, run `git rebase -i main` to clean up the
+  commit history — squash WIP and fixup commits, keeping only commits that
+  represent a coherent, named step in the implementation
+- Open the PR with `gh pr create` when done
