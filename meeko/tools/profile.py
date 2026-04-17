@@ -1,32 +1,38 @@
-"""Profile switching tools for the voice agent.
+"""Profile-switching tools for the voice assistant.
 
-Provides switch_profile and list_profiles functionality.
+Provides switch_profile and list_profiles. Switching updates the system
+prompt held by the ClaudeClient; the change takes effect on the next
+Claude call.
 """
 
 import logging
 
-from deepgram.agent.v1.types import (
-    AgentV1SettingsAgentThinkOneItemFunctionsItem,
-    AgentV1UpdatePrompt,
-)
-
 from meeko.profiles import Profile
+from meeko.tools.dispatch import ToolDefinition
 
 logger = logging.getLogger("meeko")
 
 
 class ProfileManager:
-    """Manages profile state and switching."""
+    """Manages profile state and switching.
 
-    def __init__(self, profiles: dict[str, Profile]):
+    ``claude_client`` is expected to expose ``set_system_prompt(str)``.
+    We take it as a protocol-ish dependency to avoid an import cycle.
+    """
+
+    def __init__(self, profiles: dict[str, Profile], claude_client=None):
         self._profiles = profiles
         self._active: str = "default"
+        self._claude = claude_client
+
+    def set_claude_client(self, claude_client) -> None:
+        self._claude = claude_client
 
     @property
     def active_profile(self) -> Profile:
         return self._profiles[self._active]
 
-    async def switch_profile(self, profile_name: str, connection) -> str:
+    async def switch_profile(self, profile_name: str) -> str:
         if profile_name not in self._profiles:
             available = ", ".join(sorted(self._profiles))
             return f"Unknown profile '{profile_name}'. Available profiles: {available}"
@@ -35,9 +41,8 @@ class ProfileManager:
             return f"Already using the {profile_name} profile."
 
         profile = self._profiles[profile_name]
-        await connection.send_update_prompt(
-            AgentV1UpdatePrompt(type="UpdatePrompt", prompt=profile.prompt)
-        )
+        if self._claude is not None:
+            self._claude.set_system_prompt(profile.prompt)
         self._active = profile_name
         logger.info("Switched to profile: %s", profile_name)
         return f"Switched to {profile_name} mode."
@@ -50,19 +55,17 @@ class ProfileManager:
         return "Available profiles: " + ", ".join(lines)
 
 
-def get_tool_definitions(
-    profiles: dict[str, Profile],
-) -> list[AgentV1SettingsAgentThinkOneItemFunctionsItem]:
+def get_tool_definitions(profiles: dict[str, Profile]) -> list[ToolDefinition]:
     profile_names = sorted(profiles)
     names_list = ", ".join(profile_names)
     return [
-        AgentV1SettingsAgentThinkOneItemFunctionsItem(
-            name="switch_profile",
-            description=(
+        {
+            "name": "switch_profile",
+            "description": (
                 "Switch the assistant to a different profile/persona. "
                 f"Available profiles: {names_list}"
             ),
-            parameters={
+            "input_schema": {
                 "type": "object",
                 "properties": {
                     "profile_name": {
@@ -76,21 +79,20 @@ def get_tool_definitions(
                 },
                 "required": ["profile_name"],
             },
-        ),
-        AgentV1SettingsAgentThinkOneItemFunctionsItem(
-            name="list_profiles",
-            description=(
+        },
+        {
+            "name": "list_profiles",
+            "description": (
                 "List all available profiles and which one is currently active."
             ),
-            parameters={"type": "object", "properties": {}},
-        ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
     ]
 
 
 async def handle(
     fn_name: str,
     args: dict,
-    connection,
     *,
     manager: ProfileManager,
 ) -> str:
@@ -98,7 +100,6 @@ async def handle(
     if fn_name == "switch_profile":
         return await manager.switch_profile(
             profile_name=args.get("profile_name", ""),
-            connection=connection,
         )
     elif fn_name == "list_profiles":
         return manager.list_profiles()

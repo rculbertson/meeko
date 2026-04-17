@@ -1,6 +1,6 @@
 import textwrap
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -94,28 +94,23 @@ def _make_profiles():
 
 
 async def test_switch_profile():
-    """Switching to a valid profile sends UpdatePrompt."""
+    """Switching to a valid profile updates the Claude system prompt."""
     profiles = _make_profiles()
-    mgr = ProfileManager(profiles)
-    conn = MagicMock()
-    conn.send_update_prompt = AsyncMock()
+    claude = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=claude)
 
-    result = await mgr.switch_profile("pirate", conn)
+    result = await mgr.switch_profile("pirate")
 
     assert result == "Switched to pirate mode."
-    conn.send_update_prompt.assert_called_once()
-    sent_msg = conn.send_update_prompt.call_args[0][0]
-    assert sent_msg.prompt == "You are a pirate."
+    claude.set_system_prompt.assert_called_once_with("You are a pirate.")
     assert mgr.active_profile.name == "pirate"
 
 
 async def test_switch_profile_unknown():
-    """Switching to an unknown profile returns an error with available names."""
     profiles = _make_profiles()
-    mgr = ProfileManager(profiles)
-    conn = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=MagicMock())
 
-    result = await mgr.switch_profile("nonexistent", conn)
+    result = await mgr.switch_profile("nonexistent")
 
     assert "Unknown profile" in result
     assert "default" in result
@@ -124,18 +119,15 @@ async def test_switch_profile_unknown():
 
 
 async def test_switch_profile_already_active():
-    """Switching to the already-active profile returns a message."""
     profiles = _make_profiles()
-    mgr = ProfileManager(profiles)
-    conn = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=MagicMock())
 
-    result = await mgr.switch_profile("default", conn)
+    result = await mgr.switch_profile("default")
 
     assert "Already using" in result
 
 
 async def test_list_profiles():
-    """list_profiles returns all profiles and marks the active one."""
     profiles = _make_profiles()
     mgr = ProfileManager(profiles)
 
@@ -146,13 +138,11 @@ async def test_list_profiles():
 
 
 async def test_list_profiles_after_switch():
-    """After switching, the new profile is marked active."""
     profiles = _make_profiles()
-    mgr = ProfileManager(profiles)
-    conn = MagicMock()
-    conn.send_update_prompt = AsyncMock()
+    claude = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=claude)
 
-    await mgr.switch_profile("pirate", conn)
+    await mgr.switch_profile("pirate")
     result = mgr.list_profiles()
 
     assert "pirate (active)" in result
@@ -170,10 +160,10 @@ def test_tool_definitions_include_profile_names():
     profiles = _make_profiles()
     defs = get_tool_definitions(profiles)
 
-    names = [d.name for d in defs]
+    names = [d["name"] for d in defs]
     assert "switch_profile" in names
     assert "list_profiles" in names
 
-    switch_def = next(d for d in defs if d.name == "switch_profile")
-    assert "default" in switch_def.description
-    assert "pirate" in switch_def.description
+    switch_def = next(d for d in defs if d["name"] == "switch_profile")
+    assert "default" in switch_def["description"]
+    assert "pirate" in switch_def["description"]

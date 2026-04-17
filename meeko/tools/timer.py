@@ -1,21 +1,23 @@
-"""Timer tools for the voice agent.
+"""Timer tools for the voice assistant.
 
-Provides set_timer, list_timers, and cancel_timer functionality.
-Timers run as asyncio tasks and announce expiry via InjectAgentMessage.
+Provides set_timer, list_timers, cancel_timer, and cancel_all_timers.
+Timers run as asyncio tasks and announce expiry via a speak_callback
+supplied by the orchestrator (typically: synthesize TTS + play through
+the speaker, respecting the SPEAKING state so the mic stays muted).
 """
 
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 
-from deepgram.agent.v1.types import (
-    AgentV1InjectAgentMessage,
-    AgentV1SettingsAgentThinkOneItemFunctionsItem,
-)
+from meeko.tools.dispatch import ToolDefinition
 
 logger = logging.getLogger("meeko")
 
 _PLURAL_UNITS = {"seconds": "second", "minutes": "minute", "hours": "hour"}
+
+SpeakCallback = Callable[[str], Awaitable[None]]
 
 
 def _singularize_units(display: str) -> str:
@@ -26,19 +28,28 @@ def _singularize_units(display: str) -> str:
 
 
 class TimerManager:
-    """Manages concurrent timers as asyncio tasks."""
+    """Manages concurrent timers as asyncio tasks.
 
-    def __init__(self):
+    On expiry, calls ``speak_callback`` with a fixed announcement string.
+    The callback is set via ``set_speak_callback`` during orchestrator
+    wire-up; handlers run before wire-up (e.g. in unit tests) will no-op
+    on expiry unless a callback is supplied.
+    """
+
+    def __init__(self, speak_callback: SpeakCallback | None = None):
         # label -> (task, start_time, duration_seconds)
         self._timers: dict[str, tuple[asyncio.Task, float, float]] = {}
         self._counter = 0  # for auto-labeling
+        self._speak: SpeakCallback | None = speak_callback
+
+    def set_speak_callback(self, speak_callback: SpeakCallback) -> None:
+        self._speak = speak_callback
 
     async def set_timer(
         self,
         duration_seconds: float,
         duration_display: str,
         label: str | None,
-        connection,
     ):
         duration_display = _singularize_units(duration_display)
         custom_label = label
@@ -51,20 +62,29 @@ class TimerManager:
             self._timers[label][0].cancel()
 
         task = asyncio.create_task(
-            self._run_timer(
-                label, custom_label, duration_seconds, duration_display, connection
-            )
+            self._run_timer(label, custom_label, duration_seconds, duration_display)
         )
         self._timers[label] = (task, time.monotonic(), duration_seconds)
         return f"Timer '{label}' set for {duration_display}."
 
+    # NOTE: expiry currently speaks a fixed announcement directly via TTS and
+    # does NOT tell the Claude model that the timer fired. This keeps the timer
+    # subsystem decoupled from the conversation while session persistence /
+    # prompt caching / auto compaction are still out of scope.
+    #
+    # FUTURE (once sessions land): append a synthetic user-role message to the
+    # ClaudeClient's message history (e.g. {"role": "user", "content": "The 10
+    # minute pasta timer just finished."}) and trigger a Claude turn, so the
+    # assistant can weave the expiry into the ongoing conversation, persist it,
+    # and react with context. That path requires the timer to hold a reference
+    # to ClaudeClient + the speak path, and to coordinate with whatever turn is
+    # in flight (don't interrupt the user; queue if the assistant is speaking).
     async def _run_timer(
         self,
         label: str,
         custom_label: str | None,
         duration_seconds: float,
         duration_display: str,
-        connection,
     ):
         try:
             await asyncio.sleep(duration_seconds)
@@ -73,12 +93,12 @@ class TimerManager:
                 message = f"The {duration_display} {custom_label} timer is done!"
             else:
                 message = f"The {duration_display} timer is done!"
-            await connection.send_inject_agent_message(
-                AgentV1InjectAgentMessage(
-                    type="InjectAgentMessage",
-                    message=message,
+            if self._speak is not None:
+                await self._speak(message)
+            else:
+                logger.warning(
+                    "Timer '%s' expired but no speak_callback is configured", label
                 )
-            )
         except asyncio.CancelledError:
             logger.info("Timer '%s' cancelled", label)
         finally:
@@ -114,20 +134,20 @@ class TimerManager:
         return f"All {count} timer{'s' if count != 1 else ''} cancelled."
 
 
-# Singleton instance
+# Singleton instance. The orchestrator installs a speak_callback on startup.
 timer_manager = TimerManager()
 
 
-def get_tool_definitions() -> list[AgentV1SettingsAgentThinkOneItemFunctionsItem]:
+def get_tool_definitions() -> list[ToolDefinition]:
     return [
-        AgentV1SettingsAgentThinkOneItemFunctionsItem(
-            name="set_timer",
-            description=(
+        {
+            "name": "set_timer",
+            "description": (
                 "Set a countdown timer. When the timer expires, "
                 "the assistant will announce it aloud, including the "
                 "timer name (if given) and duration."
             ),
-            parameters={
+            "input_schema": {
                 "type": "object",
                 "properties": {
                     "duration_seconds": {
@@ -152,16 +172,16 @@ def get_tool_definitions() -> list[AgentV1SettingsAgentThinkOneItemFunctionsItem
                 },
                 "required": ["duration_seconds", "duration_display"],
             },
-        ),
-        AgentV1SettingsAgentThinkOneItemFunctionsItem(
-            name="list_timers",
-            description="List all active timers with their remaining time.",
-            parameters={"type": "object", "properties": {}},
-        ),
-        AgentV1SettingsAgentThinkOneItemFunctionsItem(
-            name="cancel_timer",
-            description="Cancel an active timer by its label.",
-            parameters={
+        },
+        {
+            "name": "list_timers",
+            "description": "List all active timers with their remaining time.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "cancel_timer",
+            "description": "Cancel an active timer by its label.",
+            "input_schema": {
                 "type": "object",
                 "properties": {
                     "label": {
@@ -171,30 +191,27 @@ def get_tool_definitions() -> list[AgentV1SettingsAgentThinkOneItemFunctionsItem
                 },
                 "required": ["label"],
             },
-        ),
-        AgentV1SettingsAgentThinkOneItemFunctionsItem(
-            name="cancel_all_timers",
-            description="Cancel all active timers at once.",
-            parameters={"type": "object", "properties": {}},
-        ),
+        },
+        {
+            "name": "cancel_all_timers",
+            "description": "Cancel all active timers at once.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
     ]
 
 
-async def handle(fn_name: str, args: dict, connection) -> str:
+async def handle(fn_name: str, args: dict) -> str:
     """Handle a timer-related function call."""
     if fn_name == "set_timer":
         return await timer_manager.set_timer(
             duration_seconds=args.get("duration_seconds", 60),
             duration_display=args.get("duration_display", "1 minute"),
             label=args.get("label"),
-            connection=connection,
         )
     elif fn_name == "list_timers":
         return timer_manager.list_timers()
     elif fn_name == "cancel_timer":
-        return timer_manager.cancel_timer(
-            label=args.get("label", ""),
-        )
+        return timer_manager.cancel_timer(label=args.get("label", ""))
     elif fn_name == "cancel_all_timers":
         return timer_manager.cancel_all_timers()
     return f"Unknown timer function: {fn_name}"

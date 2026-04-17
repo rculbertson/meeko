@@ -5,6 +5,7 @@ description = "A self-hosted voice assistant built on Deepgram and Claude"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "anthropic>=0.40.0",
     "deepgram-sdk>=6.1.1",
     "pyaudio>=0.2.14",
     "python-dotenv>=1.2.2",
@@ -22,6 +23,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
 markers = [
     "integration: tests that call external APIs (Deepgram, etc.)",
 ]

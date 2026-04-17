@@ -1,15 +1,8 @@
-import os
 import wave
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
-from deepgram import AsyncDeepgramClient
 from dotenv import load_dotenv
-
-from meeko.profiles import Profile
-from meeko.tools.timer import get_tool_definitions as timer_tools
-from meeko.voice_agent import build_settings
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -17,29 +10,6 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 @pytest.fixture(scope="session", autouse=True)
 def _load_env():
     load_dotenv()
-
-
-@pytest_asyncio.fixture
-async def dg_client():
-    key = os.environ["DEEPGRAM_API_KEY"]
-    return AsyncDeepgramClient(api_key=key)
-
-
-@pytest.fixture
-def agent_settings():
-    key = os.environ["CLAUDE_API_KEY"]
-    profile = Profile(
-        name="default",
-        wake_word="meeko",
-        prompt=(
-            "You are Meeko, an intelligent voice assistant. "
-            "Your responses will be spoken aloud via text-to-speech, "
-            "so never use emojis, markdown, or other formatting. "
-            "Keep your responses minimal."
-        ),
-        greeting="Hello! I'm Meeko. How can I help?",
-    )
-    return build_settings(key, profile, timer_tools())
 
 
 def read_wav_as_chunks(path: Path, chunk_bytes: int = 1600) -> list[bytes]:
