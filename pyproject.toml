@@ -17,6 +17,7 @@ dev = [
     "pre-commit>=4.5.1",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    "pytest-cov>=6.0",
     "rapidfuzz>=3.0",
     "ruff>=0.15.10",
 ]
@@ -31,6 +32,15 @@ filterwarnings = [
     "ignore::DeprecationWarning:deepgram",
     "ignore::DeprecationWarning:websockets",
 ]
+addopts = "--cov=meeko --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["meeko"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
 
 [tool.ruff]
 target-version = "py314"

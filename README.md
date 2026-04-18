@@ -90,10 +90,22 @@ Generate the WAV test fixtures (one-time, requires `DEEPGRAM_API_KEY`):
 uv run python tests/generate_fixtures.py
 ```
 
+Run the unit tests (with coverage report):
+
+```bash
+uv run pytest
+```
+
 Run the integration tests:
 
 ```bash
 uv run pytest -m integration    # calls external APIs (Deepgram, Claude)
+```
+
+Skip coverage for a faster run:
+
+```bash
+uv run pytest --no-cov
 ```
 
 ### Linting
