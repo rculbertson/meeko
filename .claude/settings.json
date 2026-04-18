@@ -1,6 +1,17 @@
 {
   "permissions": {
-    "allow": ["WebSearch", "Bash(uv *)", "WebFetch(domain:api.deepgram.com)"]
+    "allow": [
+      "WebSearch",
+      "Bash(uv *)",
+      "WebFetch(domain:api.deepgram.com)"
+    ]
+  },
+  "skillOverrides": {
+    "deepgram:starters": "off",
+    "deepgram:setup-mcp": "off"
+  },
+  "enabledPlugins": {
+    "deepgram@deepgram-agent-skills": true
   },
   "extraKnownMarketplaces": {
     "deepgram-agent-skills": {
@@ -9,12 +20,5 @@
         "repo": "deepgram/skills"
       }
     }
-  },
-  "enabledPlugins": {
-    "deepgram@deepgram-agent-skills": true
-  },
-  "skillOverrides": {
-    "deepgram:starters": "off",
-    "deepgram:setup-mcp": "off"
   }
 }
