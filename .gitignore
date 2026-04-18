@@ -22,5 +22,9 @@ mise.toml
 # Test fixtures (generated — see README)
 tests/fixtures/
 
+# Coverage data
+.coverage
+htmlcov/
+
 # Private docs (not for public repo)
 private/
