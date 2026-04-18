@@ -50,7 +50,7 @@ class TimerManager:
         duration_seconds: float,
         duration_display: str,
         label: str | None,
-    ):
+    ) -> str:
         duration_display = _singularize_units(duration_display)
         custom_label = label
         if not label:
@@ -85,7 +85,7 @@ class TimerManager:
         custom_label: str | None,
         duration_seconds: float,
         duration_display: str,
-    ):
+    ) -> None:
         try:
             await asyncio.sleep(duration_seconds)
             logger.info("Timer '%s' expired", label)

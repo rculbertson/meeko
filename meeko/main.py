@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from meeko.claude_client import ClaudeClient
 from meeko.deepgram_stt import DeepgramSTT
-from meeko.deepgram_tts import DeepgramTTS
+from meeko.deepgram_tts import DEFAULT_VOICE, DeepgramTTS
 from meeko.profiles import load_profiles
 from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.profile import ProfileManager
@@ -41,7 +41,7 @@ LOG_FILE = "meeko.log"
 logger = logging.getLogger("meeko")
 
 
-def setup_logging():
+def setup_logging() -> None:
     formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
     if os.environ.get("MEEKO_LOG_TARGET") == "file":
@@ -131,7 +131,7 @@ async def run():
             prev = state
             state = State.SPEAKING
             try:
-                audio = await tts.synthesize(text, voice=profile.voice)
+                audio = await tts.synthesize(text, voice=profile.voice or DEFAULT_VOICE)
                 # PyAudio write is blocking; run in a thread so the mic
                 # silence pump and STT receive loop keep running.
                 await asyncio.to_thread(speaker_stream.write, audio)
@@ -183,6 +183,7 @@ async def run():
                         continue
                     logger.info("[assistant] %s", reply)
                     await speak(reply)
+                    state = State.LISTENING
                 else:
                     logger.debug("STT event: %s", ev.event)
 
@@ -207,7 +208,7 @@ async def run():
             logger.info("Shutting down.")
 
 
-def main():
+def main() -> None:
     loop = asyncio.new_event_loop()
 
     def handle_sigint():

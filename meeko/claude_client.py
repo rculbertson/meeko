@@ -78,6 +78,6 @@ class ClaudeClient:
         return ""
 
 
-def _extract_text(blocks) -> str:
+def _extract_text(blocks: list[Any]) -> str:
     parts = [b.text for b in blocks if getattr(b, "type", None) == "text"]
     return " ".join(p.strip() for p in parts if p).strip()
