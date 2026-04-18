@@ -248,6 +248,11 @@ async def run():
             """Consume STT events, drive a Claude turn on EndOfTurn."""
             nonlocal state
             await speak(profile.greeting)
+            # If we want to make it faster, we can also use EagerEndOfTurn and
+            # TurnResumed events which allows us to send text to the LLM eagerly.
+            # If they're done talking, great, we already sent the text to the LLM.
+            # If not, we cancel the LLM request (or discard the result), and send
+            # the complete text. So may cost more since we throw away some results.
             async for ev in stt_session.events():
                 if stop_event.is_set():
                     return
@@ -271,8 +276,6 @@ async def run():
                         int((time.perf_counter() - t_turn) * 1000),
                     )
                     state = State.LISTENING
-                else:
-                    logger.debug("STT event: %s", ev.event)
 
         mic_stream.start_stream()
         logger.info("Mic active.")
