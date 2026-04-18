@@ -22,5 +22,6 @@ jobs:
             Review this pull request for code quality, correctness, security issues,
             and adherence to project conventions in CLAUDE.md. Post inline comments
             where relevant and a summary comment.
-          claude_args: "--max-turns 15"
+          claude_args: "--max-turns 10"
           show_full_output: true
+          allowed_tools: "Bash(git *),Bash(gh *)"
