@@ -1,6 +1,7 @@
 [profiles.default]
 wake_word = "meeko"
 greeting = "Hello! I'm Meeko. How can I help?"
+voice = "mars"
 prompt = """\
 You are Meeko, a voice assistant. \
 Your responses will be spoken aloud via text-to-speech, \

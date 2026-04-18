@@ -11,7 +11,7 @@ from deepgram import AsyncDeepgramClient
 
 logger = logging.getLogger("meeko")
 
-MODEL = "aura-2-asteria-en"
+DEFAULT_VOICE = "asteria"
 ENCODING = "linear16"
 CONTAINER = "none"
 SAMPLE_RATE = 16000
@@ -21,12 +21,13 @@ class DeepgramTTS:
     def __init__(self, api_key: str):
         self._client = AsyncDeepgramClient(api_key=api_key)
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize(self, text: str, voice: str = DEFAULT_VOICE) -> bytes:
         """Return the full PCM audio for ``text``."""
+        model = f"aura-2-{voice}-en"
         chunks: list[bytes] = []
         async for chunk in self._client.speak.v1.audio.generate(
             text=text,
-            model=MODEL,
+            model=model,
             encoding=ENCODING,
             container=CONTAINER,
             sample_rate=SAMPLE_RATE,
