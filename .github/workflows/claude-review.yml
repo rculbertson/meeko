@@ -22,4 +22,5 @@ jobs:
             Review this pull request for code quality, correctness, security issues,
             and adherence to project conventions in CLAUDE.md. Post inline comments
             where relevant and a summary comment.
-          claude_args: "--max-turns 5"
+          claude_args: "--max-turns 15"
+          show_full_output: true
