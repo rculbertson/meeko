@@ -7,7 +7,7 @@ making real API calls. End-to-end voice tests (mic → STT → Claude → TTS
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from meeko.claude_client import ClaudeClient
 from meeko.tools.dispatch import ToolDispatcher
@@ -46,7 +46,11 @@ def _build_client(responses, tool_handler):
         ],
         tool_handler,
     )
-    client = ClaudeClient(api_key="x", system_prompt="sys", dispatcher=dispatcher)
+    mock_anthropic = MagicMock()
+    with patch(
+        "meeko.claude_client.anthropic.AsyncAnthropic", return_value=mock_anthropic
+    ):
+        client = ClaudeClient(api_key="x", system_prompt="sys", dispatcher=dispatcher)
     create = AsyncMock(side_effect=responses)
     client._client.messages.create = create
     return client, create

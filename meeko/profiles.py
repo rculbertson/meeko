@@ -15,7 +15,7 @@ class Profile:
     wake_word: str
     prompt: str
     greeting: str
-    voice: str
+    voice: str | None = None
 
 
 def load_profiles(path: str | Path = "profiles.toml") -> dict[str, Profile]:
