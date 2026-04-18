@@ -22,9 +22,13 @@ MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
 MAX_TOOL_ROUNDS = 5
 
-# Split on terminal punctuation followed by whitespace. Occasional false
-# breaks on abbreviations ("Mr. Smith") only cause a small TTS gap.
-_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+# Split on terminal punctuation that looks like a real sentence break:
+#   - not preceded by a capital letter (skips "U.S.", "N.Y.", "Ph.D.")
+#   - followed by whitespace + a capital letter (skips "U.S. president",
+#     "i.e. something", ellipses mid-thought)
+# Still false-splits rare cases like "Mr. Smith", which the
+# inter-sentence pause smooths over.
+_SENTENCE_END_RE = re.compile(r"(?<![A-Z])[.!?](?=\s+[A-Z])")
 
 
 def _serialize_block(block: Any) -> dict[str, Any]:
