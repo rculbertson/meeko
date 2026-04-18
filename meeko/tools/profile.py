@@ -6,9 +6,13 @@ Claude call.
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 from meeko.profiles import Profile
 from meeko.tools.dispatch import ToolDefinition
+
+if TYPE_CHECKING:
+    from meeko.claude_client import ClaudeClient
 
 logger = logging.getLogger("meeko")
 
@@ -20,12 +24,14 @@ class ProfileManager:
     We take it as a protocol-ish dependency to avoid an import cycle.
     """
 
-    def __init__(self, profiles: dict[str, Profile], claude_client=None):
+    def __init__(
+        self, profiles: dict[str, Profile], claude_client: "ClaudeClient | None" = None
+    ):
         self._profiles = profiles
         self._active: str = "default"
         self._claude = claude_client
 
-    def set_claude_client(self, claude_client) -> None:
+    def set_claude_client(self, claude_client: "ClaudeClient") -> None:
         self._claude = claude_client
 
     @property

@@ -29,7 +29,7 @@ class ToolDispatcher:
         self,
         definitions: list[ToolDefinition],
         handler: ToolHandler,
-    ):
+    ) -> None:
         """Register a tool module's definitions and handler."""
         self._definitions.extend(definitions)
         for defn in definitions:
