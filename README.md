@@ -28,7 +28,7 @@ Create a `.env` file in the project root with your API keys:
 
 ```bash
 DEEPGRAM_API_KEY=your-deepgram-api-key
-CLAUDE_API_KEY=your-anthropic-api-key
+ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
 ### Running
