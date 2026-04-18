@@ -6,6 +6,7 @@ auto compaction, or persistence — those are separate steps.
 """
 
 import logging
+import time
 from typing import Any
 
 import anthropic
@@ -43,13 +44,26 @@ class ClaudeClient:
         return await self._run_until_text()
 
     async def _run_until_text(self) -> str:
-        for _ in range(MAX_TOOL_ROUNDS):
+        for round_idx in range(MAX_TOOL_ROUNDS):
+            api_start = time.perf_counter()
             response = await self._client.messages.create(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
                 system=self._system,
                 tools=self._tools,
                 messages=self._messages,
+            )
+            api_ms = (time.perf_counter() - api_start) * 1000
+            usage = getattr(response, "usage", None)
+            in_tok = getattr(usage, "input_tokens", None)
+            out_tok = getattr(usage, "output_tokens", None)
+            logger.debug(
+                "[timing] claude round=%d api=%dms in_tok=%s out_tok=%s stop=%s",
+                round_idx,
+                int(api_ms),
+                in_tok,
+                out_tok,
+                response.stop_reason,
             )
 
             # Persist the assistant turn verbatim so future turns see tool_use
