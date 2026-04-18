@@ -131,7 +131,7 @@ async def run():
             prev = state
             state = State.SPEAKING
             try:
-                audio = await tts.synthesize(text)
+                audio = await tts.synthesize(text, voice=profile.voice)
                 # PyAudio write is blocking; run in a thread so the mic
                 # silence pump and STT receive loop keep running.
                 await asyncio.to_thread(speaker_stream.write, audio)
