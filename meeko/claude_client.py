@@ -1,12 +1,15 @@
 """Thin wrapper around the Anthropic async client.
 
 Maintains the in-memory message history for a single Meeko session and
-runs the tool-use loop. Deliberately does not add prompt caching,
-auto compaction, or persistence — those are separate steps.
+runs the tool-use loop against Claude's streaming API, yielding
+sentence-sized text chunks as they are generated so the caller can
+begin TTS before the full reply is ready.
 """
 
 import logging
+import re
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import anthropic
@@ -18,6 +21,43 @@ logger = logging.getLogger("meeko")
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
 MAX_TOOL_ROUNDS = 5
+
+# Split on terminal punctuation followed by whitespace. Occasional false
+# breaks on abbreviations ("Mr. Smith") only cause a small TTS gap.
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+
+
+def _serialize_block(block: Any) -> dict[str, Any]:
+    """Serialize an assistant content block for replay in later turns.
+
+    The streaming SDK attaches helper fields (e.g. ``parsed_output``) to
+    text blocks that the Messages API rejects on input, so we emit only
+    the canonical fields per block type.
+    """
+    if block.type == "text":
+        return {"type": "text", "text": block.text}
+    if block.type == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": block.input,
+        }
+    return block.model_dump()
+
+
+def _pop_sentences(buffer: str) -> tuple[list[str], str]:
+    """Return (complete_sentences, remaining_buffer) — splits on
+    terminal punctuation and keeps any trailing partial sentence."""
+    sentences: list[str] = []
+    last_end = 0
+    for m in _SENTENCE_END_RE.finditer(buffer):
+        end = m.end()
+        piece = buffer[last_end:end].strip()
+        if piece:
+            sentences.append(piece)
+        last_end = end
+    return sentences, buffer[last_end:]
 
 
 class ClaudeClient:
@@ -37,45 +77,59 @@ class ClaudeClient:
     def set_system_prompt(self, prompt: str) -> None:
         self._system = prompt
 
-    async def turn(self, user_text: str) -> str:
-        """Run one user turn: append the message, loop through any tool
-        calls, return the final assistant text to be spoken."""
+    async def stream_turn(self, user_text: str) -> AsyncIterator[str]:
+        """Yield sentence chunks as Claude generates them, running the
+        tool-use loop across rounds. The caller drives TTS per chunk."""
         self._messages.append({"role": "user", "content": user_text})
-        return await self._run_until_text()
 
-    async def _run_until_text(self) -> str:
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
-            response = await self._client.messages.create(
+            ttft_ms: int | None = None
+            buffer = ""
+
+            async with self._client.messages.stream(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
                 system=self._system,
                 tools=self._tools,
                 messages=self._messages,
-            )
-            api_ms = (time.perf_counter() - api_start) * 1000
-            usage = getattr(response, "usage", None)
-            in_tok = getattr(usage, "input_tokens", None)
-            out_tok = getattr(usage, "output_tokens", None)
+            ) as stream:
+                async for delta in stream.text_stream:
+                    if ttft_ms is None:
+                        ttft_ms = int((time.perf_counter() - api_start) * 1000)
+                        logger.debug(
+                            "[timing] claude round=%d ttft=%dms",
+                            round_idx,
+                            ttft_ms,
+                        )
+                    buffer += delta
+                    sentences, buffer = _pop_sentences(buffer)
+                    for s in sentences:
+                        yield s
+                final = await stream.get_final_message()
+
+            tail = buffer.strip()
+            if tail:
+                yield tail
+
+            usage = getattr(final, "usage", None)
             logger.debug(
-                "[timing] claude round=%d api=%dms in_tok=%s out_tok=%s stop=%s",
+                "[timing] claude round=%d api_total=%dms in_tok=%s out_tok=%s stop=%s",
                 round_idx,
-                int(api_ms),
-                in_tok,
-                out_tok,
-                response.stop_reason,
+                int((time.perf_counter() - api_start) * 1000),
+                getattr(usage, "input_tokens", None),
+                getattr(usage, "output_tokens", None),
+                final.stop_reason,
             )
 
-            # Persist the assistant turn verbatim so future turns see tool_use
-            # blocks paired with matching tool_result blocks.
-            assistant_blocks = [block.model_dump() for block in response.content]
+            assistant_blocks = [_serialize_block(block) for block in final.content]
             self._messages.append({"role": "assistant", "content": assistant_blocks})
 
-            if response.stop_reason != "tool_use":
-                return _extract_text(response.content)
+            if final.stop_reason != "tool_use":
+                return
 
             tool_results = []
-            for block in response.content:
+            for block in final.content:
                 if block.type != "tool_use":
                     continue
                 result = await self._dispatcher.dispatch(block.name, block.input or {})
@@ -89,9 +143,3 @@ class ClaudeClient:
             self._messages.append({"role": "user", "content": tool_results})
 
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
-        return ""
-
-
-def _extract_text(blocks: list[Any]) -> str:
-    parts = [b.text for b in blocks if getattr(b, "type", None) == "text"]
-    return " ".join(p.strip() for p in parts if p).strip()

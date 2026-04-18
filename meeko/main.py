@@ -121,36 +121,36 @@ async def run():
     stop_event = asyncio.Event()
     speak_lock = asyncio.Lock()
 
-    async def speak(text: str) -> None:
-        """Synthesize + play `text`, holding the SPEAKING state so the
-        mic stays muted (silence fed to STT). Serializes concurrent
-        callers (e.g. main turn + timer expiry) with a lock.
-
-        Chunks are streamed directly from TTS into the speaker so
-        playback begins as soon as Deepgram returns the first byte."""
-        if not text:
-            return
+    async def speak_stream(texts) -> None:
+        """Stream TTS + playback for an async iterator of text chunks
+        under a single SPEAKING state + speak_lock. Each chunk's audio
+        plays sequentially; Claude and TTS for later chunks can run
+        concurrently with playback of earlier ones."""
         nonlocal state
         async with speak_lock:
             prev = state
             state = State.SPEAKING
             try:
                 voice = profile.voice or DEFAULT_VOICE
-                t_tts_start = time.perf_counter()
+                t_start = time.perf_counter()
                 t_first_play: float | None = None
-                async for chunk in tts.stream(text, voice=voice):
-                    if t_first_play is None:
-                        t_first_play = time.perf_counter()
-                        logger.debug(
-                            "[timing] first_audio_to_speaker=%dms",
-                            int((t_first_play - t_tts_start) * 1000),
-                        )
-                    # PyAudio write is blocking; run in a thread so the
-                    # mic silence pump and STT receive loop keep running.
-                    await asyncio.to_thread(speaker_stream.write, chunk)
+                async for text in texts:
+                    if not text:
+                        continue
+                    logger.info("[assistant] %s", text)
+                    async for chunk in tts.stream(text, voice=voice):
+                        if t_first_play is None:
+                            t_first_play = time.perf_counter()
+                            logger.debug(
+                                "[timing] first_audio_to_speaker=%dms",
+                                int((t_first_play - t_start) * 1000),
+                            )
+                        # PyAudio write is blocking; run in a thread so
+                        # the mic silence pump and STT loop keep going.
+                        await asyncio.to_thread(speaker_stream.write, chunk)
                 logger.debug(
                     "[timing] speak_total=%dms",
-                    int((time.perf_counter() - t_tts_start) * 1000),
+                    int((time.perf_counter() - t_start) * 1000),
                 )
                 # Tail-drain: speaker buffer may still be flushing.
                 await asyncio.sleep(1.0)
@@ -159,6 +159,16 @@ async def run():
             finally:
                 state = prev if prev != State.SPEAKING else State.LISTENING
                 logger.debug("speak complete, state=%s", state.name)
+
+    async def speak(text: str) -> None:
+        """Single-utterance convenience wrapper (greeting, timer)."""
+        if not text:
+            return
+
+        async def _one() -> asyncio.AsyncIterator[str]:
+            yield text
+
+        await speak_stream(_one())
 
     timer_manager.set_speak_callback(speak)
 
@@ -195,18 +205,11 @@ async def run():
                     state = State.PROCESSING
                     t_turn = time.perf_counter()
                     try:
-                        reply = await claude.turn(text)
+                        await speak_stream(claude.stream_turn(text))
                     except Exception:
                         logger.exception("Claude turn failed")
                         state = State.LISTENING
                         continue
-                    t_claude_done = time.perf_counter()
-                    logger.debug(
-                        "[timing] claude_total=%dms",
-                        int((t_claude_done - t_turn) * 1000),
-                    )
-                    logger.info("[assistant] %s", reply)
-                    await speak(reply)
                     logger.debug(
                         "[timing] turn_total_eot_to_speak_done=%dms",
                         int((time.perf_counter() - t_turn) * 1000),

@@ -1,9 +1,8 @@
-"""Unit tests for the ClaudeClient tool-use loop.
+"""Unit tests for the ClaudeClient streaming tool-use loop.
 
-Exercises the core Claude turn flow with the Anthropic client mocked,
-so we can verify tool_use routing + message-history bookkeeping without
-making real API calls. End-to-end voice tests (mic → STT → Claude → TTS
-→ speaker) are manual for now.
+Exercises stream_turn() with the Anthropic messages.stream context
+manager mocked, so we can verify sentence yielding, tool_use routing,
+and message-history bookkeeping without real API calls.
 """
 
 from types import SimpleNamespace
@@ -30,11 +29,37 @@ def _tool_use_block(*, id: str, name: str, input: dict) -> SimpleNamespace:
     return ns
 
 
-def _response(stop_reason: str, content: list) -> SimpleNamespace:
-    return SimpleNamespace(stop_reason=stop_reason, content=content)
+def _final_message(stop_reason: str, content: list) -> SimpleNamespace:
+    return SimpleNamespace(stop_reason=stop_reason, content=content, usage=None)
 
 
-def _build_client(responses, tool_handler):
+class _FakeStream:
+    """Mimics the async context manager returned by messages.stream()."""
+
+    def __init__(self, deltas: list[str], final: SimpleNamespace):
+        self._deltas = deltas
+        self._final = final
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    @property
+    def text_stream(self):
+        async def _iter():
+            for d in self._deltas:
+                yield d
+
+        return _iter()
+
+    async def get_final_message(self):
+        return self._final
+
+
+def _build_client(rounds: list[tuple[list[str], SimpleNamespace]], tool_handler):
+    """rounds[i] = (text_deltas, final_message) for each Claude round."""
     dispatcher = ToolDispatcher()
     dispatcher.register(
         [
@@ -51,39 +76,57 @@ def _build_client(responses, tool_handler):
         "meeko.claude_client.anthropic.AsyncAnthropic", return_value=mock_anthropic
     ):
         client = ClaudeClient(api_key="x", system_prompt="sys", dispatcher=dispatcher)
-    create = AsyncMock(side_effect=responses)
-    client._client.messages.create = create
-    return client, create
+
+    rounds_iter = iter(rounds)
+    stream_mock = MagicMock(side_effect=lambda **kw: _FakeStream(*next(rounds_iter)))
+    client._client.messages.stream = stream_mock
+    return client, stream_mock
 
 
-async def test_turn_without_tool_use_returns_text():
-    responses = [_response("end_turn", [_text_block("hello there")])]
-    client, create = _build_client(responses, AsyncMock(return_value="_"))
+async def _collect(aiter):
+    return [x async for x in aiter]
 
-    reply = await client.turn("hi")
 
-    assert reply == "hello there"
-    create.assert_awaited_once()
+async def test_stream_turn_yields_sentences_as_they_complete():
+    deltas = ["Hello", " there", ". How", " are you", "?"]
+    final = _final_message("end_turn", [_text_block("Hello there. How are you?")])
+    client, _ = _build_client([(deltas, final)], AsyncMock())
+
+    sentences = await _collect(client.stream_turn("hi"))
+
+    assert sentences == ["Hello there.", "How are you?"]
     # user + assistant recorded for next turn
     assert client._messages[0] == {"role": "user", "content": "hi"}
     assert client._messages[1]["role"] == "assistant"
 
 
-async def test_turn_executes_tool_use_then_returns_text():
-    responses = [
-        _response(
-            "tool_use",
-            [_tool_use_block(id="t1", name="echo", input={"v": 1})],
-        ),
-        _response("end_turn", [_text_block("done")]),
+async def test_stream_turn_flushes_tail_without_terminal_punctuation():
+    deltas = ["Just a fragment"]
+    final = _final_message("end_turn", [_text_block("Just a fragment")])
+    client, _ = _build_client([(deltas, final)], AsyncMock())
+
+    sentences = await _collect(client.stream_turn("hi"))
+
+    assert sentences == ["Just a fragment"]
+
+
+async def test_stream_turn_executes_tool_use_then_yields_text():
+    round1_final = _final_message(
+        "tool_use",
+        [_tool_use_block(id="t1", name="echo", input={"v": 1})],
+    )
+    round2_final = _final_message("end_turn", [_text_block("Done.")])
+    rounds = [
+        ([], round1_final),
+        (["Done."], round2_final),
     ]
     handler = AsyncMock(return_value="tool-result-body")
-    client, create = _build_client(responses, handler)
+    client, stream_mock = _build_client(rounds, handler)
 
-    reply = await client.turn("please run a tool")
+    sentences = await _collect(client.stream_turn("please run a tool"))
 
-    assert reply == "done"
-    assert create.await_count == 2
+    assert sentences == ["Done."]
+    assert stream_mock.call_count == 2
     handler.assert_awaited_once_with("echo", {"v": 1})
     # messages: user, assistant(tool_use), user(tool_result), assistant(text)
     assert len(client._messages) == 4
@@ -94,12 +137,28 @@ async def test_turn_executes_tool_use_then_returns_text():
     assert tool_result_msg["content"][0]["content"] == "tool-result-body"
 
 
+async def test_stream_turn_strips_extra_fields_from_stored_blocks():
+    """The streaming SDK attaches fields like parsed_output to text
+    blocks; those must not be replayed on later turns or Anthropic
+    rejects the request with a 400."""
+    text = SimpleNamespace(type="text", text="Hi.")
+    text.model_dump = lambda: {"type": "text", "text": "Hi.", "parsed_output": None}
+    final = _final_message("end_turn", [text])
+    client, _ = _build_client([(["Hi."], final)], AsyncMock())
+
+    await _collect(client.stream_turn("hello"))
+
+    stored = client._messages[1]
+    assert stored["role"] == "assistant"
+    assert stored["content"] == [{"type": "text", "text": "Hi."}]
+
+
 async def test_set_system_prompt_takes_effect_on_next_call():
-    responses = [_response("end_turn", [_text_block("ok")])]
-    client, create = _build_client(responses, AsyncMock())
+    final = _final_message("end_turn", [_text_block("ok")])
+    client, stream_mock = _build_client([(["ok"], final)], AsyncMock())
     client.set_system_prompt("new system")
 
-    await client.turn("hi")
+    await _collect(client.stream_turn("hi"))
 
-    kwargs = create.await_args.kwargs
+    kwargs = stream_mock.call_args.kwargs
     assert kwargs["system"] == "new system"
