@@ -13,6 +13,7 @@ import logging
 import logging.handlers
 import os
 import signal
+import time
 from enum import Enum, auto
 
 import pyaudio
@@ -123,7 +124,10 @@ async def run():
     async def speak(text: str) -> None:
         """Synthesize + play `text`, holding the SPEAKING state so the
         mic stays muted (silence fed to STT). Serializes concurrent
-        callers (e.g. main turn + timer expiry) with a lock."""
+        callers (e.g. main turn + timer expiry) with a lock.
+
+        Chunks are streamed directly from TTS into the speaker so
+        playback begins as soon as Deepgram returns the first byte."""
         if not text:
             return
         nonlocal state
@@ -131,10 +135,23 @@ async def run():
             prev = state
             state = State.SPEAKING
             try:
-                audio = await tts.synthesize(text, voice=profile.voice or DEFAULT_VOICE)
-                # PyAudio write is blocking; run in a thread so the mic
-                # silence pump and STT receive loop keep running.
-                await asyncio.to_thread(speaker_stream.write, audio)
+                voice = profile.voice or DEFAULT_VOICE
+                t_tts_start = time.perf_counter()
+                t_first_play: float | None = None
+                async for chunk in tts.stream(text, voice=voice):
+                    if t_first_play is None:
+                        t_first_play = time.perf_counter()
+                        logger.debug(
+                            "[timing] first_audio_to_speaker=%dms",
+                            int((t_first_play - t_tts_start) * 1000),
+                        )
+                    # PyAudio write is blocking; run in a thread so the
+                    # mic silence pump and STT receive loop keep running.
+                    await asyncio.to_thread(speaker_stream.write, chunk)
+                logger.debug(
+                    "[timing] speak_total=%dms",
+                    int((time.perf_counter() - t_tts_start) * 1000),
+                )
                 # Tail-drain: speaker buffer may still be flushing.
                 await asyncio.sleep(1.0)
                 while not mic_queue.empty():
@@ -164,6 +181,7 @@ async def run():
         async def handle_turns():
             """Consume STT events, drive a Claude turn on EndOfTurn."""
             nonlocal state
+            await speak(profile.greeting)
             async for ev in stt_session.events():
                 if stop_event.is_set():
                     return
@@ -175,23 +193,30 @@ async def run():
                     if not text:
                         continue
                     state = State.PROCESSING
+                    t_turn = time.perf_counter()
                     try:
                         reply = await claude.turn(text)
                     except Exception:
                         logger.exception("Claude turn failed")
                         state = State.LISTENING
                         continue
+                    t_claude_done = time.perf_counter()
+                    logger.debug(
+                        "[timing] claude_total=%dms",
+                        int((t_claude_done - t_turn) * 1000),
+                    )
                     logger.info("[assistant] %s", reply)
                     await speak(reply)
+                    logger.debug(
+                        "[timing] turn_total_eot_to_speak_done=%dms",
+                        int((time.perf_counter() - t_turn) * 1000),
+                    )
                     state = State.LISTENING
                 else:
                     logger.debug("STT event: %s", ev.event)
 
         mic_stream.start_stream()
         logger.info("Mic active.")
-
-        # Greeting (replaces the Deepgram Voice Agent "greeting" setting).
-        await speak(profile.greeting)
 
         try:
             await asyncio.gather(pump_mic(), handle_turns())
