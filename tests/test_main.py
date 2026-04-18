@@ -100,6 +100,20 @@ async def test_stream_turn_yields_sentences_as_they_complete():
     assert client._messages[1]["role"] == "assistant"
 
 
+async def test_stream_turn_does_not_split_on_abbreviation():
+    """Periods inside acronyms like "U.S." must not trigger a split
+    when followed by a lowercase word."""
+    deltas = ["In 1974, the U.S. president was Nixon."]
+    final = _final_message(
+        "end_turn", [_text_block("In 1974, the U.S. president was Nixon.")]
+    )
+    client, _ = _build_client([(deltas, final)], AsyncMock())
+
+    sentences = await _collect(client.stream_turn("hi"))
+
+    assert sentences == ["In 1974, the U.S. president was Nixon."]
+
+
 async def test_stream_turn_flushes_tail_without_terminal_punctuation():
     deltas = ["Just a fragment"]
     final = _final_message("end_turn", [_text_block("Just a fragment")])

@@ -37,6 +37,12 @@ FORMAT = pyaudio.paInt16
 CHUNK = 800  # 50ms at 16kHz (800 samples * 2 bytes = 1600 bytes per chunk)
 SILENCE_CHUNK = b"\x00" * (CHUNK * 2)
 
+# Silence inserted between pipelined TTS sentences so back-to-back
+# synthesis doesn't run into the next sentence without a natural pause.
+# 200ms at 16kHz 16-bit mono = 6400 bytes.
+INTER_SENTENCE_PAUSE_MS = 200
+INTER_SENTENCE_SILENCE = b"\x00" * (INTER_SENTENCE_PAUSE_MS * RATE * 2 // 1000)
+
 LOG_FILE = "meeko.log"
 
 logger = logging.getLogger("meeko")
@@ -122,10 +128,17 @@ async def run():
     speak_lock = asyncio.Lock()
 
     async def speak_stream(texts) -> None:
-        """Stream TTS + playback for an async iterator of text chunks
-        under a single SPEAKING state + speak_lock. Each chunk's audio
-        plays sequentially; Claude and TTS for later chunks can run
-        concurrently with playback of earlier ones."""
+        """Pipelined TTS + playback for an async iterator of text chunks.
+
+        A producer task synthesizes each sentence into its own inner
+        queue; a consumer drains inner queues in order and writes chunks
+        to the speaker. At most pipeline_depth sentences are synthesized
+        concurrently, so by the time sentence N finishes playing,
+        sentence N+1's bytes are already queued — eliminating the TTS
+        time-to-first-byte gap at sentence boundaries."""
+        pipeline_depth = 2
+        end_marker = object()
+
         nonlocal state
         async with speak_lock:
             prev = state
@@ -134,20 +147,63 @@ async def run():
                 voice = profile.voice or DEFAULT_VOICE
                 t_start = time.perf_counter()
                 t_first_play: float | None = None
-                async for text in texts:
-                    if not text:
-                        continue
-                    logger.info("[assistant] %s", text)
-                    async for chunk in tts.stream(text, voice=voice):
-                        if t_first_play is None:
-                            t_first_play = time.perf_counter()
-                            logger.debug(
-                                "[timing] first_audio_to_speaker=%dms",
-                                int((t_first_play - t_start) * 1000),
+
+                outer: asyncio.Queue = asyncio.Queue(maxsize=pipeline_depth)
+                tts_tasks: list[asyncio.Task] = []
+
+                async def tts_into(sentence: str, inner: asyncio.Queue) -> None:
+                    try:
+                        async for chunk in tts.stream(sentence, voice=voice):
+                            await inner.put(chunk)
+                    finally:
+                        await inner.put(None)
+
+                async def produce() -> None:
+                    async for sentence in texts:
+                        if not sentence:
+                            continue
+                        logger.info("[assistant] %s", sentence)
+                        inner: asyncio.Queue = asyncio.Queue()
+                        tts_tasks.append(asyncio.create_task(tts_into(sentence, inner)))
+                        await outer.put(inner)
+                    await outer.put(end_marker)
+
+                async def consume() -> None:
+                    nonlocal t_first_play
+                    first_sentence = True
+                    while True:
+                        inner = await outer.get()
+                        if inner is end_marker:
+                            return
+                        if not first_sentence:
+                            await asyncio.to_thread(
+                                speaker_stream.write, INTER_SENTENCE_SILENCE
                             )
-                        # PyAudio write is blocking; run in a thread so
-                        # the mic silence pump and STT loop keep going.
-                        await asyncio.to_thread(speaker_stream.write, chunk)
+                        first_sentence = False
+                        while True:
+                            chunk = await inner.get()
+                            if chunk is None:
+                                break
+                            if t_first_play is None:
+                                t_first_play = time.perf_counter()
+                                logger.debug(
+                                    "[timing] first_audio_to_speaker=%dms",
+                                    int((t_first_play - t_start) * 1000),
+                                )
+                            # PyAudio write is blocking; run in a thread
+                            # so the mic silence pump + STT loop run.
+                            await asyncio.to_thread(speaker_stream.write, chunk)
+
+                try:
+                    await asyncio.gather(produce(), consume())
+                finally:
+                    # Surface any TTS task errors; also ensures tasks
+                    # are cleaned up if produce/consume raised.
+                    for t in tts_tasks:
+                        if not t.done():
+                            t.cancel()
+                    await asyncio.gather(*tts_tasks, return_exceptions=True)
+
                 logger.debug(
                     "[timing] speak_total=%dms",
                     int((time.perf_counter() - t_start) * 1000),
