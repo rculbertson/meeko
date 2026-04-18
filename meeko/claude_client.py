@@ -15,7 +15,7 @@ from meeko.tools.dispatch import ToolDispatcher
 logger = logging.getLogger("meeko")
 
 MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 1024
+MAX_TOKENS = 8192
 MAX_TOOL_ROUNDS = 5
 
 
