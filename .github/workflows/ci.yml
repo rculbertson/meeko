@@ -24,6 +24,9 @@ jobs:
           python-version: "3.14"
           allow-prereleases: true
 
+      - name: Install system dependencies
+        run: sudo apt-get install -y portaudio19-dev
+
       - name: Install dependencies
         run: uv sync --group dev
 
