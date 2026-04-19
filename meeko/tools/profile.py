@@ -25,13 +25,13 @@ class ProfileManager:
     """
 
     def __init__(
-        self, profiles: dict[str, Profile], claude_client: "ClaudeClient | None" = None
+        self, profiles: dict[str, Profile], claude_client: ClaudeClient | None = None
     ):
         self._profiles = profiles
         self._active: str = "default"
         self._claude = claude_client
 
-    def set_claude_client(self, claude_client: "ClaudeClient") -> None:
+    def set_claude_client(self, claude_client: ClaudeClient) -> None:
         self._claude = claude_client
 
     @property
