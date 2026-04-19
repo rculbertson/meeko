@@ -37,7 +37,10 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Test
-        run: uv run pytest -m "not integration" --cov-report=xml
+        run: uv run pytest --cov-report=xml
+        env:
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
