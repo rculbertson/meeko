@@ -50,12 +50,19 @@ States: `IDLE → LISTENING → PROCESSING → SPEAKING → (barge-in back to LI
 
 Do not add: wake word detection, web/mobile UI, multi-user support, semantic search over sessions, session deletion by voice, cross-device sync. See `meeko-design.md` §9.
 
+## Testing
+
+- Any non-trivial change — new behavior, bug fix, or refactor of existing logic — must include updated or new tests
+- Tests live in `tests/`; use **pytest** and **pytest-asyncio** for async cases
+- Tests that require live API keys (Deepgram, Anthropic) must be marked `@pytest.mark.integration`; all other tests must be runnable offline
+- Run the full test suite before committing: `uv run pytest`
+- Trivial changes (docstrings, comments, config tweaks, logging) do not require tests
+
 ## Git Workflow
 - Always implement features on a new branch, never directly on main
-- Branch naming: rculbertson/<short-description>
-- Commit when a discrete, working piece is complete — not speculatively.
-  Each commit should represent something that compiles/runs correctly on its own.
-- When implementation is complete, run `git rebase -i main` to clean up the
-  commit history — squash WIP and fixup commits, keeping only commits that
-  represent a coherent, named step in the implementation
-- Open the PR with `gh pr create` when done
+- Branch naming: `<github-username>/<short-description>`
+- Commit when a discrete, working piece is complete; each commit should run correctly on its own
+
+## Before Opening a PR
+1. Commit any outstanding changes
+2. `gh pr create` — ruff and tests run automatically via pre-commit hooks
