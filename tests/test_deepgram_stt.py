@@ -14,10 +14,19 @@ def _make_msg(msg_type: str, **attrs):
     return m
 
 
+class _FakeWebsocket:
+    def __init__(self):
+        self.pings = 0
+
+    async def ping(self):
+        self.pings += 1
+
+
 class _FakeSocket:
     def __init__(self, messages: list):
         self.messages = messages
         self.sent: list[bytes] = []
+        self._websocket = _FakeWebsocket()
 
     async def send_media(self, pcm: bytes) -> None:
         self.sent.append(pcm)
@@ -104,6 +113,15 @@ async def test_send_audio_forwards_bytes():
         await sess.send_audio(b"\xde\xad\xbe\xef")
 
     assert socket.sent == [b"\xde\xad\xbe\xef"]
+
+
+async def test_send_keepalive_sends_websocket_ping():
+    stt, socket = _build_stt([])
+
+    async with stt.session() as sess:
+        await sess.send_keepalive()
+
+    assert socket._websocket.pings == 1
 
 
 async def test_multiple_turn_events_in_order():
