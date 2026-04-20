@@ -355,7 +355,7 @@ async def run():
                         grace_task.cancel()
                         try:
                             await grace_task
-                        except BaseException:
+                        except asyncio.CancelledError, Exception:
                             pass
                         grace_task = None
                     if not mic_capturing:
@@ -428,7 +428,7 @@ async def run():
             grace_task.cancel()
             try:
                 await grace_task
-            except BaseException:
+            except asyncio.CancelledError, Exception:
                 pass
         timer_manager.cancel_all_timers()
         if mic_capturing:
