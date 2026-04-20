@@ -4,7 +4,8 @@ This replaces the Deepgram Voice Agent wiring from the prototype. Claude
 is called directly; STT and TTS are Deepgram-only. Audio still runs over
 PyAudio with the default input/output device; ReSpeaker/sounddevice is
 a later step. Mic is muted (silence fed to STT) while the assistant
-speaks — true barge-in is also a later step.
+speaks — true barge-in is also a later step, driven by Deepgram's
+SpeechStarted event once hardware AEC (ReSpeaker XVF3800) is in place.
 """
 
 import asyncio
@@ -18,6 +19,7 @@ from enum import Enum, auto
 
 import pyaudio
 from dotenv import load_dotenv
+from websockets.exceptions import ConnectionClosed
 
 from meeko.claude_client import ClaudeClient
 from meeko.deepgram_stt import DeepgramSTT
@@ -35,7 +37,20 @@ RATE = 16000
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 CHUNK = 800  # 50ms at 16kHz (800 samples * 2 bytes = 1600 bytes per chunk)
-SILENCE_CHUNK = b"\x00" * (CHUNK * 2)
+
+# How often to send a Deepgram KeepAlive text frame while we're not
+# streaming mic audio. Deepgram documents 3–5s as the recommended cadence.
+KEEPALIVE_INTERVAL_S = 5
+
+# During an STT outage we keep capturing mic audio so a brief blip
+# doesn't drop the user's speech. After this many seconds we give up,
+# stop capture, and drain the queue until a clean reconnect.
+RECONNECT_GRACE_S = 10
+
+# Hard ceiling on buffered mic chunks. At 50ms chunks this is ~8min of
+# audio — we should never come close. Hitting it means something is
+# very wrong (e.g. pump_mic stuck); log and exit.
+MIC_QUEUE_MAX = 10000
 
 # Silence inserted between pipelined TTS sentences so back-to-back
 # synthesis doesn't run into the next sentence without a natural pause.
@@ -100,11 +115,19 @@ async def run():
     tts = DeepgramTTS(deepgram_key)
 
     pa = pyaudio.PyAudio()
-    mic_queue: asyncio.Queue[bytes] = asyncio.Queue()
+    mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MIC_QUEUE_MAX)
     loop = asyncio.get_event_loop()
+    stop_event = asyncio.Event()
 
     def mic_callback(in_data, frame_count, time_info, status):
-        loop.call_soon_threadsafe(mic_queue.put_nowait, in_data)
+        def enqueue() -> None:
+            try:
+                mic_queue.put_nowait(in_data)
+            except asyncio.QueueFull:
+                logger.error("mic_queue reached max size (%d); aborting", MIC_QUEUE_MAX)
+                stop_event.set()
+
+        loop.call_soon_threadsafe(enqueue)
         return (None, pyaudio.paContinue)
 
     mic_stream = pa.open(
@@ -124,7 +147,6 @@ async def run():
     )
 
     state = State.LISTENING
-    stop_event = asyncio.Event()
     speak_lock = asyncio.Lock()
 
     async def speak_stream(texts) -> None:
@@ -228,71 +250,194 @@ async def run():
 
     timer_manager.set_speak_callback(speak)
 
-    logger.info("Connecting to Deepgram STT (Flux)...")
+    async def pump_mic(stt_session):
+        """Forward mic chunks to STT; drop them while SPEAKING.
 
-    async with stt.session() as stt_session:
+        The keepalive_pump task holds the socket open while SPEAKING, so
+        we don't need to fill the audio channel with silence — and
+        dropping mic audio during speech removes the echo path on mics
+        without hardware AEC."""
+        while not stop_event.is_set():
+            try:
+                data = await asyncio.wait_for(mic_queue.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+            if state == State.SPEAKING:
+                continue
+            await stt_session.send_audio(data)
 
-        async def pump_mic():
-            """Forward mic chunks to STT; send silence while SPEAKING."""
-            while not stop_event.is_set():
-                try:
-                    data = await asyncio.wait_for(mic_queue.get(), timeout=0.1)
-                except TimeoutError:
+    async def keepalive_pump(stt_session):
+        """Send a Deepgram KeepAlive every few seconds so the session
+        stays open when we're not streaming audio."""
+        while not stop_event.is_set():
+            try:
+                await asyncio.sleep(KEEPALIVE_INTERVAL_S)
+                await stt_session.send_keepalive()
+            except ConnectionClosed:
+                return
+
+    async def handle_turns(stt_session):
+        """Consume STT events, drive a Claude turn on EndOfTurn."""
+        nonlocal state
+        # If we want to make it faster, we can also use EagerEndOfTurn and
+        # TurnResumed events which allows us to send text to the LLM eagerly.
+        # If they're done talking, great, we already sent the text to the LLM.
+        # If not, we cancel the LLM request (or discard the result), and send
+        # the complete text. So may cost more since we throw away some results.
+        async for ev in stt_session.events():
+            if stop_event.is_set():
+                return
+            if ev.event == "StartOfTurn":
+                logger.info("User started speaking")
+            elif ev.event == "EndOfTurn":
+                text = ev.transcript.strip()
+                logger.info("[user] %s", text)
+                if not text:
                     continue
-                if state == State.SPEAKING:
-                    await stt_session.send_audio(SILENCE_CHUNK)
-                else:
-                    await stt_session.send_audio(data)
-
-        async def handle_turns():
-            """Consume STT events, drive a Claude turn on EndOfTurn."""
-            nonlocal state
-            await speak(profile.greeting)
-            # If we want to make it faster, we can also use EagerEndOfTurn and
-            # TurnResumed events which allows us to send text to the LLM eagerly.
-            # If they're done talking, great, we already sent the text to the LLM.
-            # If not, we cancel the LLM request (or discard the result), and send
-            # the complete text. So may cost more since we throw away some results.
-            async for ev in stt_session.events():
-                if stop_event.is_set():
-                    return
-                if ev.event == "StartOfTurn":
-                    logger.info("User started speaking")
-                elif ev.event == "EndOfTurn":
-                    text = ev.transcript.strip()
-                    logger.info("[user] %s", text)
-                    if not text:
-                        continue
-                    state = State.PROCESSING
-                    t_turn = time.perf_counter()
-                    try:
-                        await speak_stream(claude.stream_turn(text))
-                    except Exception:
-                        logger.exception("Claude turn failed")
-                        state = State.LISTENING
-                        continue
-                    logger.debug(
-                        "[timing] turn_total_eot_to_speak_done=%dms",
-                        int((time.perf_counter() - t_turn) * 1000),
-                    )
+                state = State.PROCESSING
+                t_turn = time.perf_counter()
+                try:
+                    await speak_stream(claude.stream_turn(text))
+                except Exception:
+                    logger.exception("Claude turn failed")
                     state = State.LISTENING
+                    continue
+                logger.debug(
+                    "[timing] turn_total_eot_to_speak_done=%dms",
+                    int((time.perf_counter() - t_turn) * 1000),
+                )
+                state = State.LISTENING
 
-        mic_stream.start_stream()
-        logger.info("Mic active.")
+    mic_stream.start_stream()
+    logger.info("Mic active.")
 
-        try:
-            await asyncio.gather(pump_mic(), handle_turns())
-        except asyncio.CancelledError:
-            pass
-        finally:
-            stop_event.set()
-            timer_manager.cancel_all_timers()
+    # Reconnect backoff: 0.5s → 1 → 2 → 4 → 8 → 16 → 30 (cap), reset on
+    # a successful connect. The first failure in a streak logs the full
+    # traceback; subsequent failures log one line so a prolonged outage
+    # doesn't flood the logs.
+    backoff_schedule = [0.5, 1, 2, 4, 8, 16, 30]
+    consecutive_failures = 0
+
+    # On a brief STT outage we keep the mic running and buffer audio so
+    # the user's speech isn't dropped. If the outage exceeds
+    # RECONNECT_GRACE_S we stop capture and drain the queue until we
+    # reconnect cleanly. If we disconnected mid-SPEAKING we drain on
+    # reconnect so buffered TTS echo isn't flushed to the new session as
+    # a phantom user turn. Longer-term, hardware AEC (ReSpeaker XVF3800)
+    # will remove the echo path entirely and enable barge-in.
+
+    mic_capturing = True
+    grace_task: asyncio.Task | None = None
+    was_speaking_at_disconnect = False
+
+    def drain_mic_queue() -> None:
+        while not mic_queue.empty():
+            mic_queue.get_nowait()
+
+    async def grace_cutoff() -> None:
+        nonlocal mic_capturing
+        await asyncio.sleep(RECONNECT_GRACE_S)
+        logger.error(
+            "STT disconnected for %ds; stopping mic capture until reconnect",
+            RECONNECT_GRACE_S,
+        )
+        mic_stream.stop_stream()
+        mic_capturing = False
+        drain_mic_queue()
+
+    try:
+        await speak(profile.greeting)
+        while not stop_event.is_set():
+            logger.info("Connecting to Deepgram STT (Flux)...")
+            try:
+                async with stt.session() as stt_session:
+                    if grace_task is not None:
+                        grace_task.cancel()
+                        try:
+                            await grace_task
+                        except asyncio.CancelledError, Exception:
+                            pass
+                        grace_task = None
+                    if not mic_capturing:
+                        mic_stream.start_stream()
+                        mic_capturing = True
+                        logger.info("Mic capture resumed.")
+                    if was_speaking_at_disconnect:
+                        drain_mic_queue()
+                        was_speaking_at_disconnect = False
+                    if consecutive_failures > 0:
+                        logger.info(
+                            "STT reconnected after %d attempt(s)",
+                            consecutive_failures + 1,
+                        )
+                    consecutive_failures = 0
+                    session_tasks = [
+                        asyncio.create_task(pump_mic(stt_session)),
+                        asyncio.create_task(handle_turns(stt_session)),
+                        asyncio.create_task(keepalive_pump(stt_session)),
+                    ]
+                    try:
+                        done, pending = await asyncio.wait(
+                            session_tasks, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for t in pending:
+                            t.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        for t in done:
+                            exc = t.exception()
+                            if exc is not None:
+                                raise exc
+                    finally:
+                        for t in session_tasks:
+                            if not t.done():
+                                t.cancel()
+                        await asyncio.gather(*session_tasks, return_exceptions=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if state == State.SPEAKING:
+                    was_speaking_at_disconnect = True
+                state = State.LISTENING
+                if grace_task is None:
+                    grace_task = asyncio.create_task(grace_cutoff())
+                if consecutive_failures == 0:
+                    if isinstance(exc, ConnectionClosed):
+                        logger.exception("STT websocket closed; reconnecting")
+                    else:
+                        logger.exception("STT session failed; reconnecting")
+                else:
+                    logger.warning(
+                        "STT reconnect failed (attempt %d): %s",
+                        consecutive_failures + 1,
+                        exc,
+                    )
+                delay = backoff_schedule[
+                    min(consecutive_failures, len(backoff_schedule) - 1)
+                ]
+                consecutive_failures += 1
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    raise
+                continue
+    except asyncio.CancelledError:
+        pass
+    finally:
+        stop_event.set()
+        if grace_task is not None and not grace_task.done():
+            grace_task.cancel()
+            try:
+                await grace_task
+            except asyncio.CancelledError, Exception:
+                pass
+        timer_manager.cancel_all_timers()
+        if mic_capturing:
             mic_stream.stop_stream()
-            mic_stream.close()
-            speaker_stream.stop_stream()
-            speaker_stream.close()
-            pa.terminate()
-            logger.info("Shutting down.")
+        mic_stream.close()
+        speaker_stream.stop_stream()
+        speaker_stream.close()
+        pa.terminate()
+        logger.info("Shutting down.")
 
 
 def main() -> None:

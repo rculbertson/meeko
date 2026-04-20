@@ -47,6 +47,14 @@ class _Session:
     async def send_audio(self, pcm: bytes) -> None:
         await self._socket.send_media(pcm)
 
+    async def send_keepalive(self) -> None:
+        """Send a standard websocket ping frame to keep the connection
+        open when we're not streaming audio. v2 Flux does not have an
+        application-level keepalive (unlike v1 which uses
+        ``{"type":"KeepAlive"}``); the Deepgram JS SDK's v2 example uses
+        raw websocket pings for this purpose."""
+        await self._socket._websocket.ping()
+
     async def events(self):
         """Yield TurnEvent objects for each turn_info message.
 
