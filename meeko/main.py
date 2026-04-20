@@ -376,6 +376,8 @@ async def run():
         mic_capturing = False
         drain_mic_queue()
 
+    esc_task = asyncio.create_task(esc_listener(barge_in_event, stop_event))
+
     try:
         await speak(profile.greeting)
         while not stop_event.is_set():
@@ -406,7 +408,6 @@ async def run():
                         asyncio.create_task(pump_mic(stt_session)),
                         asyncio.create_task(handle_turns(stt_session)),
                         asyncio.create_task(keepalive_pump(stt_session)),
-                        asyncio.create_task(esc_listener(barge_in_event, stop_event)),
                     ]
                     try:
                         done, pending = await asyncio.wait(
@@ -462,6 +463,12 @@ async def run():
                 await grace_task
             except asyncio.CancelledError, Exception:
                 pass
+        # stop_event is set; esc_listener's reader thread will exit on
+        # its next poll. Await the task so we don't leave it pending.
+        try:
+            await asyncio.wait_for(esc_task, timeout=1.0)
+        except TimeoutError, asyncio.CancelledError, Exception:
+            esc_task.cancel()
         timer_manager.cancel_all_timers()
         if mic_capturing:
             mic_stream.stop_stream()
