@@ -221,7 +221,10 @@ async def run():
                             # so the mic silence pump + STT loop run.
                             await asyncio.to_thread(speaker_stream.write, chunk)
 
-                speak_task = asyncio.create_task(asyncio.gather(produce(), consume()))
+                async def _drive() -> None:
+                    await asyncio.gather(produce(), consume())
+
+                speak_task = asyncio.create_task(_drive())
                 barge_task = asyncio.create_task(barge_in_event.wait())
                 try:
                     done, _ = await asyncio.wait(
