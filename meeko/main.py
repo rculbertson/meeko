@@ -4,9 +4,8 @@ This replaces the Deepgram Voice Agent wiring from the prototype. Claude
 is called directly; STT and TTS are Deepgram-only. Audio still runs over
 PyAudio with the default input/output device; ReSpeaker/sounddevice is
 a later step. Mic is muted (silence fed to STT) while the assistant
-speaks. On macOS (no hardware AEC) pressing ESC triggers barge-in —
-cancels TTS and any in-flight Claude request. On the Pi the long-term
-barge-in trigger will be Deepgram's SpeechStarted event.
+speaks — true barge-in is also a later step, driven by Deepgram's
+SpeechStarted event once hardware AEC (ReSpeaker XVF3800) is in place.
 """
 
 import asyncio
@@ -25,7 +24,6 @@ from websockets.exceptions import ConnectionClosed
 from meeko.claude_client import ClaudeClient
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DEFAULT_VOICE, DeepgramTTS
-from meeko.keyboard import esc_listener
 from meeko.profiles import load_profiles
 from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.profile import ProfileManager
@@ -150,7 +148,6 @@ async def run():
 
     state = State.LISTENING
     speak_lock = asyncio.Lock()
-    barge_in_event = asyncio.Event()
 
     async def speak_stream(texts) -> None:
         """Pipelined TTS + playback for an async iterator of text chunks.
@@ -168,8 +165,6 @@ async def run():
         async with speak_lock:
             prev = state
             state = State.SPEAKING
-            barge_in_event.clear()
-            barged_in = False
             try:
                 voice = profile.voice or DEFAULT_VOICE
                 t_start = time.perf_counter()
@@ -221,48 +216,22 @@ async def run():
                             # so the mic silence pump + STT loop run.
                             await asyncio.to_thread(speaker_stream.write, chunk)
 
-                async def _drive() -> None:
-                    await asyncio.gather(produce(), consume())
-
-                speak_task = asyncio.create_task(_drive())
-                barge_task = asyncio.create_task(barge_in_event.wait())
                 try:
-                    done, _ = await asyncio.wait(
-                        {speak_task, barge_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if barge_task in done and not speak_task.done():
-                        barged_in = True
-                        logger.info("barge-in: ESC")
-                        speak_task.cancel()
-                        # Flush buffered audio so playback stops immediately.
-                        try:
-                            speaker_stream.stop_stream()
-                            speaker_stream.start_stream()
-                        except Exception:
-                            logger.exception("speaker flush on barge-in failed")
-                    try:
-                        await speak_task
-                    except asyncio.CancelledError, Exception:
-                        if not barged_in:
-                            raise
+                    await asyncio.gather(produce(), consume())
                 finally:
-                    if not barge_task.done():
-                        barge_task.cancel()
                     # Surface any TTS task errors; also ensures tasks
                     # are cleaned up if produce/consume raised.
                     for t in tts_tasks:
                         if not t.done():
                             t.cancel()
-                    await asyncio.gather(barge_task, *tts_tasks, return_exceptions=True)
+                    await asyncio.gather(*tts_tasks, return_exceptions=True)
 
                 logger.debug(
                     "[timing] speak_total=%dms",
                     int((time.perf_counter() - t_start) * 1000),
                 )
-                if not barged_in:
-                    # Tail-drain: speaker buffer may still be flushing.
-                    await asyncio.sleep(1.0)
+                # Tail-drain: speaker buffer may still be flushing.
+                await asyncio.sleep(1.0)
                 while not mic_queue.empty():
                     mic_queue.get_nowait()
             finally:
@@ -376,8 +345,6 @@ async def run():
         mic_capturing = False
         drain_mic_queue()
 
-    esc_task = asyncio.create_task(esc_listener(barge_in_event, stop_event))
-
     try:
         await speak(profile.greeting)
         while not stop_event.is_set():
@@ -463,12 +430,6 @@ async def run():
                 await grace_task
             except asyncio.CancelledError, Exception:
                 pass
-        # stop_event is set; esc_listener's reader thread will exit on
-        # its next poll. Await the task so we don't leave it pending.
-        try:
-            await asyncio.wait_for(esc_task, timeout=1.0)
-        except TimeoutError, asyncio.CancelledError, Exception:
-            esc_task.cancel()
         timer_manager.cancel_all_timers()
         if mic_capturing:
             mic_stream.stop_stream()
