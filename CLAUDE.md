@@ -14,7 +14,7 @@ The next milestones, in rough order, are: SQLite turn persistence → prompt cac
 
 ## Tech Stack
 
-- **Python 3.11+**, async/await throughout
+- **Python 3.14+**, async/await throughout
 - **Deepgram SDK** — STT (Flux model) and TTS (Aura-2) only; do not use Deepgram's Voice Agent API or managed LLM
 - **Anthropic SDK** — direct Claude API calls
 - **SQLite** — session and transcript storage
