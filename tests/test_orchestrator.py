@@ -196,7 +196,7 @@ async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles):
         return await real_sleep(delay, *a, **kw)
 
     with (
-        patch("meeko.main.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
         patch("meeko.main.load_profiles", return_value=fake_profiles),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
@@ -287,7 +287,7 @@ async def test_run_reconnects_stt_after_connection_closed(monkeypatch, fake_prof
         return await real_sleep(delay, *a, **kw)
 
     with (
-        patch("meeko.main.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
         patch("meeko.main.load_profiles", return_value=fake_profiles),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
@@ -337,7 +337,7 @@ async def test_run_backs_off_on_repeated_stt_failures(monkeypatch, fake_profiles
         return await real_sleep(0)
 
     with (
-        patch("meeko.main.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
         patch("meeko.main.load_profiles", return_value=fake_profiles),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
@@ -363,7 +363,9 @@ async def test_run_backs_off_on_repeated_stt_failures(monkeypatch, fake_profiles
 
     # Reconnect delays grow: 0.5, 1, 2, 4, ... (exclude the grace-cutoff
     # task's 10s sleep, which also goes through asyncio.sleep).
-    backoff_delays = [d for d in sleep_calls if d != meeko_main.RECONNECT_GRACE_S]
+    from meeko import stt_supervisor
+
+    backoff_delays = [d for d in sleep_calls if d != stt_supervisor.RECONNECT_GRACE_S]
     assert backoff_delays[:4] == [0.5, 1, 2, 4]
 
 
@@ -402,7 +404,7 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
         return await real_sleep(0)
 
     with (
-        patch("meeko.main.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
         patch("meeko.main.load_profiles", return_value=fake_profiles),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
@@ -459,7 +461,7 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles):
     fake_stt.events = []
 
     with (
-        patch("meeko.main.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
         patch("meeko.main.load_profiles", return_value=fake_profiles),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
@@ -470,7 +472,7 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles):
                 api_key, system_prompt, dispatcher
             ),
         ),
-        patch("meeko.main.MIC_QUEUE_MAX", 2),
+        patch("meeko.audio_io.MIC_QUEUE_MAX", 2),
         patch("meeko.main.setup_logging"),
     ):
         task = asyncio.create_task(meeko_main.run())
