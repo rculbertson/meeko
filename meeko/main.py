@@ -25,6 +25,7 @@ from meeko.claude_client import ClaudeClient
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
 from meeko.profiles import load_profiles
+from meeko.sessions import SessionStore, default_db_path
 from meeko.speaker import Speaker
 from meeko.stt_supervisor import KEEPALIVE_INTERVAL_S, STTSupervisor
 from meeko.tools.dispatch import ToolDispatcher
@@ -72,6 +73,12 @@ async def run():
     profiles = load_profiles()
     profile = profiles["default"]
 
+    store = SessionStore.open(default_db_path())
+    # Profile switches mid-session stay within this one DB session for
+    # now; revisit when the "new_session" intent lands.
+    session_id = await store.create_session(profile.name)
+    logger.info("Started session %s (profile=%s)", session_id, profile.name)
+
     profile_manager = ProfileManager(profiles)
 
     dispatcher = ToolDispatcher()
@@ -85,6 +92,8 @@ async def run():
         api_key=anthropic_key,
         system_prompt=profile.prompt,
         dispatcher=dispatcher,
+        store=store,
+        session_id=session_id,
     )
     profile_manager.set_claude_client(claude)
 
@@ -206,6 +215,7 @@ async def run():
         stop_event.set()
         timer_manager.cancel_all_timers()
         audio.close()
+        store.close()
         logger.info("Shutting down.")
 
 

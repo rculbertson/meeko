@@ -132,10 +132,12 @@ class _FakeTTSClient:
 
 
 class _FakeClaudeClient:
-    def __init__(self, api_key, system_prompt, dispatcher):
+    def __init__(self, api_key, system_prompt, dispatcher, **kwargs):
         self.api_key = api_key
         self.system_prompt = system_prompt
         self.dispatcher = dispatcher
+        self.store = kwargs.get("store")
+        self.session_id = kwargs.get("session_id")
         self.turns: list[str] = []
 
     def stream_turn(self, text):
@@ -160,9 +162,10 @@ def fake_profiles():
     }
 
 
-async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles):
+async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles, tmp_path):
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
 
     # Mic callback is never exercised here; mic_queue stays empty and
     # pump_mic just spins on its 100ms timeout.
@@ -182,8 +185,8 @@ async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles):
     fake_tts = _FakeTTSClient("dg-test")
     fake_claude_holder: dict = {}
 
-    def make_claude(api_key, system_prompt, dispatcher):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher)
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
         fake_claude_holder["client"] = c
         return c
 
@@ -261,9 +264,12 @@ class _ReconnectSTTSession:
         await asyncio.sleep(10)
 
 
-async def test_run_reconnects_stt_after_connection_closed(monkeypatch, fake_profiles):
+async def test_run_reconnects_stt_after_connection_closed(
+    monkeypatch, fake_profiles, tmp_path
+):
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
 
     pa_instance = MagicMock()
     mic_stream = MagicMock()
@@ -276,8 +282,8 @@ async def test_run_reconnects_stt_after_connection_closed(monkeypatch, fake_prof
     fake_stt = _ReconnectSTTClient("dg-test")
     fake_tts = _FakeTTSClient("dg-test")
 
-    def make_claude(api_key, system_prompt, dispatcher):
-        return _FakeClaudeClient(api_key, system_prompt, dispatcher)
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
 
     real_sleep = asyncio.sleep
 
@@ -308,11 +314,14 @@ async def test_run_reconnects_stt_after_connection_closed(monkeypatch, fake_prof
     assert fake_stt.session_count >= 2
 
 
-async def test_run_backs_off_on_repeated_stt_failures(monkeypatch, fake_profiles):
+async def test_run_backs_off_on_repeated_stt_failures(
+    monkeypatch, fake_profiles, tmp_path
+):
     """Repeated connect failures should sleep with increasing delays
     (0.5, 1, 2, ...) and only log a full traceback on the first failure."""
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
 
     pa_instance = MagicMock()
     pa_instance.open.side_effect = [MagicMock(), MagicMock()]
@@ -344,8 +353,8 @@ async def test_run_backs_off_on_repeated_stt_failures(monkeypatch, fake_profiles
         patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
         patch(
             "meeko.main.ClaudeClient",
-            side_effect=lambda api_key, system_prompt, dispatcher: _FakeClaudeClient(
-                api_key, system_prompt, dispatcher
+            side_effect=lambda api_key, system_prompt, dispatcher, **kw: (
+                _FakeClaudeClient(api_key, system_prompt, dispatcher, **kw)
             ),
         ),
         patch("meeko.main.asyncio.sleep", new=recording_sleep),
@@ -370,13 +379,14 @@ async def test_run_backs_off_on_repeated_stt_failures(monkeypatch, fake_profiles
 
 
 async def test_grace_cutoff_stops_mic_and_drains_after_outage(
-    monkeypatch, fake_profiles
+    monkeypatch, fake_profiles, tmp_path
 ):
     """After RECONNECT_GRACE_S of failed reconnects the mic is stopped
     and mic_queue is drained; a subsequent successful session restarts
     the mic."""
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
 
     pa_instance = MagicMock()
     mic_stream = MagicMock()
@@ -411,8 +421,8 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
         patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
         patch(
             "meeko.main.ClaudeClient",
-            side_effect=lambda api_key, system_prompt, dispatcher: _FakeClaudeClient(
-                api_key, system_prompt, dispatcher
+            side_effect=lambda api_key, system_prompt, dispatcher, **kw: (
+                _FakeClaudeClient(api_key, system_prompt, dispatcher, **kw)
             ),
         ),
         patch("meeko.main.asyncio.sleep", new=fast_sleep),
@@ -437,11 +447,12 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
     assert mic_stream.stop_stream.call_count >= 2
 
 
-async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles):
+async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_path):
     """If mic_callback can't enqueue because the queue is at MIC_QUEUE_MAX,
     it logs and sets stop_event so run() exits cleanly."""
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
 
     pa_instance = MagicMock()
     mic_stream = MagicMock()
@@ -468,8 +479,8 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles):
         patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
         patch(
             "meeko.main.ClaudeClient",
-            side_effect=lambda api_key, system_prompt, dispatcher: _FakeClaudeClient(
-                api_key, system_prompt, dispatcher
+            side_effect=lambda api_key, system_prompt, dispatcher, **kw: (
+                _FakeClaudeClient(api_key, system_prompt, dispatcher, **kw)
             ),
         ),
         patch("meeko.audio_io.MIC_QUEUE_MAX", 2),

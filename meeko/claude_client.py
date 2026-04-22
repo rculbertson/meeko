@@ -14,6 +14,7 @@ from typing import Any
 
 import anthropic
 
+from meeko.sessions import SessionStore
 from meeko.tools.dispatch import ToolDispatcher
 
 logger = logging.getLogger("meeko")
@@ -71,12 +72,16 @@ class ClaudeClient:
         api_key: str,
         system_prompt: str,
         dispatcher: ToolDispatcher,
+        store: SessionStore | None = None,
+        session_id: str | None = None,
     ):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._system = system_prompt
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
         self._messages: list[dict[str, Any]] = []
+        self._store = store
+        self._session_id = session_id
 
     def set_system_prompt(self, prompt: str) -> None:
         self._system = prompt
@@ -85,6 +90,7 @@ class ClaudeClient:
         """Yield sentence chunks as Claude generates them, running the
         tool-use loop across rounds. The caller drives TTS per chunk."""
         self._messages.append({"role": "user", "content": user_text})
+        await self._persist("user", user_text)
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
@@ -128,6 +134,7 @@ class ClaudeClient:
 
             assistant_blocks = [_serialize_block(block) for block in final.content]
             self._messages.append({"role": "assistant", "content": assistant_blocks})
+            await self._persist("assistant", assistant_blocks)
 
             if final.stop_reason != "tool_use":
                 return
@@ -145,5 +152,11 @@ class ClaudeClient:
                     }
                 )
             self._messages.append({"role": "user", "content": tool_results})
+            await self._persist("user", tool_results)
 
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
+
+    async def _persist(self, role: str, content: str | list[dict[str, Any]]) -> None:
+        if self._store is None or self._session_id is None:
+            return
+        await self._store.persist_turn(self._session_id, role, content)
