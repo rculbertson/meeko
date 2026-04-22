@@ -61,10 +61,11 @@ def test_state_enum_members():
     assert {s.name for s in State} == {"LISTENING", "PROCESSING", "SPEAKING"}
 
 
-def test_main_drives_run_to_completion():
+def test_main_drives_run_to_completion(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["meeko"])
     ran = {"count": 0}
 
-    async def fake_run():
+    async def fake_run(**kwargs):
         ran["count"] += 1
 
     with patch("meeko.main.run", new=fake_run):
@@ -73,8 +74,10 @@ def test_main_drives_run_to_completion():
     assert ran["count"] == 1
 
 
-def test_main_swallows_keyboard_interrupt():
-    async def raising_run():
+def test_main_swallows_keyboard_interrupt(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["meeko"])
+
+    async def raising_run(**kwargs):
         raise KeyboardInterrupt
 
     with patch("meeko.main.run", new=raising_run):
@@ -139,6 +142,7 @@ class _FakeClaudeClient:
         self.store = kwargs.get("store")
         self.session_id = kwargs.get("session_id")
         self.turns: list[str] = []
+        self.loaded_history: list[dict] | None = None
 
     def stream_turn(self, text):
         self.turns.append(text)
@@ -147,6 +151,9 @@ class _FakeClaudeClient:
             yield "Hi."
 
         return _gen()
+
+    def load_history(self, messages):
+        self.loaded_history = list(messages)
 
 
 @pytest.fixture
@@ -504,6 +511,132 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
             pytest.fail("run() did not exit after mic_queue overflow")
+
+
+async def test_run_resume_preloads_history_and_skips_greeting(
+    monkeypatch, fake_profiles, tmp_path
+):
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    # Seed a session with two prior turns.
+    seed = SessionStore.open(db_path)
+    try:
+        session_id = await seed.create_session("default")
+        await seed.persist_turn(session_id, "user", "prior question")
+        await seed.persist_turn(
+            session_id, "assistant", [{"type": "text", "text": "prior reply"}]
+        )
+    finally:
+        seed.close()
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+
+    fake_stt = _FakeSTTClient("dg-test")
+    fake_stt.events = []  # no turns needed — we just need run() to start up
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    # Give the fake profile a non-empty greeting so we can assert TTS
+    # was NOT called with it on resume.
+    resume_profiles = {
+        "default": Profile(
+            name="default",
+            wake_word="meeko",
+            prompt="system",
+            greeting="Hello there.",
+            voice=None,
+        )
+    }
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=resume_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run(resume=session_id))
+        # Let the task get past construction and into the supervisor loop.
+        for _ in range(50):
+            if "client" in fake_claude_holder:
+                break
+            await real_sleep(0)
+        # Extra spins so the post-construct greeting branch (if any) runs.
+        for _ in range(20):
+            await real_sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    claude = fake_claude_holder["client"]
+    assert claude.session_id == session_id
+    assert claude.loaded_history == [
+        {"role": "user", "content": "prior question"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "prior reply"}],
+        },
+    ]
+    # Greeting must NOT have been spoken on resume.
+    assert fake_tts.calls == []
+
+
+async def test_run_resume_unknown_id_exits(monkeypatch, fake_profiles, tmp_path):
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+
+    with (
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.setup_logging"),
+    ):
+        with pytest.raises(SystemExit):
+            await meeko_main.run(resume="does-not-exist")
+
+
+async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsys):
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    seed = SessionStore.open(db_path)
+    try:
+        sid = await seed.create_session("default")
+        await seed.persist_turn(sid, "user", "hi")
+    finally:
+        seed.close()
+
+    with patch("meeko.main.setup_logging"):
+        await meeko_main.run(list_sessions=True)
+
+    out = capsys.readouterr().out
+    assert sid in out
+    assert "default" in out
 
 
 async def test_run_missing_api_key_raises(monkeypatch):

@@ -86,6 +86,9 @@ class ClaudeClient:
     def set_system_prompt(self, prompt: str) -> None:
         self._system = prompt
 
+    def load_history(self, messages: list[dict[str, Any]]) -> None:
+        self._messages = list(messages)
+
     async def stream_turn(self, user_text: str) -> AsyncIterator[str]:
         """Yield sentence chunks as Claude generates them, running the
         tool-use loop across rounds. The caller drives TTS per chunk."""

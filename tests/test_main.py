@@ -275,6 +275,23 @@ async def test_stream_turn_persists_tool_round_messages(tmp_path):
         store.close()
 
 
+async def test_load_history_preloads_messages_sent_on_next_turn():
+    final = _final_message("end_turn", [_text_block("ok")])
+    client, stream_mock = _build_client([(["ok"], final)], AsyncMock())
+    prior = [
+        {"role": "user", "content": "first thing"},
+        {"role": "assistant", "content": [{"type": "text", "text": "reply"}]},
+    ]
+    client.load_history(prior)
+
+    await _collect(client.stream_turn("follow up"))
+
+    sent = stream_mock.call_args.kwargs["messages"]
+    # Prior turns appear first, then the new user turn.
+    assert sent[:2] == prior
+    assert sent[2] == {"role": "user", "content": "follow up"}
+
+
 async def test_set_system_prompt_takes_effect_on_next_call():
     final = _final_message("end_turn", [_text_block("ok")])
     client, stream_mock = _build_client([(["ok"], final)], AsyncMock())

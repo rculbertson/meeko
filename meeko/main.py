@@ -8,12 +8,14 @@ speaks — true barge-in is also a later step, driven by Deepgram's
 SpeechStarted event once hardware AEC (ReSpeaker XVF3800) is in place.
 """
 
+import argparse
 import asyncio
 import functools
 import logging
 import logging.handlers
 import os
 import signal
+import sys
 import time
 from enum import Enum, auto
 
@@ -63,21 +65,88 @@ class State(Enum):
     SPEAKING = auto()
 
 
-async def run():
+RESUME_LATEST = "__latest__"
+
+
+async def _list_sessions_cmd(store: SessionStore) -> None:
+    rows = await store.list_sessions()
+    if not rows:
+        print("No sessions yet.")
+        return
+    print(f"{'id':36}  {'profile':12}  {'last_active':32}  turns")
+    for r in rows:
+        print(
+            f"{r['id']:36}  {r['profile_name']:12}  {r['last_active']:32}  "
+            f"{r['turn_count']}"
+        )
+
+
+async def _resolve_resume(store: SessionStore, resume: str) -> dict[str, object] | None:
+    """Return the session row to resume, or None to fall back to new."""
+    if resume == RESUME_LATEST:
+        row = await store.get_latest_session()
+        if row is None:
+            logger.info("No prior sessions, starting new")
+            return None
+        return row
+    row = await store.get_session(resume)
+    if row is None:
+        print(f"No session with id {resume!r}", file=sys.stderr)
+        raise SystemExit(1)
+    return row
+
+
+async def run(resume: str | None = None, list_sessions: bool = False):
     setup_logging()
+
+    if list_sessions:
+        store = SessionStore.open(default_db_path())
+        try:
+            await _list_sessions_cmd(store)
+        finally:
+            store.close()
+        return
+
     load_dotenv()
 
     deepgram_key = os.environ["DEEPGRAM_API_KEY"]
     anthropic_key = os.environ["ANTHROPIC_API_KEY"]
 
     profiles = load_profiles()
-    profile = profiles["default"]
 
     store = SessionStore.open(default_db_path())
-    # Profile switches mid-session stay within this one DB session for
-    # now; revisit when the "new_session" intent lands.
-    session_id = await store.create_session(profile.name)
-    logger.info("Started session %s (profile=%s)", session_id, profile.name)
+
+    resumed_row: dict[str, object] | None = None
+    if resume is not None:
+        resumed_row = await _resolve_resume(store, resume)
+
+    if resumed_row is not None:
+        session_id = str(resumed_row["id"])
+        stored_profile = str(resumed_row["profile_name"])
+        if stored_profile in profiles:
+            profile = profiles[stored_profile]
+        else:
+            logger.warning(
+                "Session %s profile %r missing; falling back to default",
+                session_id,
+                stored_profile,
+            )
+            profile = profiles["default"]
+        await store.touch_session(session_id)
+        history = await store.load_turns(session_id)
+        logger.info(
+            "Resumed session %s (profile=%s, %d turns)",
+            session_id[:8],
+            profile.name,
+            len(history),
+        )
+    else:
+        profile = profiles["default"]
+        # Profile switches mid-session stay within this one DB session for
+        # now; revisit when the "new_session" intent lands.
+        session_id = await store.create_session(profile.name)
+        history = None
+        logger.info("Started session %s (profile=%s)", session_id, profile.name)
 
     profile_manager = ProfileManager(profiles)
 
@@ -95,6 +164,8 @@ async def run():
         store=store,
         session_id=session_id,
     )
+    if history:
+        claude.load_history(history)
     profile_manager.set_claude_client(claude)
 
     stt = DeepgramSTT(deepgram_key)
@@ -207,7 +278,8 @@ async def run():
     logger.info("Mic active.")
 
     try:
-        await speaker.speak(profile.greeting)
+        if resumed_row is None:
+            await speaker.speak(profile.greeting)
         await supervisor.run()
     except asyncio.CancelledError:
         pass
@@ -219,7 +291,26 @@ async def run():
         logger.info("Shutting down.")
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="meeko")
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const=RESUME_LATEST,
+        default=None,
+        metavar="SESSION_ID",
+        help="Resume a prior session. With no value, resumes the most recent.",
+    )
+    parser.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="Print prior sessions and exit.",
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    args = _parse_args()
     loop = asyncio.new_event_loop()
 
     def handle_sigint():
@@ -229,7 +320,9 @@ def main() -> None:
     loop.add_signal_handler(signal.SIGINT, handle_sigint)
 
     try:
-        loop.run_until_complete(run())
+        loop.run_until_complete(
+            run(resume=args.resume, list_sessions=args.list_sessions)
+        )
     except KeyboardInterrupt:
         pass
     finally:

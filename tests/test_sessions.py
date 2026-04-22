@@ -133,6 +133,75 @@ async def test_multiple_sessions_isolated(tmp_path, store):
     assert [r[0] for r in b_rows] == ["user"]
 
 
+async def test_get_latest_returns_none_when_empty(store):
+    assert await store.get_latest_session() is None
+
+
+async def test_get_latest_returns_most_recent_by_last_active(store):
+    a = await store.create_session("default")
+    b = await store.create_session("pirate")
+    # b was created later, so b should be latest
+    latest = await store.get_latest_session()
+    assert latest["id"] == b
+
+    # Persisting a turn on `a` moves it to the top.
+    await store.persist_turn(a, "user", "ping")
+    latest = await store.get_latest_session()
+    assert latest["id"] == a
+    assert latest["profile_name"] == "default"
+
+
+async def test_get_session_by_id(store):
+    sid = await store.create_session("default")
+    row = await store.get_session(sid)
+    assert row["id"] == sid
+    assert row["profile_name"] == "default"
+    assert await store.get_session("no-such-id") is None
+
+
+async def test_list_sessions_orders_and_counts(store):
+    a = await store.create_session("default")
+    b = await store.create_session("pirate")
+    await store.persist_turn(a, "user", "hi")
+    await store.persist_turn(a, "assistant", [{"type": "text", "text": "hey"}])
+    await store.persist_turn(b, "user", "yo")
+
+    rows = await store.list_sessions()
+    # b was created after a and has the later turn write; but a's last
+    # turn is the most recent. Whichever has higher last_active comes
+    # first — so just check ordering by last_active and turn counts.
+    assert len(rows) == 2
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[a]["turn_count"] == 2
+    assert by_id[b]["turn_count"] == 1
+    # Ordered by last_active DESC.
+    assert rows[0]["last_active"] >= rows[1]["last_active"]
+
+
+async def test_load_turns_roundtrips_mixed_content(store):
+    sid = await store.create_session("default")
+    await store.persist_turn(sid, "user", "hello")
+    blocks = [
+        {"type": "text", "text": "Hi."},
+        {"type": "tool_use", "id": "t1", "name": "echo", "input": {"v": 1}},
+    ]
+    await store.persist_turn(sid, "assistant", blocks)
+
+    turns = await store.load_turns(sid)
+    assert turns == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": blocks},
+    ]
+
+
+async def test_touch_session_updates_last_active(store):
+    sid = await store.create_session("default")
+    before = (await store.get_session(sid))["last_active"]
+    await store.touch_session(sid)
+    after = (await store.get_session(sid))["last_active"]
+    assert after >= before
+
+
 def test_default_db_path_honors_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "custom.db"))
     assert default_db_path() == tmp_path / "custom.db"
