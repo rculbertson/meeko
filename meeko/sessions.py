@@ -106,5 +106,69 @@ class SessionStore:
     ) -> None:
         await asyncio.to_thread(self._persist_turn_sync, session_id, role, content)
 
+    def _get_latest_session_sync(self) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, profile_name, last_active FROM sessions "
+            "ORDER BY last_active DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "profile_name": row[1], "last_active": row[2]}
+
+    async def get_latest_session(self) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_latest_session_sync)
+
+    def _get_session_sync(self, session_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, profile_name, last_active FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "profile_name": row[1], "last_active": row[2]}
+
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_session_sync, session_id)
+
+    def _list_sessions_sync(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT s.id, s.profile_name, s.last_active, COUNT(t.id) "
+            "FROM sessions s LEFT JOIN turns t ON t.session_id = s.id "
+            "GROUP BY s.id "
+            "ORDER BY s.last_active DESC"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "profile_name": r[1],
+                "last_active": r[2],
+                "turn_count": r[3],
+            }
+            for r in rows
+        ]
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_sessions_sync)
+
+    def _load_turns_sync(self, session_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT role, content FROM turns WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        return [{"role": r[0], "content": json.loads(r[1])} for r in rows]
+
+    async def load_turns(self, session_id: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._load_turns_sync, session_id)
+
+    def _touch_session_sync(self, session_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET last_active = ? WHERE id = ?",
+                (_now(), session_id),
+            )
+
+    async def touch_session(self, session_id: str) -> None:
+        await asyncio.to_thread(self._touch_session_sync, session_id)
+
     def close(self) -> None:
         self._conn.close()
