@@ -1,11 +1,16 @@
 """Meeko orchestrator: mic → Deepgram STT → Claude → Deepgram TTS → speaker.
 
 This replaces the Deepgram Voice Agent wiring from the prototype. Claude
-is called directly; STT and TTS are Deepgram-only. Audio still runs over
-PyAudio with the default input/output device; ReSpeaker/sounddevice is
-a later step. Mic is muted (silence fed to STT) while the assistant
-speaks — true barge-in is also a later step, driven by Deepgram's
-SpeechStarted event once hardware AEC (ReSpeaker XVF3800) is in place.
+is called directly; STT and TTS are Deepgram-only. Audio runs over
+PyAudio.
+
+By default the mic stays open during TTS — we rely on the ReSpeaker
+XVF3800's hardware AEC to suppress echo, and any EndOfTurn that still
+fires while SPEAKING is logged as `[echo?]` and ignored so it can't
+start a spurious Claude turn. For Mac / no-AEC development, set
+`MEEKO_MUTE_MIC_WHILE_SPEAKING=1`: mic chunks are dropped while
+SPEAKING and the mic queue is drained after playback. True barge-in
+(acting on `SpeechStarted` during SPEAKING) is a later step.
 """
 
 import argparse
@@ -111,6 +116,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     deepgram_key = os.environ["DEEPGRAM_API_KEY"]
     anthropic_key = os.environ["ANTHROPIC_API_KEY"]
+    mute_mic_while_speaking = os.environ.get(
+        "MEEKO_MUTE_MIC_WHILE_SPEAKING", ""
+    ).strip().lower() in {"1", "true", "yes"}
 
     profiles = load_profiles()
 
@@ -186,22 +194,28 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         nonlocal state
         state = prev if prev != State.SPEAKING else State.LISTENING
 
-    speaker = Speaker(tts, audio, profile, enter_speaking, exit_speaking)
+    speaker = Speaker(
+        tts,
+        audio,
+        profile,
+        enter_speaking,
+        exit_speaking,
+        mute_mic_while_speaking=mute_mic_while_speaking,
+    )
     timer_manager.set_speak_callback(speaker.speak)
 
     async def pump_mic(stt_session):
-        """Forward mic chunks to STT; drop them while SPEAKING.
+        """Forward mic chunks to STT.
 
-        The keepalive_pump task holds the socket open while SPEAKING, so
-        we don't need to fill the audio channel with silence — and
-        dropping mic audio during speech removes the echo path on mics
-        without hardware AEC."""
+        With MEEKO_MUTE_MIC_WHILE_SPEAKING set, chunks are dropped while
+        the assistant is SPEAKING (Mac / no-AEC dev path). Otherwise the
+        pump stays on and we rely on hardware AEC to suppress echo."""
         while not stop_event.is_set():
             try:
                 data = await asyncio.wait_for(audio.mic_queue.get(), timeout=0.1)
             except TimeoutError:
                 continue
-            if state == State.SPEAKING:
+            if mute_mic_while_speaking and state == State.SPEAKING:
                 continue
             await stt_session.send_audio(data)
 
@@ -227,9 +241,14 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             if stop_event.is_set():
                 return
             if ev.event == "StartOfTurn":
-                logger.info("User started speaking")
+                logger.info("User started speaking (state=%s)", state.name)
             elif ev.event == "EndOfTurn":
                 text = ev.transcript.strip()
+                if state == State.SPEAKING:
+                    # AEC observation mode: don't start a Claude turn while
+                    # we're talking. Log so we can gauge echo leakage.
+                    logger.info("[echo?] %s", text)
+                    continue
                 logger.info("[user] %s", text)
                 if not text:
                     continue

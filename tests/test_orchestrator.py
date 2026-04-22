@@ -226,14 +226,99 @@ async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles, tmp_pa
     claude = fake_claude_holder["client"]
     assert claude.turns == ["hello"]
     assert fake_tts.calls == [("Hi.", "asteria")]
-    # First speaker.write call received the TTS chunk we yielded.
-    speaker_stream.write.assert_any_call(b"\x01\x02\x03\x04")
+    # Speaker.write receives the TTS chunk duplicated into stereo
+    # (L/R from the mono TTS sample).
+    speaker_stream.write.assert_any_call(b"\x01\x02\x01\x02\x03\x04\x03\x04")
     # Cleanup was executed in run()'s finally block.
     mic_stream.stop_stream.assert_called()
     mic_stream.close.assert_called()
     speaker_stream.stop_stream.assert_called()
     speaker_stream.close.assert_called()
     pa_instance.terminate.assert_called()
+
+
+async def test_mute_mic_while_speaking_drops_chunks_during_speaking(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """With MEEKO_MUTE_MIC_WHILE_SPEAKING=1, mic audio captured while
+    the assistant is SPEAKING must not reach the STT session."""
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+    monkeypatch.setenv("MEEKO_MUTE_MIC_WHILE_SPEAKING", "1")
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    captured_cb: dict = {}
+
+    def open_stream(**kwargs):
+        if kwargs.get("input"):
+            captured_cb["cb"] = kwargs["stream_callback"]
+            return mic_stream
+        return speaker_stream
+
+    pa_instance.open.side_effect = open_stream
+
+    first_speaker_write = asyncio.Event()
+    release_tts = asyncio.Event()
+    speaker_stream.write.side_effect = lambda data: first_speaker_write.set()
+
+    fake_stt = _FakeSTTClient("dg-test")
+
+    class _SlowTTS:
+        """Yield one chunk, then block until the test releases us —
+        keeps the state machine in SPEAKING while we push mic audio."""
+
+        def __init__(self, api_key):
+            self.calls: list[tuple[str, str]] = []
+
+        async def stream(self, text, voice):
+            self.calls.append((text, voice))
+            yield b"\x01\x02\x03\x04"
+            await release_tts.wait()
+
+    fake_tts = _SlowTTS("dg-test")
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            await asyncio.wait_for(first_speaker_write.wait(), timeout=5)
+            # We're now inside SPEAKING. Snapshot STT send count, then
+            # push mic chunks via the captured PyAudio callback and
+            # give pump_mic a chance to see them.
+            session = fake_stt.session_obj
+            baseline = session.sent_audio_count
+            # 4 bytes = one stereo int16 frame, matches audio_io callback.
+            for _ in range(5):
+                captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+            for _ in range(50):
+                await real_sleep(0)
+            assert session.sent_audio_count == baseline
+        finally:
+            release_tts.set()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 class _ReconnectSTTClient:

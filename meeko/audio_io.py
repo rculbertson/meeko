@@ -4,6 +4,7 @@ Owns the input/output streams and the bounded queue that couples the
 PyAudio callback thread to the asyncio event loop.
 """
 
+import array
 import asyncio
 import logging
 
@@ -15,6 +16,36 @@ RATE = 16000
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 CHUNK = 800  # 50ms at 16kHz (800 samples * 2 bytes = 1600 bytes per chunk)
+
+# ReSpeaker XVF3800 has 2 native input channels (left = AEC-processed,
+# right = raw/reference) and 2 native output channels. PortAudio does
+# not silently rate/channel-convert for us the way CoreAudio's system
+# mixer does for apps like Spotify, so we open both streams at the
+# device's native channel count and do the mono <-> stereo conversion
+# in Python: take the left channel on input, duplicate mono TTS to
+# both channels on output.
+DEVICE_IN_CHANNELS = 2
+DEVICE_OUT_CHANNELS = 2
+
+
+def _left_channel(data: bytes, channels: int) -> bytes:
+    """Extract the left channel of interleaved int16 PCM."""
+    if channels == 1:
+        return data
+    samples = array.array("h")
+    samples.frombytes(data)
+    return samples[::channels].tobytes()
+
+
+def _mono_to_stereo(data: bytes) -> bytes:
+    """Duplicate mono int16 PCM into interleaved stereo."""
+    samples = array.array("h")
+    samples.frombytes(data)
+    stereo = array.array("h", [0] * (len(samples) * 2))
+    stereo[0::2] = samples
+    stereo[1::2] = samples
+    return stereo.tobytes()
+
 
 # Hard ceiling on buffered mic chunks. At 50ms chunks this is ~8min of
 # audio — we should never come close. Hitting it means something is
@@ -32,7 +63,7 @@ class AudioIO:
 
         self._mic_stream = self._pa.open(
             format=FORMAT,
-            channels=CHANNELS,
+            channels=DEVICE_IN_CHANNELS,
             rate=RATE,
             input=True,
             frames_per_buffer=CHUNK,
@@ -40,16 +71,18 @@ class AudioIO:
         )
         self._speaker_stream = self._pa.open(
             format=FORMAT,
-            channels=CHANNELS,
+            channels=DEVICE_OUT_CHANNELS,
             rate=RATE,
             output=True,
             frames_per_buffer=CHUNK,
         )
 
     def _mic_callback(self, in_data, frame_count, time_info, status):
+        mono = _left_channel(in_data, DEVICE_IN_CHANNELS)
+
         def enqueue() -> None:
             try:
-                self.mic_queue.put_nowait(in_data)
+                self.mic_queue.put_nowait(mono)
             except asyncio.QueueFull:
                 logger.error("mic_queue reached max size (%d); aborting", MIC_QUEUE_MAX)
                 self._stop_event.set()
@@ -76,7 +109,8 @@ class AudioIO:
     async def write_speaker(self, chunk: bytes) -> None:
         # PyAudio write is blocking; run in a thread so the mic silence
         # pump + STT loop run.
-        await asyncio.to_thread(self._speaker_stream.write, chunk)
+        stereo = _mono_to_stereo(chunk) if DEVICE_OUT_CHANNELS == 2 else chunk
+        await asyncio.to_thread(self._speaker_stream.write, stereo)
 
     def close(self) -> None:
         if self._mic_capturing:
