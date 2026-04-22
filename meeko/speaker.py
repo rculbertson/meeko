@@ -34,17 +34,23 @@ class Speaker:
         profile: Profile,
         enter_speaking: Callable[[], Any],
         exit_speaking: Callable[[Any], None],
+        mute_mic_while_speaking: bool = False,
     ):
         """
         `enter_speaking()` is called when a speak starts; its return
         value is passed back to `exit_speaking(prev)` when playback
         completes, letting the caller restore the prior state.
+
+        When `mute_mic_while_speaking` is true (Mac / no-AEC dev path),
+        `speak_stream` sleeps briefly after the last write and drains
+        the mic queue so buffered echo doesn't leak into STT.
         """
         self._tts = tts
         self._audio = audio
         self._profile = profile
         self._enter_speaking = enter_speaking
         self._exit_speaking = exit_speaking
+        self._mute_mic_while_speaking = mute_mic_while_speaking
         self._speak_lock = asyncio.Lock()
 
     async def speak_stream(self, texts: AsyncIterator[str]) -> None:
@@ -112,9 +118,12 @@ class Speaker:
                     "[timing] speak_total=%dms",
                     int((time.perf_counter() - t_start) * 1000),
                 )
-                # Tail-drain: speaker buffer may still be flushing.
-                await asyncio.sleep(1.0)
-                self._audio.drain_mic_queue()
+                if self._mute_mic_while_speaking:
+                    # Tail-drain: speaker buffer may still be flushing,
+                    # and any residual echo captured then would feed STT
+                    # as a phantom user turn.
+                    await asyncio.sleep(1.0)
+                    self._audio.drain_mic_queue()
             finally:
                 self._exit_speaking(prev)
                 logger.debug("speak complete")

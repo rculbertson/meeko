@@ -161,11 +161,28 @@ async def test_state_hooks_called_on_exception(
     assert [c[0] for c in calls] == ["enter", "exit"]
 
 
-async def test_speak_stream_drains_mic_after_tail(
+async def test_speak_stream_does_not_drain_mic_when_mute_disabled(
     profile, audio_mock, tts_mock, fast_sleep
 ):
+    """Default (hardware-AEC) path: speak_stream must leave the mic
+    queue alone so STT sees everything the mic hears."""
     enter, exit_, _ = _state_hooks()
     sp = Speaker(tts_mock, audio_mock, profile, enter, exit_)
+
+    await sp.speak_stream(_aiter(["Hi."]))
+
+    audio_mock.drain_mic_queue.assert_not_called()
+
+
+async def test_speak_stream_drains_mic_when_mute_enabled(
+    profile, audio_mock, tts_mock, fast_sleep
+):
+    """Mac / no-AEC path: speak_stream drains buffered echo after
+    playback so it isn't flushed to STT as a phantom user turn."""
+    enter, exit_, _ = _state_hooks()
+    sp = Speaker(
+        tts_mock, audio_mock, profile, enter, exit_, mute_mic_while_speaking=True
+    )
 
     await sp.speak_stream(_aiter(["Hi."]))
 

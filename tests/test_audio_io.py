@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from meeko import audio_io as audio_io_mod
-from meeko.audio_io import AudioIO
+from meeko.audio_io import AudioIO, _left_channel, _mono_to_stereo
 
 
 @pytest.fixture
@@ -58,8 +58,9 @@ async def test_mic_callback_overflow_sets_stop_event(pa_factory):
         # Simulate the PyAudio thread calling the callback more times
         # than the queue can hold. call_soon_threadsafe schedules onto
         # the loop so we need to yield to let those enqueues run.
+        # 4 bytes = one stereo int16 frame (L=0, R=0).
         for _ in range(5):
-            io._mic_callback(b"\x00\x00", 1, None, 0)
+            io._mic_callback(b"\x00\x00\x00\x00", 1, None, 0)
         for _ in range(10):
             if stop_event.is_set():
                 break
@@ -68,11 +69,40 @@ async def test_mic_callback_overflow_sets_stop_event(pa_factory):
     assert stop_event.is_set()
 
 
-async def test_write_speaker_delegates_to_stream(pa_factory):
+async def test_mic_callback_extracts_left_channel(pa_factory):
+    """Stereo input (L=0x0101, R=0x7f7f per frame) should be
+    deinterleaved to mono containing only the left samples."""
+    io = AudioIO(asyncio.Event())
+    # Two stereo frames: [L=0x0101, R=0x7f7f, L=0x0202, R=0x7f7f]
+    stereo = b"\x01\x01\x7f\x7f\x02\x02\x7f\x7f"
+    io._mic_callback(stereo, 2, None, 0)
+    for _ in range(10):
+        if not io.mic_queue.empty():
+            break
+        await asyncio.sleep(0)
+    mono = io.mic_queue.get_nowait()
+    assert mono == b"\x01\x01\x02\x02"
+
+
+async def test_write_speaker_duplicates_mono_to_stereo(pa_factory):
     _, _, speaker_stream = pa_factory
     io = AudioIO(asyncio.Event())
-    await io.write_speaker(b"\x01\x02\x03")
-    speaker_stream.write.assert_called_once_with(b"\x01\x02\x03")
+    # One mono int16 sample 0x0201 — expect it duplicated across L/R.
+    await io.write_speaker(b"\x01\x02")
+    speaker_stream.write.assert_called_once_with(b"\x01\x02\x01\x02")
+
+
+def test_left_channel_helper_extracts_every_nth_sample():
+    # int16 LE: samples 1, 2, 3, 4 interleaved as stereo frames.
+    stereo = b"\x01\x00\x02\x00\x03\x00\x04\x00"
+    assert _left_channel(stereo, 2) == b"\x01\x00\x03\x00"
+    # Mono passthrough.
+    assert _left_channel(b"\x01\x00\x02\x00", 1) == b"\x01\x00\x02\x00"
+
+
+def test_mono_to_stereo_helper_duplicates_samples():
+    mono = b"\x01\x00\x02\x00"
+    assert _mono_to_stereo(mono) == b"\x01\x00\x01\x00\x02\x00\x02\x00"
 
 
 async def test_close_tears_down_both_streams(pa_factory):
