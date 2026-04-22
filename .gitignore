@@ -15,6 +15,12 @@ wheels/
 # Logs
 meeko.log
 
+# Local SQLite DB (sessions/turns)
+meeko.db
+meeko.db-journal
+meeko.db-wal
+meeko.db-shm
+
 # Tool-specific config (personal)
 mise.toml
 .claude/settings.local.json

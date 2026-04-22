@@ -167,6 +167,114 @@ async def test_stream_turn_strips_extra_fields_from_stored_blocks():
     assert stored["content"] == [{"type": "text", "text": "Hi."}]
 
 
+async def test_stream_turn_persists_user_and_assistant_turns(tmp_path):
+    from meeko.sessions import SessionStore
+
+    store = SessionStore.open(tmp_path / "m.db")
+    try:
+        session_id = await store.create_session("default")
+
+        dispatcher = ToolDispatcher()
+        mock_anthropic = MagicMock()
+        with patch(
+            "meeko.claude_client.anthropic.AsyncAnthropic",
+            return_value=mock_anthropic,
+        ):
+            client = ClaudeClient(
+                api_key="x",
+                system_prompt="sys",
+                dispatcher=dispatcher,
+                store=store,
+                session_id=session_id,
+            )
+        final = _final_message("end_turn", [_text_block("Hi.")])
+        client._client.messages.stream = MagicMock(
+            return_value=_FakeStream(["Hi."], final)
+        )
+
+        await _collect(client.stream_turn("hello"))
+
+        import json
+        import sqlite3
+
+        conn = sqlite3.connect(str(tmp_path / "m.db"))
+        try:
+            rows = conn.execute(
+                "SELECT role, content FROM turns WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 2
+        assert rows[0][0] == "user"
+        assert json.loads(rows[0][1]) == "hello"
+        assert rows[1][0] == "assistant"
+        assert json.loads(rows[1][1]) == [{"type": "text", "text": "Hi."}]
+    finally:
+        store.close()
+
+
+async def test_stream_turn_persists_tool_round_messages(tmp_path):
+    from meeko.sessions import SessionStore
+
+    store = SessionStore.open(tmp_path / "m.db")
+    try:
+        session_id = await store.create_session("default")
+
+        round1_final = _final_message(
+            "tool_use",
+            [_tool_use_block(id="t1", name="echo", input={"v": 1})],
+        )
+        round2_final = _final_message("end_turn", [_text_block("Done.")])
+
+        dispatcher = ToolDispatcher()
+        dispatcher.register(
+            [
+                {
+                    "name": "echo",
+                    "description": "echo",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            AsyncMock(return_value="res"),
+        )
+        mock_anthropic = MagicMock()
+        with patch(
+            "meeko.claude_client.anthropic.AsyncAnthropic",
+            return_value=mock_anthropic,
+        ):
+            client = ClaudeClient(
+                api_key="x",
+                system_prompt="sys",
+                dispatcher=dispatcher,
+                store=store,
+                session_id=session_id,
+            )
+        rounds = iter([([], round1_final), (["Done."], round2_final)])
+        client._client.messages.stream = MagicMock(
+            side_effect=lambda **kw: _FakeStream(*next(rounds))
+        )
+
+        await _collect(client.stream_turn("run it"))
+
+        import sqlite3
+
+        conn = sqlite3.connect(str(tmp_path / "m.db"))
+        try:
+            roles = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT role FROM turns WHERE session_id = ? ORDER BY id",
+                    (session_id,),
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        assert roles == ["user", "assistant", "user", "assistant"]
+    finally:
+        store.close()
+
+
 async def test_set_system_prompt_takes_effect_on_next_call():
     final = _final_message("end_turn", [_text_block("ok")])
     client, stream_mock = _build_client([(["ok"], final)], AsyncMock())
