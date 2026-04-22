@@ -539,7 +539,16 @@ async def test_run_resume_preloads_history_and_skips_greeting(
     speaker_stream = MagicMock()
     pa_instance.open.side_effect = [mic_stream, speaker_stream]
 
-    fake_stt = _FakeSTTClient("dg-test")
+    session_entered = asyncio.Event()
+
+    class _SignalingSTTClient(_FakeSTTClient):
+        @contextlib.asynccontextmanager
+        async def session(self):
+            async with super().session() as s:
+                session_entered.set()
+                yield s
+
+    fake_stt = _SignalingSTTClient("dg-test")
     fake_stt.events = []  # no turns needed — we just need run() to start up
     fake_tts = _FakeTTSClient("dg-test")
     fake_claude_holder: dict = {}
@@ -579,14 +588,10 @@ async def test_run_resume_preloads_history_and_skips_greeting(
         patch("meeko.main.setup_logging"),
     ):
         task = asyncio.create_task(meeko_main.run(resume=session_id))
-        # Let the task get past construction and into the supervisor loop.
-        for _ in range(50):
-            if "client" in fake_claude_holder:
-                break
-            await real_sleep(0)
-        # Extra spins so the post-construct greeting branch (if any) runs.
-        for _ in range(20):
-            await real_sleep(0)
+        # Wait until the STT supervisor has entered a session. This is
+        # downstream of the greeting branch in run(), so if the greeting
+        # was going to be spoken it already would have been.
+        await asyncio.wait_for(session_entered.wait(), timeout=5)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
