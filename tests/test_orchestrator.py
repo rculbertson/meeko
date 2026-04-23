@@ -58,7 +58,7 @@ def test_setup_logging_invalid_level_falls_back_to_debug(monkeypatch, clean_logg
 
 
 def test_state_enum_members():
-    assert {s.name for s in State} == {"LISTENING", "PROCESSING", "SPEAKING"}
+    assert {s.name for s in State} == {"IDLE", "LISTENING", "PROCESSING", "SPEAKING"}
 
 
 def test_main_drives_run_to_completion(monkeypatch):
@@ -154,6 +154,14 @@ class _FakeClaudeClient:
 
     def load_history(self, messages):
         self.loaded_history = list(messages)
+
+
+@pytest.fixture(autouse=True)
+def _disable_wake_word_by_default(monkeypatch):
+    """Existing orchestrator tests predate wake-word gating — default them
+    into the legacy flow. Tests that exercise the wake-word path opt back
+    in by deleting this env var in their own body."""
+    monkeypatch.setenv("MEEKO_WAKE_WORD_DISABLED", "1")
 
 
 @pytest.fixture
@@ -738,6 +746,135 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert sid in out
     assert "default" in out
+
+
+async def test_run_gates_greeting_and_stt_on_wake_word(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """With wake word enabled the orchestrator starts in IDLE: mic
+    audio must flow to the wake-word detector (not STT), and the
+    greeting must not play until the wake word fires."""
+    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    captured_cb: dict = {}
+
+    def open_stream(**kwargs):
+        if kwargs.get("input"):
+            captured_cb["cb"] = kwargs["stream_callback"]
+            return mic_stream
+        return speaker_stream
+
+    pa_instance.open.side_effect = open_stream
+
+    first_speaker_write = asyncio.Event()
+    speaker_stream.write.side_effect = lambda data: first_speaker_write.set()
+
+    # Greeting non-empty so a TTS call on wake is observable.
+    wake_profiles = {
+        "default": Profile(
+            name="default",
+            wake_word="meeko",
+            prompt="system",
+            greeting="Hi!",
+            voice=None,
+        )
+    }
+
+    class _FakeDetector:
+        def __init__(self, *a, **kw):
+            self.calls: list[bytes] = []
+            self.should_fire = False
+
+        def process(self, pcm: bytes) -> bool:
+            self.calls.append(pcm)
+            return self.should_fire
+
+    detector_holder: dict = {}
+
+    def make_detector(*a, **kw):
+        d = _FakeDetector()
+        detector_holder["d"] = d
+        return d
+
+    fake_stt = _FakeSTTClient("dg-test")
+    fake_stt.events = []  # no STT events in this test
+    fake_tts = _FakeTTSClient("dg-test")
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=wake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            # Wait for the mic callback to be hooked up so pump_mic is running.
+            for _ in range(200):
+                if "cb" in captured_cb and "d" in detector_holder:
+                    break
+                await real_sleep(0.01)
+            assert "cb" in captured_cb and "d" in detector_holder
+
+            detector = detector_holder["d"]
+
+            # Push a few mic chunks while still in IDLE. They must flow
+            # to the detector, never to STT, and no greeting must play.
+            for _ in range(5):
+                captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+            for _ in range(50):
+                await real_sleep(0)
+
+            assert detector.calls, "detector never saw mic audio while IDLE"
+            session = fake_stt.session_obj
+            assert session.sent_audio_count == 0, (
+                "STT received audio before wake word fired"
+            )
+            assert fake_tts.calls == [], "greeting played before wake word fired"
+            assert not first_speaker_write.is_set()
+
+            # Now fire the wake word and push another chunk.
+            detector.should_fire = True
+            captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+
+            await asyncio.wait_for(first_speaker_write.wait(), timeout=5)
+            assert fake_tts.calls == [("Hi!", "asteria")]
+
+            # After wake, subsequent mic chunks should no longer be
+            # routed to the detector — STT audio flow itself is covered
+            # by test_run_drives_one_turn_end_to_end.
+            detector_calls_before = len(detector.calls)
+            for _ in range(5):
+                captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+            for _ in range(50):
+                await real_sleep(0.01)
+            assert len(detector.calls) == detector_calls_before, (
+                "detector still receiving audio after wake"
+            )
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 async def test_run_missing_api_key_raises(monkeypatch):

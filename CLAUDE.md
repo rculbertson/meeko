@@ -48,12 +48,18 @@ The next milestones, in rough order, are: SQLite turn persistence → prompt cac
   - `MEEKO_MUTE_MIC_WHILE_SPEAKING=1` — for devices without hardware AEC (e.g. Mac built-in).
   - Mac built-in mic/speaker: set `MEEKO_INPUT_CHANNELS=1`, `MEEKO_MUTE_MIC_WHILE_SPEAKING=1` (channel-count default `2` for output is fine for stereo speakers).
 
+### Wake word
+- On startup Meeko sits in `IDLE` — mic is open but audio is fed to an openWakeWord detector, not Deepgram STT. Saying "Hey Meeko" transitions the session to `LISTENING` (one-shot per session).
+- `MEEKO_WAKE_WORD_MODEL` — path to the ONNX model. Default `models/hey_meeko.onnx`.
+- `MEEKO_WAKE_WORD_THRESHOLD` — confidence threshold (0–1). Default `0.5`.
+- `MEEKO_WAKE_WORD_DISABLED=1` — skip the wake-word gate; start directly in `LISTENING`.
+
 ### State machine
-States: `IDLE → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`
+States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.
 
 ## What's Out of Scope (v1)
 
-Do not add: wake word detection, web/mobile UI, multi-user support, semantic search over sessions, session deletion by voice, cross-device sync. See `meeko-design.md` §9.
+Do not add: web/mobile UI, multi-user support, semantic search over sessions, session deletion by voice, cross-device sync. See `meeko-design.md` §9.
 
 ## Testing
 
