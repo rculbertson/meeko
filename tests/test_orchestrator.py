@@ -453,11 +453,13 @@ async def test_run_backs_off_on_repeated_stt_failures(
         patch("meeko.main.setup_logging"),
     ):
         task = asyncio.create_task(meeko_main.run())
-        # Let the loop churn through several reconnect attempts.
-        for _ in range(50):
+        # Let the loop churn through several reconnect attempts. Use a
+        # small real sleep (not sleep(0)) so a slow CI runner gets enough
+        # scheduling time to advance run() past the retry branch.
+        for _ in range(200):
             if fake_stt.attempts >= 4:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
@@ -526,7 +528,7 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
         for _ in range(200):
             if fake_stt.attempts >= 6:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
@@ -579,11 +581,14 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_
         patch("meeko.main.setup_logging"),
     ):
         task = asyncio.create_task(meeko_main.run())
-        # Wait until mic_callback has been captured.
-        for _ in range(50):
+        # Wait until mic_callback has been captured. Use a small real
+        # sleep (not sleep(0)) so a slow CI runner gets enough
+        # scheduling time to actually open the mic stream.
+        for _ in range(200):
             if "cb" in captured_cb:
                 break
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
+        assert "cb" in captured_cb, "mic stream was never opened"
         # Overflow the queue from the "PyAudio thread" side.
         for _ in range(10):
             captured_cb["cb"](b"\x00\x00", 1, None, 0)
