@@ -7,6 +7,7 @@ PyAudio callback thread to the asyncio event loop.
 import array
 import asyncio
 import logging
+import os
 
 import pyaudio
 
@@ -17,15 +18,30 @@ CHANNELS = 1
 FORMAT = pyaudio.paInt16
 CHUNK = 800  # 50ms at 16kHz (800 samples * 2 bytes = 1600 bytes per chunk)
 
-# ReSpeaker XVF3800 has 2 native input channels (left = AEC-processed,
-# right = raw/reference) and 2 native output channels. PortAudio does
-# not silently rate/channel-convert for us the way CoreAudio's system
-# mixer does for apps like Spotify, so we open both streams at the
-# device's native channel count and do the mono <-> stereo conversion
-# in Python: take the left channel on input, duplicate mono TTS to
-# both channels on output.
-DEVICE_IN_CHANNELS = 2
-DEVICE_OUT_CHANNELS = 2
+# PortAudio does not silently rate/channel-convert for us the way
+# CoreAudio's system mixer does for apps like Spotify, so we open both
+# streams at the device's native channel count and do the mono <->
+# stereo conversion in Python: take the left channel on input,
+# duplicate mono TTS to both channels on output.
+#
+# Defaults match the ReSpeaker XVF3800 (2-channel input: left =
+# AEC-processed, right = raw/reference; 2-channel output via the 3.5mm
+# jack). Override via env vars when running against a different device
+# (e.g. Mac built-in mic is 1 channel). Device indices default to
+# unset -> PyAudio uses the OS default device; set
+# MEEKO_INPUT_DEVICE_INDEX / MEEKO_OUTPUT_DEVICE_INDEX to pin a
+# specific device. Run `python -m meeko.audio_io` to list indices.
+DEVICE_IN_CHANNELS = int(os.environ.get("MEEKO_INPUT_CHANNELS", "2"))
+DEVICE_OUT_CHANNELS = int(os.environ.get("MEEKO_OUTPUT_CHANNELS", "2"))
+
+
+def _device_index(env_var: str) -> int | None:
+    val = os.environ.get(env_var, "").strip()
+    return int(val) if val else None
+
+
+INPUT_DEVICE_INDEX = _device_index("MEEKO_INPUT_DEVICE_INDEX")
+OUTPUT_DEVICE_INDEX = _device_index("MEEKO_OUTPUT_DEVICE_INDEX")
 
 
 def _left_channel(data: bytes, channels: int) -> bytes:
@@ -66,6 +82,7 @@ class AudioIO:
             channels=DEVICE_IN_CHANNELS,
             rate=RATE,
             input=True,
+            input_device_index=INPUT_DEVICE_INDEX,
             frames_per_buffer=CHUNK,
             stream_callback=self._mic_callback,
         )
@@ -74,6 +91,7 @@ class AudioIO:
             channels=DEVICE_OUT_CHANNELS,
             rate=RATE,
             output=True,
+            output_device_index=OUTPUT_DEVICE_INDEX,
             frames_per_buffer=CHUNK,
         )
 
@@ -120,3 +138,34 @@ class AudioIO:
         self._speaker_stream.stop_stream()
         self._speaker_stream.close()
         self._pa.terminate()
+
+
+def _list_devices() -> None:
+    pa = pyaudio.PyAudio()
+    try:
+        try:
+            default_in = pa.get_default_input_device_info().get("index")
+        except OSError:
+            default_in = None
+        try:
+            default_out = pa.get_default_output_device_info().get("index")
+        except OSError:
+            default_out = None
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            tags = []
+            if info.get("maxInputChannels", 0) > 0:
+                tags.append(f"in={info['maxInputChannels']}ch")
+            if info.get("maxOutputChannels", 0) > 0:
+                tags.append(f"out={info['maxOutputChannels']}ch")
+            if i == default_in:
+                tags.append("DEFAULT-IN")
+            if i == default_out:
+                tags.append("DEFAULT-OUT")
+            print(f"[{i}] {info['name']}  ({', '.join(tags)})")
+    finally:
+        pa.terminate()
+
+
+if __name__ == "__main__":
+    _list_devices()

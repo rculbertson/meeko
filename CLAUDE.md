@@ -42,6 +42,11 @@ The next milestones, in rough order, are: SQLite turn persistence → prompt cac
 - Read from the **left channel** of the ReSpeaker XVF3800 USB device — this is the AEC-processed output
 - Speaker must route through the XVF3800's **3.5mm jack**, not the Pi's audio output (required for hardware AEC)
 - Barge-in: `SpeechStarted` during SPEAKING state → stop TTS, cancel Claude request, transition to LISTENING
+- **Device selection** (env vars, all optional):
+  - `MEEKO_INPUT_DEVICE_INDEX` / `MEEKO_OUTPUT_DEVICE_INDEX` — pin a specific PyAudio device. Unset = OS default. Run `uv run python -m meeko.audio_io` to list indices.
+  - `MEEKO_INPUT_CHANNELS` / `MEEKO_OUTPUT_CHANNELS` — native channel counts. Default `2` / `2` (ReSpeaker).
+  - `MEEKO_MUTE_MIC_WHILE_SPEAKING=1` — for devices without hardware AEC (e.g. Mac built-in).
+  - Mac built-in mic/speaker: set `MEEKO_INPUT_CHANNELS=1`, `MEEKO_MUTE_MIC_WHILE_SPEAKING=1` (channel-count default `2` for output is fine for stereo speakers).
 
 ### State machine
 States: `IDLE → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`
