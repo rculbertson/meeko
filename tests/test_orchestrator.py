@@ -460,6 +460,9 @@ async def test_run_backs_off_on_repeated_stt_failures(
             if fake_stt.attempts >= 4:
                 break
             await real_sleep(0.01)
+        assert fake_stt.attempts >= 4, (
+            f"run() did not reach 4 reconnect attempts (got {fake_stt.attempts})"
+        )
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
@@ -529,6 +532,9 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
             if fake_stt.attempts >= 6:
                 break
             await real_sleep(0.01)
+        assert fake_stt.attempts >= 6, (
+            f"run() did not reach 6 reconnect attempts (got {fake_stt.attempts})"
+        )
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
