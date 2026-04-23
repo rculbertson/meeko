@@ -218,6 +218,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     )
     timer_manager.set_speak_callback(speaker.speak)
 
+    # Background tasks fired from pump_mic (e.g. the post-wake greeting).
+    # Held so we can await them on shutdown rather than letting the loop
+    # garbage-collect a pending task.
+    greeting_tasks: list[asyncio.Task] = []
+
     async def pump_mic(stt_session):
         """Forward mic chunks to STT.
 
@@ -239,7 +244,14 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     state = State.LISTENING
                     logger.info("Wake word accepted; entering LISTENING")
                     if resumed_row is None:
-                        await speaker.speak(profile.greeting)
+                        # Fire-and-forget so pump_mic keeps feeding the
+                        # mic queue (needed for future barge-in; also
+                        # matches how handle_turns runs speak_stream
+                        # off the pumping path). Speaker's internal
+                        # lock serializes concurrent speaks.
+                        greeting_tasks.append(
+                            asyncio.create_task(speaker.speak(profile.greeting))
+                        )
                 continue
             if mute_mic_while_speaking and state == State.SPEAKING:
                 continue
@@ -336,6 +348,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     finally:
         stop_event.set()
         timer_manager.cancel_all_timers()
+        for t in greeting_tasks:
+            if not t.done():
+                t.cancel()
+        if greeting_tasks:
+            await asyncio.gather(*greeting_tasks, return_exceptions=True)
         audio.close()
         store.close()
         logger.info("Shutting down.")
