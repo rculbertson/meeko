@@ -42,6 +42,7 @@ from meeko.tools.profile import handle as profile_handle
 from meeko.tools.timer import get_tool_definitions as timer_tools
 from meeko.tools.timer import handle as timer_handle
 from meeko.tools.timer import timer_manager
+from meeko.wake_word import WakeWordDetector, default_model_path
 
 LOG_FILE = "meeko.log"
 
@@ -65,6 +66,7 @@ def setup_logging() -> None:
 
 
 class State(Enum):
+    IDLE = auto()
     LISTENING = auto()
     PROCESSING = auto()
     SPEAKING = auto()
@@ -118,6 +120,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     anthropic_key = os.environ["ANTHROPIC_API_KEY"]
     mute_mic_while_speaking = os.environ.get(
         "MEEKO_MUTE_MIC_WHILE_SPEAKING", ""
+    ).strip().lower() in {"1", "true", "yes"}
+    wake_word_disabled = os.environ.get(
+        "MEEKO_WAKE_WORD_DISABLED", ""
     ).strip().lower() in {"1", "true", "yes"}
 
     profiles = load_profiles()
@@ -182,7 +187,16 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     stop_event = asyncio.Event()
     audio = AudioIO(stop_event)
 
-    state = State.LISTENING
+    if wake_word_disabled:
+        wake_detector = None
+        state = State.LISTENING
+    else:
+        wake_model_path = os.environ.get("MEEKO_WAKE_WORD_MODEL", default_model_path())
+        wake_threshold = float(os.environ.get("MEEKO_WAKE_WORD_THRESHOLD", "0.5"))
+        wake_detector = WakeWordDetector(
+            model_path=wake_model_path, threshold=wake_threshold
+        )
+        state = State.IDLE
 
     def enter_speaking() -> State:
         nonlocal state
@@ -204,16 +218,40 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     )
     timer_manager.set_speak_callback(speaker.speak)
 
+    # Background tasks fired from pump_mic (e.g. the post-wake greeting).
+    # Held so we can await them on shutdown rather than letting the loop
+    # garbage-collect a pending task.
+    greeting_tasks: list[asyncio.Task] = []
+
     async def pump_mic(stt_session):
         """Forward mic chunks to STT.
 
-        With MEEKO_MUTE_MIC_WHILE_SPEAKING set, chunks are dropped while
-        the assistant is SPEAKING (Mac / no-AEC dev path). Otherwise the
+        While in IDLE, chunks are fed to the wake-word detector instead
+        of STT. On detection the session transitions to LISTENING and
+        (for fresh sessions) the greeting plays. With
+        MEEKO_MUTE_MIC_WHILE_SPEAKING set, chunks are dropped while the
+        assistant is SPEAKING (Mac / no-AEC dev path). Otherwise the
         pump stays on and we rely on hardware AEC to suppress echo."""
+        nonlocal state
         while not stop_event.is_set():
             try:
                 data = await asyncio.wait_for(audio.mic_queue.get(), timeout=0.1)
             except TimeoutError:
+                continue
+            if state == State.IDLE:
+                assert wake_detector is not None
+                if wake_detector.process(data):
+                    state = State.LISTENING
+                    logger.info("Wake word accepted; entering LISTENING")
+                    if resumed_row is None:
+                        # Fire-and-forget so pump_mic keeps feeding the
+                        # mic queue (needed for future barge-in; also
+                        # matches how handle_turns runs speak_stream
+                        # off the pumping path). Speaker's internal
+                        # lock serializes concurrent speaks.
+                        greeting_tasks.append(
+                            asyncio.create_task(speaker.speak(profile.greeting))
+                        )
                 continue
             if mute_mic_while_speaking and state == State.SPEAKING:
                 continue
@@ -244,6 +282,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 logger.info("User started speaking (state=%s)", state.name)
             elif ev.event == "EndOfTurn":
                 text = ev.transcript.strip()
+                if state == State.IDLE:
+                    # Safety belt: Deepgram shouldn't emit turns while
+                    # we're gating mic audio behind the wake word, but
+                    # any stray transcripts must not start a Claude turn.
+                    continue
                 if state == State.SPEAKING:
                     # AEC observation mode: don't start a Claude turn while
                     # we're talking. Log so we can gauge echo leakage.
@@ -297,7 +340,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     logger.info("Mic active.")
 
     try:
-        if resumed_row is None:
+        if wake_detector is None and resumed_row is None:
             await speaker.speak(profile.greeting)
         await supervisor.run()
     except asyncio.CancelledError:
@@ -305,6 +348,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     finally:
         stop_event.set()
         timer_manager.cancel_all_timers()
+        for t in greeting_tasks:
+            if not t.done():
+                t.cancel()
+        if greeting_tasks:
+            await asyncio.gather(*greeting_tasks, return_exceptions=True)
         audio.close()
         store.close()
         logger.info("Shutting down.")
