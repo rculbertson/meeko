@@ -32,19 +32,31 @@ def default_model_path() -> str:
     return os.path.join("models", "hey_meeko.onnx")
 
 
-def _ensure_preprocessors() -> None:
-    """Fetch openWakeWord's shared melspectrogram + embedding ONNX
-    preprocessors on first run. Idempotent — the library no-ops if the
-    files are already present."""
-    resources = os.path.join(
+def _preprocessor_cache_dir() -> str:
+    return os.path.join(
         os.path.dirname(openwakeword.utils.__file__), "resources", "models"
     )
+
+
+def _ensure_preprocessors() -> None:
+    """Fetch openWakeWord's shared melspectrogram + embedding ONNX
+    preprocessors on first run. Idempotent — no-op if the files are
+    already cached. Raises RuntimeError with an operator-friendly
+    remediation hint if the download fails (e.g. offline host)."""
+    resources = _preprocessor_cache_dir()
     melspec = os.path.join(resources, "melspectrogram.onnx")
     embedding = os.path.join(resources, "embedding_model.onnx")
     if os.path.exists(melspec) and os.path.exists(embedding):
         return
     logger.info("Downloading openWakeWord preprocessor models (one-time)")
-    openwakeword.utils.download_models()
+    try:
+        openwakeword.utils.download_models()
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to download openWakeWord preprocessor models. Run "
+            "`uv run python -m meeko.wake_word` from a machine with network "
+            "access to pre-fetch them."
+        ) from exc
 
 
 class WakeWordDetector:
@@ -97,3 +109,12 @@ class WakeWordDetector:
                 self._buffer.clear()
                 return True
         return False
+
+
+if __name__ == "__main__":
+    # Populate the openWakeWord preprocessor cache out-of-band — useful
+    # when baking a Pi image on a network-connected host before
+    # deploying to a device without internet.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    _ensure_preprocessors()
+    print(f"openWakeWord preprocessors cached at: {_preprocessor_cache_dir()}")

@@ -138,3 +138,38 @@ def test_frame_constants():
     # 80ms @ 16kHz = 1280 samples, 2560 bytes (int16 mono).
     assert FRAME_SAMPLES == 1280
     assert FRAME_BYTES == 2560
+
+
+def test_preprocessor_download_failure_raises_operator_friendly_error(
+    monkeypatch, tmp_path
+):
+    """If the preprocessor files are missing and the download fails
+    (e.g. offline host), WakeWordDetector should raise a RuntimeError
+    that points the operator at the pre-fetch command, with the
+    underlying exception preserved on __cause__."""
+    import os as _os
+
+    model_path = tmp_path / "hey_meeko.onnx"
+    model_path.write_bytes(b"stub")
+
+    real_exists = _os.path.exists
+
+    def fake_exists(p):
+        # Pretend the preprocessor cache is empty but the wake-word
+        # model file is still present so the missing-file guard passes.
+        if p.endswith(("melspectrogram.onnx", "embedding_model.onnx")):
+            return False
+        return real_exists(p)
+
+    original_cause = OSError("network down")
+
+    def fail_download():
+        raise original_cause
+
+    monkeypatch.setattr(wake_word.os.path, "exists", fake_exists)
+    monkeypatch.setattr(wake_word.openwakeword.utils, "download_models", fail_download)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        WakeWordDetector(model_path=str(model_path))
+    assert "python -m meeko.wake_word" in str(excinfo.value)
+    assert excinfo.value.__cause__ is original_cause

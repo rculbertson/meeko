@@ -53,6 +53,7 @@ The next milestones, in rough order, are: SQLite turn persistence → prompt cac
 - `MEEKO_WAKE_WORD_MODEL` — path to the ONNX model. Default `models/hey_meeko.onnx`.
 - `MEEKO_WAKE_WORD_THRESHOLD` — confidence threshold (0–1). Default `0.5`.
 - `MEEKO_WAKE_WORD_DISABLED=1` — skip the wake-word gate; start directly in `LISTENING`.
+- First run downloads openWakeWord's preprocessor ONNX files (~3 MB). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
 ### State machine
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.
