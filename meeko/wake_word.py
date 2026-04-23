@@ -13,7 +13,6 @@ on both Mac and Pi 5, so `process()` is safe to call inline on the
 asyncio event loop without offloading to a thread.
 """
 
-import array
 import logging
 import os
 
@@ -95,9 +94,7 @@ class WakeWordDetector:
         while len(self._buffer) >= FRAME_BYTES:
             frame_bytes = bytes(self._buffer[:FRAME_BYTES])
             del self._buffer[:FRAME_BYTES]
-            samples = np.frombuffer(
-                array.array("h", frame_bytes).tobytes(), dtype=np.int16
-            )
+            samples = np.frombuffer(frame_bytes, dtype=np.int16)
             scores = self._model.predict(samples)
             score = scores.get(self._score_key)
             if score is None:
