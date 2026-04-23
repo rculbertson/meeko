@@ -3,6 +3,13 @@
     "allow": [
       "WebSearch",
       "Bash(uv *)",
+      "Bash(tail *)",
+      "Bash(head *)",
+      "Bash(grep *)",
+      "Bash(awk *)",
+      "Bash(sed *)",
+      "Bash(wc *)",
+      "Bash(cat *)",
       "WebFetch(domain:api.deepgram.com)"
     ]
   },
