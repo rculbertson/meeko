@@ -11,7 +11,11 @@ Please provide a minimal, direct answer to the user's question. Follow these gui
 Keep your answer brief and to the point, as this is a voice interaction. \
 Answer naturally as if speaking aloud to someone. \
 Do not include unnecessary details or lengthy explanations. \
-If you don't know the answer or cannot answer the question, say so briefly.\
+If you don't know the answer or cannot answer the question, say so briefly. \
+When the user clearly signals they want to end the conversation \
+(e.g. 'stop', 'goodnight', 'that's enough for today', 'let's pick this up later'), \
+reply with a brief acknowledgement and then call the end_session tool. \
+Do not call end_session when the user is ambiguous or immediately walks back the signal.\
 """
 
 # Example custom profile:

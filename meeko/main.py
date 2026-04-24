@@ -39,6 +39,9 @@ from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.profile import ProfileManager
 from meeko.tools.profile import get_tool_definitions as profile_tools
 from meeko.tools.profile import handle as profile_handle
+from meeko.tools.session import SessionManager
+from meeko.tools.session import get_tool_definitions as session_tools
+from meeko.tools.session import handle as session_handle
 from meeko.tools.timer import get_tool_definitions as timer_tools
 from meeko.tools.timer import handle as timer_handle
 from meeko.tools.timer import timer_manager
@@ -162,12 +165,17 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         logger.info("Started session %s (profile=%s)", session_id, profile.name)
 
     profile_manager = ProfileManager(profiles)
+    session_manager = SessionManager()
 
     dispatcher = ToolDispatcher()
     dispatcher.register(timer_tools(), timer_handle)
     dispatcher.register(
         profile_tools(profiles),
         functools.partial(profile_handle, manager=profile_manager),
+    )
+    dispatcher.register(
+        session_tools(),
+        functools.partial(session_handle, manager=session_manager),
     )
 
     claude = ClaudeClient(
@@ -307,7 +315,25 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     "[timing] turn_total_eot_to_speak_done=%dms",
                     int((time.perf_counter() - t_turn) * 1000),
                 )
-                state = State.LISTENING
+                if session_manager.should_end():
+                    new_sid = await store.create_session(profile.name)
+                    claude.reset_session(new_sid)
+                    session_manager.clear()
+                    if wake_detector is not None:
+                        wake_detector.reset()
+                        state = State.IDLE
+                        logger.info(
+                            "Session ended; returning to IDLE "
+                            "(say '%s' to start a new conversation)",
+                            profile.wake_word,
+                        )
+                    else:
+                        state = State.LISTENING
+                        logger.info(
+                            "Session ended; wake word disabled, returning to LISTENING"
+                        )
+                else:
+                    state = State.LISTENING
 
     async def on_session(stt_session) -> None:
         session_tasks = [

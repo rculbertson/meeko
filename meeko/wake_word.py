@@ -83,6 +83,20 @@ class WakeWordDetector:
             threshold,
         )
 
+    def reset(self) -> None:
+        """Clear buffered audio AND the model's internal prediction /
+        feature state. Called when re-arming the detector after a
+        session ends.
+
+        Clearing only our own frame buffer is not enough — openWakeWord's
+        `Model` keeps a rolling prediction deque and preprocessor feature
+        history across `predict()` calls. Without resetting those, the
+        model still "remembers" the fire that started the just-ended
+        session, and the first frame of the new IDLE window can re-cross
+        threshold immediately on silence or low-level noise."""
+        self._buffer.clear()
+        self._model.reset()
+
     def process(self, pcm: bytes) -> bool:
         """Feed a mono 16-bit PCM chunk. Returns True on wake detection.
 
