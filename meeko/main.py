@@ -319,6 +319,15 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                         logger.info(
                             "Session ended; wake word disabled, returning to LISTENING"
                         )
+                elif session_manager.should_start_new():
+                    new_sid = await store.create_session(profile.name)
+                    claude.reset_session(new_sid)
+                    session_manager.clear()
+                    state = State.LISTENING
+                    logger.info(
+                        "new_session: rotated to %s, continuing in LISTENING",
+                        new_sid[:8],
+                    )
                 else:
                     state = State.LISTENING
 

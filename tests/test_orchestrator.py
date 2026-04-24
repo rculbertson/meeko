@@ -877,20 +877,38 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
                 await task
 
 
-class _EndSessionClaudeClient(_FakeClaudeClient):
-    """Simulates Sonnet calling `end_session` mid-turn: yields a brief
-    acknowledgement AND dispatches the tool. Mirrors the real flow where
-    the assistant acknowledges verbally before the tool fires."""
+class _SessionToolClaudeClient(_FakeClaudeClient):
+    """Simulates Sonnet calling a session-management tool mid-turn: yields a
+    brief acknowledgement AND dispatches the named tool. Mirrors the real
+    flow where the assistant acknowledges verbally before the tool fires.
+
+    Subclasses override ``TOOL_NAME`` / ``ACK`` to pick which tool to call.
+    """
+
+    TOOL_NAME = "end_session"
+    ACK = "Goodnight!"
 
     def stream_turn(self, text):
         self.turns.append(text)
         dispatcher = self.dispatcher
+        tool_name = self.TOOL_NAME
+        ack = self.ACK
 
         async def _gen():
-            yield "Goodnight!"
-            await dispatcher.dispatch("end_session", {})
+            yield ack
+            await dispatcher.dispatch(tool_name, {})
 
         return _gen()
+
+
+class _EndSessionClaudeClient(_SessionToolClaudeClient):
+    TOOL_NAME = "end_session"
+    ACK = "Goodnight!"
+
+
+class _NewSessionClaudeClient(_SessionToolClaudeClient):
+    TOOL_NAME = "new_session"
+    ACK = "Starting fresh."
 
 
 class _HoldingSTTClient:
@@ -1156,6 +1174,139 @@ async def test_end_session_without_wake_word_transitions_to_listening(
     finally:
         store.close()
     assert len(rows) == 2
+
+
+async def test_new_session_tool_rotates_session_and_stays_listening(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """User says 'let's start fresh' → fake Claude dispatches new_session →
+    after SPEAKING completes, a fresh SQLite session is created, claude
+    client rebinds to it, and state stays in LISTENING (wake detector is
+    NOT reset — Meeko keeps listening without requiring the wake word)."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    captured_cb: dict = {}
+
+    def open_stream(**kwargs):
+        if kwargs.get("input"):
+            captured_cb["cb"] = kwargs["stream_callback"]
+            return mic_stream
+        return speaker_stream
+
+    pa_instance.open.side_effect = open_stream
+    speaker_stream.write.side_effect = lambda data: None
+
+    wake_profiles = {
+        "default": Profile(
+            name="default",
+            wake_word="meeko",
+            prompt="system",
+            voice=None,
+        )
+    }
+
+    class _FakeDetector:
+        def __init__(self, *a, **kw):
+            self.calls = 0
+            self.resets = 0
+
+        def process(self, pcm: bytes) -> bool:
+            self.calls += 1
+            return True  # fire on first chunk
+
+        def reset(self) -> None:
+            self.resets += 1
+
+    detector_holder: dict = {}
+
+    def make_detector(*a, **kw):
+        d = _FakeDetector()
+        detector_holder["d"] = d
+        return d
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "let's start fresh"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _NewSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=wake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            for _ in range(500):
+                if "cb" in captured_cb and "d" in detector_holder:
+                    break
+                await real_sleep(0.01)
+            assert "cb" in captured_cb
+            captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+            for _ in range(200):
+                if detector_holder["d"].calls >= 1:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            # Wait until claude session_id changes (signal that the
+            # new_session rotation ran).
+            claude = None
+            original_sid = None
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None:
+                    if original_sid is None:
+                        original_sid = c.session_id
+                    if c.session_id is not None and c.session_id != original_sid:
+                        claude = c
+                        break
+                await real_sleep(0.01)
+            assert claude is not None, "session_id was never swapped"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    # Wake detector must NOT have been reset — new_session stays in
+    # LISTENING, not IDLE.
+    assert detector_holder["d"].resets == 0
+
+    # Two session rows exist: the original + the fresh one.
+    store = SessionStore.open(db_path)
+    try:
+        rows = await store.list_sessions()
+    finally:
+        store.close()
+    assert len(rows) == 2
+    new_row = rows[0]  # ordered by last_active DESC
+    assert claude.session_id == new_row["id"]
 
 
 async def test_run_missing_api_key_raises(monkeypatch):
