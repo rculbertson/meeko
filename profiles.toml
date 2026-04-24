@@ -1,6 +1,5 @@
 [profiles.default]
 wake_word = "meeko"
-greeting = "Hello! I'm Meeko. How can I help?"
 voice = "mars"
 prompt = """\
 You are Meeko, a voice assistant. \
@@ -22,7 +21,6 @@ Do not call end_session when the user is ambiguous or immediately walks back the
 #
 # [profiles.pirate]
 # wake_word = "ahoy"
-# greeting = "Ahoy matey! What can I do for ye?"
 # voice = "orion"
 # prompt = """\
 # You are a pirate voice assistant. \

@@ -1,7 +1,7 @@
 """Profile loading and management.
 
-A profile defines a persona for the voice assistant: wake word, system prompt,
-and greeting. Profiles are stored in a TOML config file.
+A profile defines a persona for the voice assistant: wake word and system
+prompt. Profiles are stored in a TOML config file.
 """
 
 import tomllib
@@ -14,7 +14,6 @@ class Profile:
     name: str
     wake_word: str
     prompt: str
-    greeting: str
     voice: str | None = None
 
 
@@ -37,7 +36,6 @@ def load_profiles(path: str | Path = "profiles.toml") -> dict[str, Profile]:
             name=name,
             wake_word=fields["wake_word"],
             prompt=fields["prompt"],
-            greeting=fields["greeting"],
             voice=fields.get("voice"),
         )
 

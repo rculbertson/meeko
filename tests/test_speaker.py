@@ -15,7 +15,6 @@ def profile():
         name="default",
         wake_word="meeko",
         prompt="sys",
-        greeting="",
         voice=None,
     )
 
@@ -222,7 +221,6 @@ async def test_profile_voice_overrides_default(audio_mock, tts_mock, fast_sleep)
         name="custom",
         wake_word="meeko",
         prompt="sys",
-        greeting="",
         voice="aura-2-andromeda-en",
     )
     enter, exit_, _ = _state_hooks()

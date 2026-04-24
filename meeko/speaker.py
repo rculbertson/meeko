@@ -129,7 +129,7 @@ class Speaker:
                 logger.debug("speak complete")
 
     async def speak(self, text: str) -> None:
-        """Single-utterance convenience wrapper (greeting, timer)."""
+        """Single-utterance convenience wrapper (e.g. timer chime)."""
         if not text:
             return
 

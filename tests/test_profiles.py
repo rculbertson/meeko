@@ -19,7 +19,6 @@ def test_load_profiles_default(tmp_path: Path):
         textwrap.dedent("""\
         [profiles.default]
         wake_word = "meeko"
-        greeting = "Hello!"
         prompt = "You are Meeko."
     """)
     )
@@ -29,7 +28,6 @@ def test_load_profiles_default(tmp_path: Path):
     assert profiles["default"].name == "default"
     assert profiles["default"].wake_word == "meeko"
     assert profiles["default"].prompt == "You are Meeko."
-    assert profiles["default"].greeting == "Hello!"
 
 
 def test_load_profiles_multiple(tmp_path: Path):
@@ -39,12 +37,10 @@ def test_load_profiles_multiple(tmp_path: Path):
         textwrap.dedent("""\
         [profiles.default]
         wake_word = "meeko"
-        greeting = "Hello!"
         prompt = "You are Meeko."
 
         [profiles.pirate]
         wake_word = "ahoy"
-        greeting = "Ahoy matey!"
         prompt = "You are a pirate."
     """)
     )
@@ -63,7 +59,6 @@ def test_load_profiles_missing_default(tmp_path: Path):
         textwrap.dedent("""\
         [profiles.pirate]
         wake_word = "ahoy"
-        greeting = "Ahoy!"
         prompt = "You are a pirate."
     """)
     )
@@ -88,8 +83,8 @@ def test_load_profiles_empty(tmp_path: Path):
 
 def _make_profiles():
     return {
-        "default": Profile("default", "meeko", "You are Meeko.", "Hello!"),
-        "pirate": Profile("pirate", "ahoy", "You are a pirate.", "Ahoy matey!"),
+        "default": Profile("default", "meeko", "You are Meeko."),
+        "pirate": Profile("pirate", "ahoy", "You are a pirate."),
     }
 
 
