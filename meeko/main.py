@@ -158,8 +158,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         )
     else:
         profile = profiles["default"]
-        # Profile switches mid-session stay within this one DB session for
-        # now; revisit when the "new_session" intent lands.
         session_id = await store.create_session(profile.name)
         history = None
         logger.info("Started session %s (profile=%s)", session_id, profile.name)
@@ -302,8 +300,10 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     "[timing] turn_total_eot_to_speak_done=%dms",
                     int((time.perf_counter() - t_turn) * 1000),
                 )
+                # end/new are mutually exclusive by SessionManager design.
                 if session_manager.should_end():
-                    new_sid = await store.create_session(profile.name)
+                    active = profile_manager.active_profile
+                    new_sid = await store.create_session(active.name)
                     claude.reset_session(new_sid)
                     session_manager.clear()
                     if wake_detector is not None:
@@ -312,13 +312,25 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                         logger.info(
                             "Session ended; returning to IDLE "
                             "(say '%s' to start a new conversation)",
-                            profile.wake_word,
+                            active.wake_word,
                         )
                     else:
                         state = State.LISTENING
                         logger.info(
                             "Session ended; wake word disabled, returning to LISTENING"
                         )
+                elif session_manager.should_start_new():
+                    active = profile_manager.active_profile
+                    new_sid = await store.create_session(active.name)
+                    claude.reset_session(new_sid)
+                    session_manager.clear()
+                    state = State.LISTENING
+                    logger.info(
+                        "new_session: rotated to %s (profile=%s), "
+                        "continuing in LISTENING",
+                        new_sid[:8],
+                        active.name,
+                    )
                 else:
                     state = State.LISTENING
 
