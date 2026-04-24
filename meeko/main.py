@@ -136,7 +136,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     resumed_row: dict[str, object] | None = None
     if resume is not None:
-        resumed_row = await _resolve_resume(store, resume)
+        try:
+            resumed_row = await _resolve_resume(store, resume)
+        except SystemExit:
+            # _resolve_resume raises SystemExit on unknown ids; make sure
+            # the store we just opened doesn't leak past that exit.
+            store.close()
+            raise
 
     if resumed_row is not None:
         session_id = str(resumed_row["id"])
