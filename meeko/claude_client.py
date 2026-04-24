@@ -89,6 +89,15 @@ class ClaudeClient:
     def load_history(self, messages: list[dict[str, Any]]) -> None:
         self._messages = list(messages)
 
+    def reset_session(self, session_id: str) -> None:
+        """Drop in-memory history and rebind to a new SQLite session_id.
+
+        Called by the orchestrator after `end_session` so subsequent turns
+        persist to a fresh row and don't carry the prior conversation
+        into a new wake cycle."""
+        self._messages = []
+        self._session_id = session_id
+
     async def stream_turn(self, user_text: str) -> AsyncIterator[str]:
         """Yield sentence chunks as Claude generates them, running the
         tool-use loop across rounds. The caller drives TTS per chunk."""

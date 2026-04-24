@@ -19,11 +19,15 @@ class _FakeModel:
         self.inference_framework = inference_framework
         self.predict_calls: list[np.ndarray] = []
         self.scores_queue: list[float] = []
+        self.reset_calls = 0
 
     def predict(self, samples):
         self.predict_calls.append(samples)
         score = self.scores_queue.pop(0) if self.scores_queue else 0.0
         return {"hey_meeko": score}
+
+    def reset(self):
+        self.reset_calls += 1
 
 
 @pytest.fixture
@@ -128,6 +132,26 @@ def test_unknown_score_key_falls_back_to_first_value(fake_model, monkeypatch):
     monkeypatch.setattr(wake_word, "Model", _OddKeyModel)
     det = WakeWordDetector(model_path=model_path, threshold=0.5)
     assert det.process(b"\x00\x00" * FRAME_SAMPLES) is True
+
+
+def test_reset_clears_buffer_and_model_state(fake_model):
+    """Both the frame-alignment buffer AND openWakeWord's internal
+    prediction / preprocessor state must be cleared on re-arm. Without
+    the model-side reset, the just-fired wake context carries into the
+    new IDLE window and can immediately re-trigger."""
+    model_path, created = fake_model
+    det = WakeWordDetector(model_path=model_path, threshold=0.5)
+
+    # Leave a partial frame in the buffer and bump the model's reset
+    # counter's baseline.
+    det.process(b"\x00\x00" * 100)
+    assert len(det._buffer) > 0
+    baseline_resets = created["model"].reset_calls
+
+    det.reset()
+
+    assert len(det._buffer) == 0
+    assert created["model"].reset_calls == baseline_resets + 1
 
 
 def test_default_model_path():

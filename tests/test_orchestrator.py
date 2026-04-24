@@ -155,6 +155,10 @@ class _FakeClaudeClient:
     def load_history(self, messages):
         self.loaded_history = list(messages)
 
+    def reset_session(self, session_id):
+        self.session_id = session_id
+        self.loaded_history = None
+
 
 @pytest.fixture(autouse=True)
 def _disable_wake_word_by_default(monkeypatch):
@@ -878,6 +882,288 @@ async def test_run_gates_greeting_and_stt_on_wake_word(
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+
+
+class _EndSessionClaudeClient(_FakeClaudeClient):
+    """Simulates Sonnet calling `end_session` mid-turn: yields a brief
+    acknowledgement AND dispatches the tool. Mirrors the real flow where
+    the assistant acknowledges verbally before the tool fires."""
+
+    def stream_turn(self, text):
+        self.turns.append(text)
+        dispatcher = self.dispatcher
+
+        async def _gen():
+            yield "Goodnight!"
+            await dispatcher.dispatch("end_session", {})
+
+        return _gen()
+
+
+class _HoldingSTTClient:
+    """Holds a single EndOfTurn until a `ready` event is set, then blocks
+    the events() generator until the test cancels the task. Prevents
+    spurious reconnects from replaying the same event when fast_sleep
+    collapses the normal 10s hold; the `ready` gate lets the test fire
+    the EndOfTurn only after wake-word detection has transitioned the
+    orchestrator out of IDLE."""
+
+    def __init__(self, api_key):
+        self.session_obj = None
+        self.transcript = "stop"
+        self.ready = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def session(self):
+        self.session_obj = _HoldingSTTSession(self.transcript, self.ready)
+        try:
+            yield self.session_obj
+        finally:
+            self.session_obj.release.set()
+
+
+class _HoldingSTTSession:
+    def __init__(self, transcript, ready):
+        self._transcript = transcript
+        self._ready = ready
+        self.sent_audio_count = 0
+        self.keepalive_count = 0
+        self.release = asyncio.Event()
+
+    async def send_audio(self, pcm):
+        self.sent_audio_count += 1
+
+    async def send_keepalive(self):
+        self.keepalive_count += 1
+
+    async def events(self):
+        await self._ready.wait()
+        yield SimpleNamespace(event="EndOfTurn", transcript=self._transcript)
+        # Hold indefinitely; released when the surrounding session
+        # context manager exits (i.e. the test cancels the task).
+        await self.release.wait()
+
+
+async def test_end_session_tool_returns_to_idle_with_fresh_session(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """User says 'stop' → fake Claude dispatches end_session → after
+    SPEAKING completes, state returns to IDLE, a fresh SQLite session is
+    created, and the Claude client's in-memory history is dropped."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    captured_cb: dict = {}
+
+    def open_stream(**kwargs):
+        if kwargs.get("input"):
+            captured_cb["cb"] = kwargs["stream_callback"]
+            return mic_stream
+        return speaker_stream
+
+    pa_instance.open.side_effect = open_stream
+    speaker_stream.write.side_effect = lambda data: None
+
+    wake_profiles = {
+        "default": Profile(
+            name="default",
+            wake_word="meeko",
+            prompt="system",
+            greeting="Hi!",
+            voice=None,
+        )
+    }
+
+    # Wake detector fires on the first process() call so we get into
+    # LISTENING quickly, then never looked at again until we re-enter
+    # IDLE after end_session.
+    class _FakeDetector:
+        def __init__(self, *a, **kw):
+            self.calls = 0
+            self.resets = 0
+
+        def process(self, pcm: bytes) -> bool:
+            self.calls += 1
+            return True  # fire on first chunk
+
+        def reset(self) -> None:
+            self.resets += 1
+
+    detector_holder: dict = {}
+
+    def make_detector(*a, **kw):
+        d = _FakeDetector()
+        detector_holder["d"] = d
+        return d
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "Meeko stop"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _EndSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=wake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            # Drive: first mic chunk fires the wake detector → LISTENING;
+            # EndOfTurn("Meeko stop") fires end_session; we then wait for
+            # the detector to be reset (our signal that the IDLE
+            # transition ran).
+            for _ in range(500):
+                if "cb" in captured_cb and "d" in detector_holder:
+                    break
+                await real_sleep(0.01)
+            assert "cb" in captured_cb
+            # Push a mic frame so the wake detector fires → state
+            # transitions to LISTENING. Only then do we release the
+            # EndOfTurn from the fake STT; otherwise it'd arrive while
+            # still in IDLE and get discarded by the safety belt.
+            captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+            for _ in range(200):
+                if detector_holder["d"].calls >= 1:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            detector = detector_holder["d"]
+            for _ in range(500):
+                if detector.resets >= 1:
+                    break
+                await real_sleep(0.01)
+            assert detector.resets >= 1, "wake detector was never reset"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    # Claude fake got the user's stop message and its session_id was
+    # swapped out for a fresh one by reset_session.
+    claude = fake_claude_holder["client"]
+    assert claude.turns == ["Meeko stop"]
+
+    # A second SQLite session row exists (original + fresh one created
+    # after end_session).
+    store = SessionStore.open(db_path)
+    try:
+        rows = await store.list_sessions()
+    finally:
+        store.close()
+    assert len(rows) == 2
+    new_row = rows[0]  # ordered by last_active DESC
+    # Claude client was pointed at the new session by reset_session.
+    assert claude.session_id == new_row["id"]
+
+
+async def test_end_session_without_wake_word_transitions_to_listening(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """MEEKO_WAKE_WORD_DISABLED=1: end_session still resets the session
+    but state transitions to LISTENING (no wake gate to re-arm)."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+    # Autouse fixture already sets MEEKO_WAKE_WORD_DISABLED=1.
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "stop"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _EndSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            # Wake word disabled → state starts in LISTENING, so we can
+            # release the EndOfTurn immediately.
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            # Wait for the fresh session to be created (signal that the
+            # end_session hook ran to completion).
+            claude = None
+            original_session_id = None
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None:
+                    if original_session_id is None:
+                        original_session_id = c.session_id
+                    if c.session_id is not None and c.session_id != original_session_id:
+                        claude = c
+                        break
+                await real_sleep(0.01)
+            assert claude is not None, "session_id was never swapped"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    store = SessionStore.open(db_path)
+    try:
+        rows = await store.list_sessions()
+    finally:
+        store.close()
+    assert len(rows) == 2
 
 
 async def test_run_missing_api_key_raises(monkeypatch):
