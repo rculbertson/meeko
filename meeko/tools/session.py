@@ -32,7 +32,12 @@ class SessionManager:
 
     Handlers only set flags — they do NOT tear down state directly.
     The orchestrator drains Sonnet's acknowledgement via TTS first and
-    then, after SPEAKING ends, performs the actual session transition."""
+    then, after SPEAKING ends, performs the actual session transition.
+
+    The end/new request flags are mutually exclusive: the two intents
+    contradict each other, so a later request overrides any earlier
+    one within the same turn rather than letting both be true at once.
+    That keeps the orchestrator branch selection unambiguous."""
 
     def __init__(self) -> None:
         self._should_end = False
@@ -40,12 +45,14 @@ class SessionManager:
 
     def request_end(self) -> None:
         self._should_end = True
+        self._should_start_new = False
 
     def should_end(self) -> bool:
         return self._should_end
 
     def request_new(self) -> None:
         self._should_start_new = True
+        self._should_end = False
 
     def should_start_new(self) -> bool:
         return self._should_start_new

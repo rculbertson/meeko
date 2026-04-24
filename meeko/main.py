@@ -300,21 +300,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     "[timing] turn_total_eot_to_speak_done=%dms",
                     int((time.perf_counter() - t_turn) * 1000),
                 )
-                if session_manager.should_end() or session_manager.should_start_new():
+                # end/new are mutually exclusive by SessionManager design.
+                if session_manager.should_end():
                     active = profile_manager.active_profile
                     new_sid = await store.create_session(active.name)
                     claude.reset_session(new_sid)
-                    start_new = session_manager.should_start_new()
                     session_manager.clear()
-                    if start_new:
-                        state = State.LISTENING
-                        logger.info(
-                            "new_session: rotated to %s (profile=%s), "
-                            "continuing in LISTENING",
-                            new_sid[:8],
-                            active.name,
-                        )
-                    elif wake_detector is not None:
+                    if wake_detector is not None:
                         wake_detector.reset()
                         state = State.IDLE
                         logger.info(
@@ -327,6 +319,18 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                         logger.info(
                             "Session ended; wake word disabled, returning to LISTENING"
                         )
+                elif session_manager.should_start_new():
+                    active = profile_manager.active_profile
+                    new_sid = await store.create_session(active.name)
+                    claude.reset_session(new_sid)
+                    session_manager.clear()
+                    state = State.LISTENING
+                    logger.info(
+                        "new_session: rotated to %s (profile=%s), "
+                        "continuing in LISTENING",
+                        new_sid[:8],
+                        active.name,
+                    )
                 else:
                     state = State.LISTENING
 

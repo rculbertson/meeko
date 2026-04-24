@@ -36,10 +36,29 @@ def test_request_new_sets_new_flag_only():
 def test_clear_resets_both_flags():
     manager = SessionManager()
     manager.request_end()
+    manager.clear()
     manager.request_new()
     manager.clear()
     assert manager.should_end() is False
     assert manager.should_start_new() is False
+
+
+def test_request_new_overrides_prior_request_end():
+    """end/new contradict each other; the later request wins so the
+    orchestrator never sees both flags set at once."""
+    manager = SessionManager()
+    manager.request_end()
+    manager.request_new()
+    assert manager.should_end() is False
+    assert manager.should_start_new() is True
+
+
+def test_request_end_overrides_prior_request_new():
+    manager = SessionManager()
+    manager.request_new()
+    manager.request_end()
+    assert manager.should_start_new() is False
+    assert manager.should_end() is True
 
 
 def test_tool_definition_shape():
