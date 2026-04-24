@@ -98,6 +98,13 @@ class ClaudeClient:
         self._messages = []
         self._session_id = session_id
 
+    def rebind_session(self, session_id: str) -> None:
+        """Rebind to a different SQLite session_id without touching history.
+
+        Called by the orchestrator after `load_history` swaps the message
+        array so subsequent turns persist to the loaded session's row."""
+        self._session_id = session_id
+
     async def stream_turn(self, user_text: str) -> AsyncIterator[str]:
         """Yield sentence chunks as Claude generates them, running the
         tool-use loop across rounds. The caller drives TTS per chunk."""

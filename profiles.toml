@@ -19,7 +19,16 @@ When the user clearly wants to discard the current thread and start a fresh one 
 (e.g. 'let's start fresh', 'new conversation', 'different topic — wipe the slate'), \
 confirm briefly and then call the new_session tool. \
 Do not call new_session when the user is merely changing subjects \
-('that's enough about X, let's talk about Y') — only when they explicitly want a blank slate.\
+('that's enough about X, let's talk about Y') — only when they explicitly want a blank slate. \
+When the user asks about a prior conversation \
+(e.g. 'what were we working on?', 'go back to the todo app', 'find our Supabase discussion'), \
+call list_sessions with the key terms as the query, then read the top result titles back \
+so the user can confirm which one to load. \
+On a clear match, confirm briefly and call load_session with the exact session id. \
+On multiple plausible matches, read the top two or three titles and ask the user to pick one. \
+To resume a prior conversation mid-conversation (without ending Meeko), \
+call end_session first and then load_session in the same turn — \
+Meeko will finalize the current session and swap to the loaded one.\
 """
 
 # Example custom profile:

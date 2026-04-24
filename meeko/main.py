@@ -181,7 +181,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     )
     dispatcher.register(
         session_tools(),
-        functools.partial(session_handle, manager=session_manager),
+        functools.partial(session_handle, manager=session_manager, store=store),
     )
 
     claude = ClaudeClient(
@@ -321,8 +321,30 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     "[timing] turn_total_eot_to_speak_done=%dms",
                     int((time.perf_counter() - t_turn) * 1000),
                 )
-                # end/new are mutually exclusive by SessionManager design.
-                if session_manager.should_end():
+                # should_load can coexist with should_end (chain: finalize
+                # current session then load a prior one in one turn).
+                if session_manager.should_load():
+                    target_id = session_manager.get_load_target()
+                    assert target_id is not None  # guaranteed by should_load()
+                    if session_manager.should_end():
+                        fire_summary(session_id)
+                        logger.info(
+                            "end+load chain: fired summary for %s", session_id[:8]
+                        )
+                    turns = await store.load_turns(target_id)
+                    claude.load_history(turns)
+                    claude.rebind_session(target_id)
+                    session_id = target_id
+                    await store.touch_session(target_id)
+                    session_manager.clear()
+                    state = State.LISTENING
+                    logger.info(
+                        "load_session: swapped history to %s (%d turns), "
+                        "continuing in LISTENING",
+                        target_id[:8],
+                        len(turns),
+                    )
+                elif session_manager.should_end():
                     active = profile_manager.active_profile
                     finalized_sid = session_id
                     new_sid = await store.create_session(active.name)

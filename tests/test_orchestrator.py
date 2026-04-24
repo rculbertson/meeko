@@ -170,6 +170,9 @@ class _FakeClaudeClient:
         self.session_id = session_id
         self.loaded_history = None
 
+    def rebind_session(self, session_id):
+        self.session_id = session_id
+
     def set_system_prompt(self, prompt):
         self.system_prompt = prompt
 
@@ -1589,6 +1592,291 @@ async def test_new_session_after_profile_switch_records_active_profile(
         f"fresh session recorded stale profile {fresh['profile_name']!r}; "
         "expected 'pirate' after switch_profile"
     )
+
+
+class _LoadSessionClaudeClient(_SessionToolClaudeClient):
+    """Simulates Sonnet calling load_session with a specific target id.
+
+    The target session_id must be set on the instance before use."""
+
+    TOOL_NAME = "load_session"
+    ACK = "Picking up where we left off."
+
+    def __init__(self, *args, target_session_id="", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.target_session_id = target_session_id
+
+    def stream_turn(self, text):
+        self.turns.append(text)
+        dispatcher = self.dispatcher
+        target_id = self.target_session_id
+        ack = self.ACK
+        store = self.store
+        sid = self.session_id
+
+        async def _gen():
+            if store is not None and sid is not None:
+                await store.persist_turn(sid, "user", text)
+            yield ack
+            if store is not None and sid is not None:
+                await store.persist_turn(
+                    sid, "assistant", [{"type": "text", "text": ack}]
+                )
+            await dispatcher.dispatch("load_session", {"id": target_id})
+
+        return _gen()
+
+
+class _EndThenLoadSessionClaudeClient(_FakeClaudeClient):
+    """Simulates Sonnet chaining end_session + load_session in one turn.
+
+    Used to verify that the summary fires for the current session before
+    history is swapped to the target."""
+
+    ACK = "Wrapping up and switching over."
+
+    def __init__(self, *args, target_session_id="", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.target_session_id = target_session_id
+
+    def stream_turn(self, text):
+        self.turns.append(text)
+        dispatcher = self.dispatcher
+        target_id = self.target_session_id
+        ack = self.ACK
+        store = self.store
+        sid = self.session_id
+
+        async def _gen():
+            if store is not None and sid is not None:
+                await store.persist_turn(sid, "user", text)
+            yield ack
+            if store is not None and sid is not None:
+                await store.persist_turn(
+                    sid, "assistant", [{"type": "text", "text": ack}]
+                )
+            await dispatcher.dispatch("end_session", {})
+            await dispatcher.dispatch("load_session", {"id": target_id})
+
+        return _gen()
+
+
+async def test_load_session_tool_swaps_history_and_stays_listening(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """User says 'go back to the todo session' → Sonnet calls load_session →
+    after SPEAKING, claude.load_history is populated from the target session's
+    turns and the client is rebound to target's session_id."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    seed = SessionStore.open(db_path)
+    target_id = None
+    try:
+        target_id = await seed.create_session("default")
+        await seed.persist_turn(target_id, "user", "let's plan a todo app")
+        await seed.persist_turn(
+            target_id, "assistant", [{"type": "text", "text": "Sure, let's start!"}]
+        )
+        await seed.update_session_metadata(
+            target_id,
+            title="Todo app planning",
+            summary="Discussed architecture options.",
+            transcript="USER: let's plan a todo app\nASSISTANT: Sure, let's start!",
+        )
+    finally:
+        await seed.close()
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "go back to the todo session"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _LoadSessionClaudeClient(
+            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
+        )
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            # Wait for claude to be rebound to the target session.
+            original_sid = None
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None:
+                    if original_sid is None:
+                        original_sid = c.session_id
+                    if c.session_id == target_id:
+                        break
+                await real_sleep(0.01)
+            assert fake_claude_holder.get("client") is not None
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    claude = fake_claude_holder["client"]
+    assert claude.session_id == target_id
+    assert claude.loaded_history == [
+        {"role": "user", "content": "let's plan a todo app"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Sure, let's start!"}],
+        },
+    ]
+
+
+async def test_end_then_load_session_fires_summary_for_current_session(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """Sonnet chains end_session + load_session in one turn.
+
+    The orchestrator must fire the background summary for the *current* session
+    before swapping history to the target, and the claude client must end up
+    bound to the target session."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    seed = SessionStore.open(db_path)
+    target_id = None
+    try:
+        target_id = await seed.create_session("default")
+        await seed.persist_turn(target_id, "user", "prior question")
+        await seed.persist_turn(
+            target_id, "assistant", [{"type": "text", "text": "prior answer"}]
+        )
+    finally:
+        await seed.close()
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "wrap up and go back to the prior session"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _EndThenLoadSessionClaudeClient(
+            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
+        )
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        original_sid = None
+        try:
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            # Capture original_sid before the swap, then wait for claude
+            # to be rebound to the target session.
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None:
+                    if original_sid is None:
+                        original_sid = c.session_id
+                    if c.session_id == target_id:
+                        break
+                await real_sleep(0.01)
+
+            # Give the background summary task time to write.
+            assert original_sid is not None
+            for _ in range(200):
+                store_check = SessionStore.open(db_path)
+                try:
+                    row = store_check._conn.execute(
+                        "SELECT title FROM sessions WHERE id = ?",
+                        (original_sid,),
+                    ).fetchone()
+                finally:
+                    await store_check.close()
+                if row is not None and row[0] is not None:
+                    break
+                await real_sleep(0.01)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    claude = fake_claude_holder["client"]
+    assert claude.session_id == target_id
+    assert claude.loaded_history == [
+        {"role": "user", "content": "prior question"},
+        {"role": "assistant", "content": [{"type": "text", "text": "prior answer"}]},
+    ]
+
+    # The original session (not target) got a summary from the stub.
+    store = SessionStore.open(db_path)
+    try:
+        row = store._conn.execute(
+            "SELECT title FROM sessions WHERE id = ?", (original_sid,)
+        ).fetchone()
+    finally:
+        await store.close()
+    assert row is not None and row[0] == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
 
 
 async def test_run_missing_api_key_raises(monkeypatch):

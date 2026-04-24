@@ -295,6 +295,90 @@ async def test_fts_match_finds_by_summary_and_transcript(tmp_path, store):
     assert [r[0] for r in by_transcript] == [sid_a]
 
 
+async def test_search_sessions_returns_ranked_results(store):
+    sid_a = await store.create_session("default")
+    sid_b = await store.create_session("default")
+    await store.update_session_metadata(
+        sid_a,
+        title="Todo app prototype",
+        summary="Compared Supabase and SQLite as backends.",
+        transcript="lots of back and forth about the schema",
+    )
+    await store.update_session_metadata(
+        sid_b,
+        title="Marketing brainstorm",
+        summary="Ideas for the spring launch campaign.",
+        transcript="email flows and landing page copy",
+    )
+
+    results = await store.search_sessions("todo app")
+    assert len(results) >= 1
+    assert results[0]["session_id"] == sid_a
+    assert results[0]["title"] == "Todo app prototype"
+    assert "last_active" in results[0]
+
+
+async def test_search_sessions_transcript_fallback(store):
+    sid = await store.create_session("default")
+    await store.update_session_metadata(
+        sid,
+        title="Project planning",
+        summary="High-level roadmap discussion.",
+        transcript="we also considered using Redis for caching",
+    )
+    results = await store.search_sessions("Redis")
+    assert len(results) == 1
+    assert results[0]["session_id"] == sid
+
+
+async def test_search_sessions_no_match(store):
+    sid = await store.create_session("default")
+    await store.update_session_metadata(
+        sid,
+        title="Cooking tips",
+        summary="How to make pasta.",
+        transcript="pasta water",
+    )
+    results = await store.search_sessions("blockchain")
+    assert results == []
+
+
+async def test_search_sessions_empty_query_returns_empty(store):
+    sid = await store.create_session("default")
+    await store.update_session_metadata(
+        sid, title="Something", summary="Stuff.", transcript="things"
+    )
+    results = await store.search_sessions("")
+    assert results == []
+
+
+async def test_search_sessions_strips_fts_operators(store):
+    """Query characters like * " : ^ must not cause an FTS5 syntax error."""
+    sid = await store.create_session("default")
+    await store.update_session_metadata(
+        sid, title="Supabase chat", summary="Database discussion.", transcript="schema"
+    )
+    # These would explode if passed raw to FTS5.
+    for query in ["supabase*", '"supabase"', "title:supabase", "^supabase"]:
+        results = await store.search_sessions(query)
+        assert isinstance(results, list), (
+            f"query {query!r} raised instead of returning list"
+        )
+
+
+async def test_search_sessions_respects_limit(store):
+    for i in range(6):
+        sid = await store.create_session("default")
+        await store.update_session_metadata(
+            sid,
+            title=f"Session {i}",
+            summary="about widgets and gadgets",
+            transcript="widgets",
+        )
+    results = await store.search_sessions("widgets", limit=3)
+    assert len(results) <= 3
+
+
 def test_default_db_path_honors_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "custom.db"))
     assert default_db_path() == tmp_path / "custom.db"

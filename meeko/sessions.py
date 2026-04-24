@@ -16,12 +16,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# FTS5 operator characters that would cause a syntax error if left in a bare
+# query string.  We strip them so user speech is always treated as a literal
+# multi-token match rather than a structured FTS expression.
+_FTS_STRIP_RE = re.compile(r'["*^:()\[\]{}]')
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -233,6 +239,28 @@ class SessionStore:
             summary,
             transcript,
         )
+
+    def _search_sessions_sync(self, query: str, limit: int) -> list[dict[str, Any]]:
+        clean = _FTS_STRIP_RE.sub(" ", query).strip()
+        if not clean:
+            return []
+        rows = self._conn.execute(
+            "SELECT f.session_id, f.title, s.last_active "
+            "FROM sessions_fts f JOIN sessions s ON s.id = f.session_id "
+            "WHERE sessions_fts MATCH ? "
+            "ORDER BY bm25(sessions_fts, 10.0, 5.0, 1.0) "
+            "LIMIT ?",
+            (clean, limit),
+        ).fetchall()
+        return [{"session_id": r[0], "title": r[1], "last_active": r[2]} for r in rows]
+
+    async def search_sessions(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Full-text search over session titles, summaries, and transcripts.
+
+        Returns up to ``limit`` rows ordered by BM25 relevance (title matches
+        rank highest). Query operators are stripped so user speech is always
+        treated as a literal multi-token match."""
+        return await asyncio.to_thread(self._search_sessions_sync, query, limit)
 
     async def close(self) -> None:
         await self._run(self._conn.close)
