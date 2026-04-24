@@ -159,6 +159,9 @@ class _FakeClaudeClient:
         self.session_id = session_id
         self.loaded_history = None
 
+    def set_system_prompt(self, prompt):
+        self.system_prompt = prompt
+
 
 @pytest.fixture(autouse=True)
 def _disable_wake_word_by_default(monkeypatch):
@@ -911,6 +914,26 @@ class _NewSessionClaudeClient(_SessionToolClaudeClient):
     ACK = "Starting fresh."
 
 
+class _SwitchThenNewSessionClaudeClient(_FakeClaudeClient):
+    """Simulates Sonnet dispatching `switch_profile` and then
+    `new_session` in a single turn. Used to verify the fresh SQLite row
+    records the switched profile, not the original one."""
+
+    SWITCH_TO = "pirate"
+
+    def stream_turn(self, text):
+        self.turns.append(text)
+        dispatcher = self.dispatcher
+        switch_to = self.SWITCH_TO
+
+        async def _gen():
+            yield "Okay, switching and starting fresh."
+            await dispatcher.dispatch("switch_profile", {"profile_name": switch_to})
+            await dispatcher.dispatch("new_session", {})
+
+        return _gen()
+
+
 class _HoldingSTTClient:
     """Holds a single EndOfTurn until a `ready` event is set, then blocks
     the events() generator until the test cancels the task. Prevents
@@ -1307,6 +1330,105 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
     assert len(rows) == 2
     new_row = rows[0]  # ordered by last_active DESC
     assert claude.session_id == new_row["id"]
+
+
+async def test_new_session_after_profile_switch_records_active_profile(
+    monkeypatch, tmp_path
+):
+    """If Sonnet switches profiles and then calls new_session in the same
+    turn, the fresh SQLite row must carry the switched profile — not the
+    one active at startup. This is the regression guard for using
+    `profile_manager.active_profile.name` in the post-SPEAKING hook."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+    # Autouse fixture already sets MEEKO_WAKE_WORD_DISABLED=1.
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    two_profiles = {
+        "default": Profile(
+            name="default", wake_word="meeko", prompt="default system", voice=None
+        ),
+        "pirate": Profile(
+            name="pirate", wake_word="meeko", prompt="pirate system", voice=None
+        ),
+    }
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "switch to pirate and start fresh"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _SwitchThenNewSessionClaudeClient(
+            api_key, system_prompt, dispatcher, **kwargs
+        )
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=two_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            claude = None
+            original_sid = None
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None:
+                    if original_sid is None:
+                        original_sid = c.session_id
+                    if c.session_id is not None and c.session_id != original_sid:
+                        claude = c
+                        break
+                await real_sleep(0.01)
+            assert claude is not None, "session_id was never swapped"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    store = SessionStore.open(db_path)
+    try:
+        rows = await store.list_sessions()
+    finally:
+        store.close()
+    # Two rows: the original (default profile) and the post-switch one
+    # (pirate profile). Latest is the fresh one.
+    assert len(rows) == 2
+    fresh = rows[0]  # ordered by last_active DESC
+    assert fresh["profile_name"] == "pirate", (
+        f"fresh session recorded stale profile {fresh['profile_name']!r}; "
+        "expected 'pirate' after switch_profile"
+    )
 
 
 async def test_run_missing_api_key_raises(monkeypatch):
