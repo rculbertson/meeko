@@ -319,7 +319,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     new_sid = await store.create_session(profile.name)
                     claude.reset_session(new_sid)
                     session_manager.clear()
-                    timer_manager.cancel_all_timers()
                     if wake_detector is not None:
                         wake_detector.reset()
                         state = State.IDLE
