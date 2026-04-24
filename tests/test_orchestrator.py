@@ -175,7 +175,6 @@ def fake_profiles():
             name="default",
             wake_word="meeko",
             prompt="system",
-            greeting="",  # skip greeting to avoid an extra speak round
             voice=None,
         )
     }
@@ -621,9 +620,7 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_
             pytest.fail("run() did not exit after mic_queue overflow")
 
 
-async def test_run_resume_preloads_history_and_skips_greeting(
-    monkeypatch, fake_profiles, tmp_path
-):
+async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path):
     from meeko.sessions import SessionStore
 
     db_path = tmp_path / "meeko.db"
@@ -666,14 +663,11 @@ async def test_run_resume_preloads_history_and_skips_greeting(
         fake_claude_holder["client"] = c
         return c
 
-    # Give the fake profile a non-empty greeting so we can assert TTS
-    # was NOT called with it on resume.
     resume_profiles = {
         "default": Profile(
             name="default",
             wake_word="meeko",
             prompt="system",
-            greeting="Hello there.",
             voice=None,
         )
     }
@@ -696,9 +690,6 @@ async def test_run_resume_preloads_history_and_skips_greeting(
         patch("meeko.main.setup_logging"),
     ):
         task = asyncio.create_task(meeko_main.run(resume=session_id))
-        # Wait until the STT supervisor has entered a session. This is
-        # downstream of the greeting branch in run(), so if the greeting
-        # was going to be spoken it already would have been.
         await asyncio.wait_for(session_entered.wait(), timeout=5)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -713,7 +704,6 @@ async def test_run_resume_preloads_history_and_skips_greeting(
             "content": [{"type": "text", "text": "prior reply"}],
         },
     ]
-    # Greeting must NOT have been spoken on resume.
     assert fake_tts.calls == []
 
 
@@ -752,14 +742,11 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
     assert "default" in out
 
 
-async def test_run_gates_greeting_and_stt_on_wake_word(
-    monkeypatch, fake_profiles, tmp_path
-):
+async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
     """With wake word enabled the orchestrator starts in IDLE and holds
-    audio back from STT + holds the greeting back until the detector
-    fires. Uses an asyncio.Event inside the fake detector so the test
-    doesn't depend on real-time polling (which flaked under full-suite
-    load)."""
+    audio back from STT until the detector fires. After the detector
+    fires, mic audio flows to STT (so a question spoken right after
+    the wake word is transcribed) and no greeting TTS is emitted."""
     monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
@@ -784,7 +771,6 @@ async def test_run_gates_greeting_and_stt_on_wake_word(
             name="default",
             wake_word="meeko",
             prompt="system",
-            greeting="Hi!",
             voice=None,
         )
     }
@@ -817,8 +803,11 @@ async def test_run_gates_greeting_and_stt_on_wake_word(
         detector_holder["d"] = d
         return d
 
-    fake_stt = _FakeSTTClient("dg-test")
-    fake_stt.events = []
+    # Use a holding STT client so the session stays open while the test
+    # pushes post-wake chunks — otherwise the empty events list combined
+    # with fast_sleep-patched asyncio.sleep causes the supervisor to
+    # churn through reconnects and drop the mic chunks mid-cycle.
+    fake_stt = _HoldingSTTClient("dg-test")
     fake_tts = _FakeTTSClient("dg-test")
 
     def make_claude(api_key, system_prompt, dispatcher, **kwargs):
@@ -872,12 +861,16 @@ async def test_run_gates_greeting_and_stt_on_wake_word(
             # TTS were both untouched up to that point.
             assert detector.first_call_snapshot == {"stt": 0, "tts": []}
 
-            # Greeting fires after the wake word.
-            for _ in range(200):
-                if fake_tts.calls:
+            # After the wake word fires, mic chunks should flow through
+            # to STT so a question spoken right after "Hey Meeko" gets
+            # transcribed. No greeting TTS should be emitted.
+            for _ in range(50):
+                captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+                await real_sleep(0.02)
+                if fake_stt.session_obj.sent_audio_count > 0:
                     break
-                await real_sleep(0.01)
-            assert fake_tts.calls == [("Hi!", "asteria")]
+            assert fake_stt.session_obj.sent_audio_count > 0
+            assert fake_tts.calls == []
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -977,7 +970,6 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
             name="default",
             wake_word="meeko",
             prompt="system",
-            greeting="Hi!",
             voice=None,
         )
     }
