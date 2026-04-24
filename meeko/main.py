@@ -24,6 +24,7 @@ import sys
 import time
 from enum import Enum, auto
 
+import anthropic
 from dotenv import load_dotenv
 from websockets.exceptions import ConnectionClosed
 
@@ -32,6 +33,7 @@ from meeko.claude_client import ClaudeClient
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
 from meeko.profiles import load_profiles
+from meeko.session_summary import summarize_session
 from meeko.sessions import SessionStore, default_db_path
 from meeko.speaker import Speaker
 from meeko.stt_supervisor import KEEPALIVE_INTERVAL_S, STTSupervisor
@@ -187,6 +189,19 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         claude.load_history(history)
     profile_manager.set_claude_client(claude)
 
+    # Separate Anthropic client for background summarization — sidesteps
+    # any concern about concurrent use with the live conversation client
+    # and lets summarize_session own its own lifecycle.
+    summary_client = anthropic.AsyncAnthropic(api_key=anthropic_key)
+    summary_tasks: set[asyncio.Task] = set()
+
+    def fire_summary(finalized_sid: str) -> None:
+        task = asyncio.create_task(
+            summarize_session(store, finalized_sid, summary_client)
+        )
+        summary_tasks.add(task)
+        task.add_done_callback(summary_tasks.discard)
+
     stt = DeepgramSTT(deepgram_key)
     tts = DeepgramTTS(deepgram_key)
 
@@ -262,7 +277,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     async def handle_turns(stt_session):
         """Consume STT events, drive a Claude turn on EndOfTurn."""
-        nonlocal state
+        nonlocal state, session_id
         # If we want to make it faster, we can also use EagerEndOfTurn and
         # TurnResumed events which allows us to send text to the LLM eagerly.
         # If they're done talking, great, we already sent the text to the LLM.
@@ -303,9 +318,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # end/new are mutually exclusive by SessionManager design.
                 if session_manager.should_end():
                     active = profile_manager.active_profile
+                    finalized_sid = session_id
                     new_sid = await store.create_session(active.name)
                     claude.reset_session(new_sid)
+                    session_id = new_sid
                     session_manager.clear()
+                    fire_summary(finalized_sid)
                     if wake_detector is not None:
                         wake_detector.reset()
                         state = State.IDLE
@@ -321,9 +339,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                         )
                 elif session_manager.should_start_new():
                     active = profile_manager.active_profile
+                    finalized_sid = session_id
                     new_sid = await store.create_session(active.name)
                     claude.reset_session(new_sid)
+                    session_id = new_sid
                     session_manager.clear()
+                    fire_summary(finalized_sid)
                     state = State.LISTENING
                     logger.info(
                         "new_session: rotated to %s (profile=%s), "
@@ -371,6 +392,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     finally:
         stop_event.set()
         timer_manager.cancel_all_timers()
+        # Cancel in-flight summary tasks before closing the SQLite
+        # connection; letting them run into a closed store would crash
+        # and a half-written summary is not worth the wait at shutdown.
+        for task in summary_tasks:
+            task.cancel()
+        if summary_tasks:
+            await asyncio.gather(*summary_tasks, return_exceptions=True)
         audio.close()
         store.close()
         logger.info("Shutting down.")

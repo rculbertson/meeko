@@ -202,6 +202,99 @@ async def test_touch_session_updates_last_active(store):
     assert after >= before
 
 
+async def test_update_session_metadata_writes_row_and_fts(tmp_path, store):
+    sid = await store.create_session("default")
+    await store.update_session_metadata(
+        sid,
+        title="Todo app prototype",
+        summary="Compared Supabase and SQLite as backends for a todo app.",
+        transcript="USER: we should build a todo app\nASSISTANT: sounds good",
+    )
+
+    conn = sqlite3.connect(str(tmp_path / "meeko.db"))
+    try:
+        row = conn.execute(
+            "SELECT title, summary FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()
+        fts_rows = conn.execute(
+            "SELECT session_id, title, summary, transcript FROM sessions_fts "
+            "WHERE session_id = ?",
+            (sid,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert row == (
+        "Todo app prototype",
+        "Compared Supabase and SQLite as backends for a todo app.",
+    )
+    assert len(fts_rows) == 1
+    assert fts_rows[0] == (
+        sid,
+        "Todo app prototype",
+        "Compared Supabase and SQLite as backends for a todo app.",
+        "USER: we should build a todo app\nASSISTANT: sounds good",
+    )
+
+
+async def test_update_session_metadata_is_idempotent(tmp_path, store):
+    """Re-summarizing a session must replace the FTS row, not duplicate."""
+    sid = await store.create_session("default")
+    await store.update_session_metadata(
+        sid, title="first", summary="old", transcript="old text"
+    )
+    await store.update_session_metadata(
+        sid, title="second", summary="new", transcript="new text"
+    )
+
+    conn = sqlite3.connect(str(tmp_path / "meeko.db"))
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?", (sid,)
+        ).fetchone()[0]
+        latest = conn.execute(
+            "SELECT title, summary, transcript FROM sessions_fts WHERE session_id = ?",
+            (sid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert count == 1
+    assert latest == ("second", "new", "new text")
+
+
+async def test_fts_match_finds_by_summary_and_transcript(tmp_path, store):
+    sid_a = await store.create_session("default")
+    sid_b = await store.create_session("default")
+    await store.update_session_metadata(
+        sid_a,
+        title="Todo app",
+        summary="Compared Supabase and SQLite.",
+        transcript="discussed Redis as a cache layer",
+    )
+    await store.update_session_metadata(
+        sid_b,
+        title="Marketing brainstorm",
+        summary="Ideas for the spring launch.",
+        transcript="email campaigns and landing pages",
+    )
+
+    conn = sqlite3.connect(str(tmp_path / "meeko.db"))
+    try:
+        # Summary column match
+        by_summary = conn.execute(
+            "SELECT session_id FROM sessions_fts WHERE sessions_fts MATCH 'Supabase'"
+        ).fetchall()
+        # Transcript-only match (word only appears in transcript col)
+        by_transcript = conn.execute(
+            "SELECT session_id FROM sessions_fts WHERE sessions_fts MATCH 'Redis'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [r[0] for r in by_summary] == [sid_a]
+    assert [r[0] for r in by_transcript] == [sid_a]
+
+
 def test_default_db_path_honors_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "custom.db"))
     assert default_db_path() == tmp_path / "custom.db"

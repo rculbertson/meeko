@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,
     profile_name  TEXT NOT NULL,
     title         TEXT,
-    tags          TEXT,
     summary       TEXT,
     created_at    TEXT NOT NULL,
     last_active   TEXT NOT NULL
@@ -42,6 +41,17 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, id);
+
+-- FTS index populated once per session at end-of-session summarization.
+-- Standalone (not content=...) so we don't have to manage rowid mapping
+-- from the UUID-keyed sessions table. BM25 weights at query time give
+-- title/summary precedence over transcript (see search_sessions).
+CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+    session_id UNINDEXED,
+    title,
+    summary,
+    transcript
+);
 """
 
 
@@ -169,6 +179,51 @@ class SessionStore:
 
     async def touch_session(self, session_id: str) -> None:
         await asyncio.to_thread(self._touch_session_sync, session_id)
+
+    def _update_session_metadata_sync(
+        self,
+        session_id: str,
+        title: str,
+        summary: str,
+        transcript: str,
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET title = ?, summary = ? WHERE id = ?",
+                (title, summary, session_id),
+            )
+            # Upsert into the standalone FTS table: drop any prior row for
+            # this session (re-summarization is rare but safe) and reinsert.
+            self._conn.execute(
+                "DELETE FROM sessions_fts WHERE session_id = ?",
+                (session_id,),
+            )
+            self._conn.execute(
+                "INSERT INTO sessions_fts (session_id, title, summary, transcript) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, title, summary, transcript),
+            )
+
+    async def update_session_metadata(
+        self,
+        session_id: str,
+        title: str,
+        summary: str,
+        transcript: str,
+    ) -> None:
+        """Persist the end-of-session summary.
+
+        Writes ``title`` and ``summary`` to the sessions row and upserts
+        the corresponding FTS row. ``transcript`` is stored only in the
+        FTS table (fallback recall when the summary misses a keyword);
+        the on-disk turn log remains the source of truth."""
+        await asyncio.to_thread(
+            self._update_session_metadata_sync,
+            session_id,
+            title,
+            summary,
+            transcript,
+        )
 
     def close(self) -> None:
         self._conn.close()
