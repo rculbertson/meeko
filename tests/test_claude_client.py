@@ -10,6 +10,9 @@ the message payload that hits the wire.
 from __future__ import annotations
 
 import copy
+import logging
+import os
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -281,3 +284,66 @@ async def test_breakpoint_applied_each_round_in_tool_use_loop(monkeypatch):
     tail = msgs_round2[-1]["content"][-1]
     assert tail["type"] == "tool_result"
     assert tail["cache_control"] == {"type": "ephemeral"}
+
+
+# Anthropic's cache minimum for Sonnet is 1024 tokens — pad the system prompt
+# well past that so the first turn is guaranteed to create a cache entry.
+_INTEGRATION_SYSTEM_PROMPT = (
+    "You are a terse test assistant. Reply in three words or fewer.\n\n"
+    "Background context (padding so the system prompt clears the prompt-cache "
+    "minimum for Sonnet): "
+    + ("Meeko is a long-running brainstorming voice assistant. " * 200)
+)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_second_turn_hits_prompt_cache(caplog):
+    """End-to-end check that our cache_control placement actually produces
+    a cache hit on turn 2.
+
+    Costs ~2 short Sonnet calls (a fraction of a cent). Skipped without
+    ANTHROPIC_API_KEY so unit-only runs stay offline. The skip happens
+    inside the body (not via skipif) because conftest's autouse
+    load_dotenv fixture runs after collection-time decorators."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        pytest.skip("ANTHROPIC_API_KEY not set")
+    client = ClaudeClient(
+        api_key=api_key,
+        system_prompt=_INTEGRATION_SYSTEM_PROMPT,
+        dispatcher=ToolDispatcher(),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="meeko"):
+        async for _ in client.stream_turn("Say 'one'."):
+            pass
+        async for _ in client.stream_turn("Say 'two'."):
+            pass
+
+    cache_reads: list[int] = []
+    cache_creates: list[int] = []
+    for rec in caplog.records:
+        msg = rec.getMessage()
+        read = re.search(r"cache_read=(\d+)", msg)
+        create = re.search(r"cache_create=(\d+)", msg)
+        if read and create:
+            cache_reads.append(int(read.group(1)))
+            cache_creates.append(int(create.group(1)))
+
+    assert len(cache_reads) >= 2, (
+        f"expected at least 2 timing log records, got {len(cache_reads)}"
+    )
+    # Turn 2 must hit the cache for at least the system+tools+turn-1 prefix.
+    # We can't assert turn 1 is a cold miss — repeat test runs within the
+    # 5-minute cache TTL will already find the system prompt cached, which
+    # is fine (it just proves caching is working from a prior run too).
+    assert cache_reads[1] > 0, (
+        f"turn 2 should hit the cache, got cache_read={cache_reads[1]}"
+    )
+    # Turn 2's cached prefix must include turn 1's user+assistant content,
+    # so its cache read should be strictly larger than turn 1's.
+    assert cache_reads[1] > cache_reads[0], (
+        f"turn 2 cache_read ({cache_reads[1]}) should exceed turn 1's "
+        f"({cache_reads[0]}) — the breakpoint moves forward each turn"
+    )

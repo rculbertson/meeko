@@ -51,7 +51,7 @@ filterwarnings = [
     "ignore::DeprecationWarning:deepgram",
     "ignore::DeprecationWarning:websockets",
 ]
-addopts = "--cov=meeko --cov-report=term-missing"
+addopts = "--cov=meeko --cov-report=term-missing -m 'not integration'"
 
 [tool.coverage.run]
 source = ["meeko"]
