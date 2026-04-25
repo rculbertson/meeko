@@ -405,6 +405,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             task.cancel()
         if summary_tasks:
             await asyncio.gather(*summary_tasks, return_exceptions=True)
+        await summary_client.close()
         audio.close()
         await store.close()
         logger.info("Shutting down.")
