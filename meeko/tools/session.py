@@ -202,7 +202,7 @@ async def handle(
         for i, r in enumerate(results, 1):
             title = r["title"] or "(no title)"
             date = r["last_active"][:10] if r["last_active"] else "?"
-            lines.append(f"{i}. {title!r} — {date} (id: {r['session_id']})")
+            lines.append(f'{i}. "{title}" — {date} (id: {r["session_id"]})')
         return "\n".join(lines)
 
     if fn_name == "load_session":

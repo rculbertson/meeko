@@ -318,6 +318,31 @@ async def test_search_sessions_returns_ranked_results(store):
     assert "last_active" in results[0]
 
 
+async def test_search_sessions_title_outranks_transcript(store):
+    """Title matches must rank above transcript-only matches.
+
+    Regression: bm25() weights are positional across *all* columns including
+    UNINDEXED ones, so a missing leading 0.0 for session_id silently shifts
+    every weight one column to the left.
+    """
+    sid_title = await store.create_session("default")
+    sid_transcript = await store.create_session("default")
+    await store.update_session_metadata(
+        sid_title,
+        title="Redis caching strategy",
+        summary="Picking a cache layer.",
+        transcript="discussed several options at length",
+    )
+    await store.update_session_metadata(
+        sid_transcript,
+        title="Weekend trip planning",
+        summary="Where to go and what to pack.",
+        transcript="Redis came up briefly as an aside",
+    )
+    results = await store.search_sessions("Redis")
+    assert [r["session_id"] for r in results] == [sid_title, sid_transcript]
+
+
 async def test_search_sessions_transcript_fallback(store):
     sid = await store.create_session("default")
     await store.update_session_metadata(

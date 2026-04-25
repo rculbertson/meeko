@@ -248,7 +248,7 @@ class SessionStore:
             "SELECT f.session_id, f.title, s.last_active "
             "FROM sessions_fts f JOIN sessions s ON s.id = f.session_id "
             "WHERE sessions_fts MATCH ? "
-            "ORDER BY bm25(sessions_fts, 10.0, 5.0, 1.0) "
+            "ORDER BY bm25(sessions_fts, 0.0, 10.0, 5.0, 1.0) "
             "LIMIT ?",
             (clean, limit),
         ).fetchall()
