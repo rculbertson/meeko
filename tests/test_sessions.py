@@ -9,16 +9,16 @@ from meeko.sessions import SessionStore, default_db_path
 
 
 @pytest.fixture
-def store(tmp_path):
+async def store(tmp_path):
     s = SessionStore.open(tmp_path / "meeko.db")
     yield s
-    s.close()
+    await s.close()
 
 
 async def test_open_creates_schema(tmp_path):
     db = tmp_path / "meeko.db"
     s = SessionStore.open(db)
-    s.close()
+    await s.close()
 
     conn = sqlite3.connect(str(db))
     try:
@@ -37,7 +37,7 @@ async def test_open_creates_parent_dir(tmp_path):
     try:
         assert nested.exists()
     finally:
-        s.close()
+        await s.close()
 
 
 async def test_create_session_persists_row(tmp_path, store):

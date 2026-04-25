@@ -18,6 +18,7 @@ import json
 import os
 import sqlite3
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,10 @@ def _now() -> str:
 class SessionStore:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        # Single-threaded executor serializes all SQLite access on one thread,
+        # preventing concurrent-access crashes when DB calls overlap with
+        # close() or with each other.
+        self._executor = ThreadPoolExecutor(max_workers=1)
 
     @classmethod
     def open(cls, db_path: Path) -> SessionStore:
@@ -92,8 +97,12 @@ class SessionStore:
             )
         return session_id
 
+    async def _run(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, fn, *args)
+
     async def create_session(self, profile_name: str) -> str:
-        return await asyncio.to_thread(self._create_session_sync, profile_name)
+        return await self._run(self._create_session_sync, profile_name)
 
     def _persist_turn_sync(
         self, session_id: str, role: str, content: str | list[dict[str, Any]]
@@ -114,7 +123,7 @@ class SessionStore:
     async def persist_turn(
         self, session_id: str, role: str, content: str | list[dict[str, Any]]
     ) -> None:
-        await asyncio.to_thread(self._persist_turn_sync, session_id, role, content)
+        await self._run(self._persist_turn_sync, session_id, role, content)
 
     def _get_latest_session_sync(self) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -126,7 +135,7 @@ class SessionStore:
         return {"id": row[0], "profile_name": row[1], "last_active": row[2]}
 
     async def get_latest_session(self) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_latest_session_sync)
+        return await self._run(self._get_latest_session_sync)
 
     def _get_session_sync(self, session_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -138,7 +147,7 @@ class SessionStore:
         return {"id": row[0], "profile_name": row[1], "last_active": row[2]}
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_session_sync, session_id)
+        return await self._run(self._get_session_sync, session_id)
 
     def _list_sessions_sync(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -158,7 +167,7 @@ class SessionStore:
         ]
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_sessions_sync)
+        return await self._run(self._list_sessions_sync)
 
     def _load_turns_sync(self, session_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -168,7 +177,7 @@ class SessionStore:
         return [{"role": r[0], "content": json.loads(r[1])} for r in rows]
 
     async def load_turns(self, session_id: str) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._load_turns_sync, session_id)
+        return await self._run(self._load_turns_sync, session_id)
 
     def _touch_session_sync(self, session_id: str) -> None:
         with self._conn:
@@ -178,7 +187,7 @@ class SessionStore:
             )
 
     async def touch_session(self, session_id: str) -> None:
-        await asyncio.to_thread(self._touch_session_sync, session_id)
+        await self._run(self._touch_session_sync, session_id)
 
     def _update_session_metadata_sync(
         self,
@@ -217,7 +226,7 @@ class SessionStore:
         the corresponding FTS row. ``transcript`` is stored only in the
         FTS table (fallback recall when the summary misses a keyword);
         the on-disk turn log remains the source of truth."""
-        await asyncio.to_thread(
+        await self._run(
             self._update_session_metadata_sync,
             session_id,
             title,
@@ -225,5 +234,6 @@ class SessionStore:
             transcript,
         )
 
-    def close(self) -> None:
-        self._conn.close()
+    async def close(self) -> None:
+        await self._run(self._conn.close)
+        self._executor.shutdown(wait=False, cancel_futures=True)

@@ -116,7 +116,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         try:
             await _list_sessions_cmd(store)
         finally:
-            store.close()
+            await store.close()
         return
 
     load_dotenv()
@@ -141,7 +141,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         except SystemExit:
             # _resolve_resume raises SystemExit on unknown ids; make sure
             # the store we just opened doesn't leak past that exit.
-            store.close()
+            await store.close()
             raise
 
     if resumed_row is not None:
@@ -406,7 +406,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         if summary_tasks:
             await asyncio.gather(*summary_tasks, return_exceptions=True)
         audio.close()
-        store.close()
+        await store.close()
         logger.info("Shutting down.")
 
 

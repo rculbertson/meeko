@@ -688,7 +688,7 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
             session_id, "assistant", [{"type": "text", "text": "prior reply"}]
         )
     finally:
-        seed.close()
+        await seed.close()
 
     pa_instance = MagicMock()
     mic_stream = MagicMock()
@@ -783,7 +783,7 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
         sid = await seed.create_session("default")
         await seed.persist_turn(sid, "user", "hi")
     finally:
-        seed.close()
+        await seed.close()
 
     with patch("meeko.main.setup_logging"):
         await meeko_main.run(list_sessions=True)
@@ -1165,7 +1165,7 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     assert len(rows) == 2
     new_row = rows[0]  # ordered by last_active DESC
     # Claude client was pointed at the new session by reset_session.
@@ -1251,7 +1251,7 @@ async def test_end_session_without_wake_word_transitions_to_listening(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     assert len(rows) == 2
 
 
@@ -1382,7 +1382,7 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     assert len(rows) == 2
     new_row = rows[0]  # ordered by last_active DESC
     assert claude.session_id == new_row["id"]
@@ -1467,7 +1467,7 @@ async def test_end_session_fires_background_summary_for_finalized_session(
                         (original_sid,),
                     ).fetchone()
                 finally:
-                    store_check.close()
+                    await store_check.close()
                 if row is not None and row[0] is not None:
                     break
                 await real_sleep(0.01)
@@ -1486,7 +1486,7 @@ async def test_end_session_fires_background_summary_for_finalized_session(
             ("stub",),
         ).fetchall()
     finally:
-        store.close()
+        await store.close()
     assert row == ("stub title", "stub summary for tests")
     # FTS row exists and matches the finalized session.
     assert [r[0] for r in fts] == [original_sid]
@@ -1580,7 +1580,7 @@ async def test_new_session_after_profile_switch_records_active_profile(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     # Two rows: the original (default profile) and the post-switch one
     # (pirate profile). Latest is the fresh one.
     assert len(rows) == 2

@@ -20,10 +20,10 @@ from meeko.sessions import SessionStore
 
 
 @pytest.fixture
-def store(tmp_path):
+async def store(tmp_path):
     s = SessionStore.open(tmp_path / "meeko.db")
     yield s
-    s.close()
+    await s.close()
 
 
 def _text_response(text: str):
