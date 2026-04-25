@@ -1666,7 +1666,8 @@ async def test_load_session_tool_swaps_history_and_stays_listening(
 ):
     """User says 'go back to the todo session' → Sonnet calls load_session →
     after SPEAKING, claude.load_history is populated from the target session's
-    turns and the client is rebound to target's session_id."""
+    turns, the client is rebound to target's session_id, and the abandoned
+    session is summarized in the background so it stays in the recall index."""
     from meeko.sessions import SessionStore
 
     db_path = tmp_path / "meeko.db"
@@ -1766,9 +1767,10 @@ async def test_end_then_load_session_fires_summary_for_current_session(
 ):
     """Sonnet chains end_session + load_session in one turn.
 
-    The orchestrator must fire the background summary for the *current* session
-    before swapping history to the target, and the claude client must end up
-    bound to the target session."""
+    Equivalent in effect to load_session alone (the orchestrator always
+    summarizes the abandoned session on load), but the chain must still
+    succeed: claude ends up bound to the target session and the original
+    session has been summarized in the background."""
     from meeko.sessions import SessionStore
 
     db_path = tmp_path / "meeko.db"

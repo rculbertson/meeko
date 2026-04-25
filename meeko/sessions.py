@@ -145,12 +145,17 @@ class SessionStore:
 
     def _get_session_sync(self, session_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT id, profile_name, last_active FROM sessions WHERE id = ?",
+            "SELECT id, profile_name, last_active, title FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
         if row is None:
             return None
-        return {"id": row[0], "profile_name": row[1], "last_active": row[2]}
+        return {
+            "id": row[0],
+            "profile_name": row[1],
+            "last_active": row[2],
+            "title": row[3],
+        }
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         return await self._run(self._get_session_sync, session_id)

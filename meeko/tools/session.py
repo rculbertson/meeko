@@ -15,9 +15,9 @@ Provides four tools:
   orchestrator swaps the in-memory message array and rebinds to the
   target session's SQLite row, then stays in LISTENING.
 
-The end/new flags are mutually exclusive. The load target is independent
-of end (so Sonnet can chain end_session + load_session in one turn to
-finalize the current session and resume a prior one in a single step).
+The end/new flags are mutually exclusive. Load is independent — the
+orchestrator always fires the summary for the abandoned session when
+load is requested, so Sonnet doesn't need to chain end_session first.
 """
 
 from __future__ import annotations
@@ -46,10 +46,9 @@ class SessionManager:
     one within the same turn rather than letting both be true at once.
     That keeps the orchestrator branch selection unambiguous.
 
-    The load target is independent of the end flag: Sonnet can chain
-    end_session + load_session in one turn ("wrap up this one and pick
-    up the todo app conversation"). The orchestrator fires the summary
-    for the ending session before swapping history."""
+    Load takes precedence over end if both are set in the same turn —
+    the orchestrator's load branch already summarizes the abandoned
+    session, so an explicit end_session call is redundant but harmless."""
 
     def __init__(self) -> None:
         self._should_end = False
@@ -153,10 +152,9 @@ def get_tool_definitions() -> list[ToolDefinition]:
                 "list_sessions results). Pass the exact session `id` from "
                 "the list. After SPEAKING completes, Meeko will swap its "
                 "memory to the loaded session and continue from there. "
-                "If the user wants to resume mid-conversation (not at "
-                "end_session time), call end_session first to finalize "
-                "the current thread, then call load_session in the same "
-                "turn."
+                "Meeko automatically finalizes the current conversation "
+                "in the background before swapping, so you don't need to "
+                "call end_session first."
             ),
             "input_schema": {
                 "type": "object",
@@ -178,6 +176,7 @@ async def handle(
     *,
     manager: SessionManager,
     store: SessionStore | None = None,
+    current_session_id: str | None = None,
 ) -> str:
     if fn_name == "end_session":
         manager.request_end()
@@ -217,11 +216,14 @@ async def handle(
                 f"No session found with id '{session_id}'. "
                 "Call list_sessions to find the correct id."
             )
+        if session_id == current_session_id:
+            return "That's the current session — already loaded."
         manager.request_load(session_id)
+        title = row.get("title") or "(untitled)"
         logger.info(
             "load_session tool called for %s; will swap history after SPEAKING",
             session_id[:8],
         )
-        return f"Loading session '{session_id}'. Continuing from there after this turn."
+        return f"Loading '{title}'. Continuing from there after this turn."
 
     return f"Unknown session function: {fn_name}"

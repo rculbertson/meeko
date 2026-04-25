@@ -179,10 +179,17 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         profile_tools(profiles),
         functools.partial(profile_handle, manager=profile_manager),
     )
-    dispatcher.register(
-        session_tools(),
-        functools.partial(session_handle, manager=session_manager, store=store),
-    )
+
+    async def session_handle_wrapper(fn_name: str, args: dict) -> str:
+        return await session_handle(
+            fn_name,
+            args,
+            manager=session_manager,
+            store=store,
+            current_session_id=session_id,
+        )
+
+    dispatcher.register(session_tools(), session_handle_wrapper)
 
     claude = ClaudeClient(
         api_key=anthropic_key,
@@ -322,15 +329,19 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     int((time.perf_counter() - t_turn) * 1000),
                 )
                 # should_load can coexist with should_end (chain: finalize
-                # current session then load a prior one in one turn).
+                # current session then load a prior one in one turn). Always
+                # summarize the abandoned session so it stays in the recall
+                # index — summarize_session no-ops on empty sessions, so
+                # this is safe even when the user loads after only a turn
+                # or two.
                 if session_manager.should_load():
                     target_id = session_manager.get_load_target()
                     assert target_id is not None  # guaranteed by should_load()
-                    if session_manager.should_end():
-                        fire_summary(session_id)
-                        logger.info(
-                            "end+load chain: fired summary for %s", session_id[:8]
-                        )
+                    fire_summary(session_id)
+                    logger.info(
+                        "load_session: fired summary for abandoned %s",
+                        session_id[:8],
+                    )
                     turns = await store.load_turns(target_id)
                     claude.load_history(turns)
                     claude.rebind_session(target_id)

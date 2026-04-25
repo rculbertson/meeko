@@ -26,9 +26,8 @@ call list_sessions with the key terms as the query, then read the top result tit
 so the user can confirm which one to load. \
 On a clear match, confirm briefly and call load_session with the exact session id. \
 On multiple plausible matches, read the top two or three titles and ask the user to pick one. \
-To resume a prior conversation mid-conversation (without ending Meeko), \
-call end_session first and then load_session in the same turn — \
-Meeko will finalize the current session and swap to the loaded one.\
+load_session can be called at any point — Meeko automatically finalizes the current \
+conversation in the background before swapping to the loaded one.\
 """
 
 # Example custom profile:

@@ -234,10 +234,58 @@ async def test_handle_load_session_sets_flag(tmp_path):
     store = SessionStore.open(tmp_path / "meeko.db")
     try:
         sid = await store.create_session("default")
+        await store.update_session_metadata(
+            sid, title="Todo app", summary="s", transcript="t"
+        )
         manager = SessionManager()
-        result = await handle("load_session", {"id": sid}, manager=manager, store=store)
+        result = await handle(
+            "load_session",
+            {"id": sid},
+            manager=manager,
+            store=store,
+            current_session_id="other-session",
+        )
         assert manager.should_load() is True
         assert manager.get_load_target() == sid
-        assert sid in result
+        # Tool result should reference the title, not the raw UUID.
+        assert "Todo app" in result
+        assert sid not in result
+    finally:
+        await store.close()
+
+
+async def test_handle_load_session_rejects_current_session(tmp_path):
+    """Loading the already-active session is a no-op with a friendly reply."""
+    store = SessionStore.open(tmp_path / "meeko.db")
+    try:
+        sid = await store.create_session("default")
+        manager = SessionManager()
+        result = await handle(
+            "load_session",
+            {"id": sid},
+            manager=manager,
+            store=store,
+            current_session_id=sid,
+        )
+        assert manager.should_load() is False
+        assert "already loaded" in result.lower()
+    finally:
+        await store.close()
+
+
+async def test_handle_load_session_untitled_session_uses_placeholder(tmp_path):
+    """Sessions without a title (never summarized) still get a readable result."""
+    store = SessionStore.open(tmp_path / "meeko.db")
+    try:
+        sid = await store.create_session("default")
+        manager = SessionManager()
+        result = await handle(
+            "load_session",
+            {"id": sid},
+            manager=manager,
+            store=store,
+            current_session_id="other",
+        )
+        assert "untitled" in result.lower()
     finally:
         await store.close()
