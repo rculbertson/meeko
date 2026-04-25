@@ -193,11 +193,16 @@ async def test_cache_breakpoint_moves_to_newest_message_each_turn(fake_anthropic
     sent = captured[1]["messages"]
     # ['user: turn one', 'assistant: ...', 'user: turn two']
     assert len(sent) == 3
-    for msg in sent[:-1]:
-        for block in msg["content"]:
-            assert "cache_control" not in block, (
-                "stale cache_control on prior-turn message"
-            )
+    # Turn-1 user msg stays in canonical plain-string form (the breakpoint
+    # only ever lives on the latest message, applied at send time).
+    assert sent[0] == {"role": "user", "content": "Turn one."}
+    # Turn-1 assistant blocks must be free of stale cache_control keys.
+    assert isinstance(sent[1]["content"], list)
+    for block in sent[1]["content"]:
+        assert "cache_control" not in block, (
+            "stale cache_control on prior-turn assistant message"
+        )
+    # The new turn-2 user message carries the breakpoint on its tail block.
     assert sent[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
 
 
