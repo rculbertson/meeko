@@ -65,6 +65,47 @@ def _pop_sentences(buffer: str) -> tuple[list[str], str]:
     return sentences, buffer[last_end:]
 
 
+_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+
+
+def _system_blocks(prompt: str) -> list[dict[str, Any]]:
+    """Wrap a system prompt as a single text block with a cache breakpoint.
+
+    Tools and the system prompt are stable per session, so a cache_control
+    on the (single) system block caches the entire `tools + system` prefix.
+    """
+    return [{"type": "text", "text": prompt, "cache_control": _CACHE_CONTROL}]
+
+
+def _with_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a shallow copy of `messages` with a cache breakpoint on the
+    last block of the last message.
+
+    On turn N+1 the prior turn's tail becomes the longest cached prefix,
+    so we move the breakpoint forward each call. The stored messages stay
+    in their canonical (str | list[block]) shape — annotation lives only
+    on the send-time view, so SQLite persistence stays clean.
+    """
+    if not messages:
+        return messages
+    out = list(messages)
+    last = dict(out[-1])
+    content = last["content"]
+    if isinstance(content, str):
+        new_content = [
+            {"type": "text", "text": content, "cache_control": _CACHE_CONTROL}
+        ]
+    else:
+        # list[block] — copy the list and re-emit the final block with cache_control.
+        new_content = list(content)
+        tail = dict(new_content[-1])
+        tail["cache_control"] = _CACHE_CONTROL
+        new_content[-1] = tail
+    last["content"] = new_content
+    out[-1] = last
+    return out
+
+
 class ClaudeClient:
     def __init__(
         self,
@@ -76,7 +117,7 @@ class ClaudeClient:
         session_id: str | None = None,
     ):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
-        self._system = system_prompt
+        self._system = _system_blocks(system_prompt)
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
         self._messages: list[dict[str, Any]] = []
@@ -84,7 +125,7 @@ class ClaudeClient:
         self._session_id = session_id
 
     def set_system_prompt(self, prompt: str) -> None:
-        self._system = prompt
+        self._system = _system_blocks(prompt)
 
     def load_history(self, messages: list[dict[str, Any]]) -> None:
         self._messages = list(messages)
@@ -121,7 +162,7 @@ class ClaudeClient:
                 max_tokens=MAX_TOKENS,
                 system=self._system,
                 tools=self._tools,
-                messages=self._messages,
+                messages=_with_cache_breakpoint(self._messages),
             ) as stream:
                 async for delta in stream.text_stream:
                     if ttft_ms is None:
@@ -143,11 +184,14 @@ class ClaudeClient:
 
             usage = getattr(final, "usage", None)
             logger.debug(
-                "[timing] claude round=%d api_total=%dms in_tok=%s out_tok=%s stop=%s",
+                "[timing] claude round=%d api_total=%dms in_tok=%s out_tok=%s "
+                "cache_create=%s cache_read=%s stop=%s",
                 round_idx,
                 int((time.perf_counter() - api_start) * 1000),
                 getattr(usage, "input_tokens", None),
                 getattr(usage, "output_tokens", None),
+                getattr(usage, "cache_creation_input_tokens", None),
+                getattr(usage, "cache_read_input_tokens", None),
                 final.stop_reason,
             )
 
