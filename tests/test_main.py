@@ -287,9 +287,20 @@ async def test_load_history_preloads_messages_sent_on_next_turn():
     await _collect(client.stream_turn("follow up"))
 
     sent = stream_mock.call_args.kwargs["messages"]
-    # Prior turns appear first, then the new user turn.
+    # Prior turns appear first, then the new user turn. The send-time view
+    # adds a cache_control breakpoint to the tail block of the latest
+    # message; earlier messages stay in their canonical shape.
     assert sent[:2] == prior
-    assert sent[2] == {"role": "user", "content": "follow up"}
+    assert sent[2] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "follow up",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+    }
 
 
 async def test_set_system_prompt_takes_effect_on_next_call():
@@ -300,4 +311,12 @@ async def test_set_system_prompt_takes_effect_on_next_call():
     await _collect(client.stream_turn("hi"))
 
     kwargs = stream_mock.call_args.kwargs
-    assert kwargs["system"] == "new system"
+    # System prompt is wrapped as a single text block carrying the
+    # cache breakpoint.
+    assert kwargs["system"] == [
+        {
+            "type": "text",
+            "text": "new system",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
