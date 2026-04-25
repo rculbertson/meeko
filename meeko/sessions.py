@@ -265,7 +265,7 @@ class SessionStore:
         Returns up to ``limit`` rows ordered by BM25 relevance (title matches
         rank highest). Query operators are stripped so user speech is always
         treated as a literal multi-token match."""
-        return await asyncio.to_thread(self._search_sessions_sync, query, limit)
+        return await self._run(self._search_sessions_sync, query, limit)
 
     async def close(self) -> None:
         await self._run(self._conn.close)
