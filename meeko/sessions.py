@@ -18,6 +18,7 @@ import json
 import os
 import sqlite3
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,
     profile_name  TEXT NOT NULL,
     title         TEXT,
-    tags          TEXT,
     summary       TEXT,
     created_at    TEXT NOT NULL,
     last_active   TEXT NOT NULL
@@ -42,6 +42,17 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, id);
+
+-- FTS index populated once per session at end-of-session summarization.
+-- Standalone (not content=...) so we don't have to manage rowid mapping
+-- from the UUID-keyed sessions table. BM25 weights at query time give
+-- title/summary precedence over transcript (see search_sessions).
+CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+    session_id UNINDEXED,
+    title,
+    summary,
+    transcript
+);
 """
 
 
@@ -59,6 +70,10 @@ def _now() -> str:
 class SessionStore:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        # Single-threaded executor serializes all SQLite access on one thread,
+        # preventing concurrent-access crashes when DB calls overlap with
+        # close() or with each other.
+        self._executor = ThreadPoolExecutor(max_workers=1)
 
     @classmethod
     def open(cls, db_path: Path) -> SessionStore:
@@ -82,8 +97,12 @@ class SessionStore:
             )
         return session_id
 
+    async def _run(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, fn, *args)
+
     async def create_session(self, profile_name: str) -> str:
-        return await asyncio.to_thread(self._create_session_sync, profile_name)
+        return await self._run(self._create_session_sync, profile_name)
 
     def _persist_turn_sync(
         self, session_id: str, role: str, content: str | list[dict[str, Any]]
@@ -104,7 +123,7 @@ class SessionStore:
     async def persist_turn(
         self, session_id: str, role: str, content: str | list[dict[str, Any]]
     ) -> None:
-        await asyncio.to_thread(self._persist_turn_sync, session_id, role, content)
+        await self._run(self._persist_turn_sync, session_id, role, content)
 
     def _get_latest_session_sync(self) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -116,7 +135,7 @@ class SessionStore:
         return {"id": row[0], "profile_name": row[1], "last_active": row[2]}
 
     async def get_latest_session(self) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_latest_session_sync)
+        return await self._run(self._get_latest_session_sync)
 
     def _get_session_sync(self, session_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -128,7 +147,7 @@ class SessionStore:
         return {"id": row[0], "profile_name": row[1], "last_active": row[2]}
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_session_sync, session_id)
+        return await self._run(self._get_session_sync, session_id)
 
     def _list_sessions_sync(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -148,7 +167,7 @@ class SessionStore:
         ]
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_sessions_sync)
+        return await self._run(self._list_sessions_sync)
 
     def _load_turns_sync(self, session_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -158,7 +177,7 @@ class SessionStore:
         return [{"role": r[0], "content": json.loads(r[1])} for r in rows]
 
     async def load_turns(self, session_id: str) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._load_turns_sync, session_id)
+        return await self._run(self._load_turns_sync, session_id)
 
     def _touch_session_sync(self, session_id: str) -> None:
         with self._conn:
@@ -168,7 +187,53 @@ class SessionStore:
             )
 
     async def touch_session(self, session_id: str) -> None:
-        await asyncio.to_thread(self._touch_session_sync, session_id)
+        await self._run(self._touch_session_sync, session_id)
 
-    def close(self) -> None:
-        self._conn.close()
+    def _update_session_metadata_sync(
+        self,
+        session_id: str,
+        title: str,
+        summary: str,
+        transcript: str,
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET title = ?, summary = ? WHERE id = ?",
+                (title, summary, session_id),
+            )
+            # Upsert into the standalone FTS table: drop any prior row for
+            # this session (re-summarization is rare but safe) and reinsert.
+            self._conn.execute(
+                "DELETE FROM sessions_fts WHERE session_id = ?",
+                (session_id,),
+            )
+            self._conn.execute(
+                "INSERT INTO sessions_fts (session_id, title, summary, transcript) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, title, summary, transcript),
+            )
+
+    async def update_session_metadata(
+        self,
+        session_id: str,
+        title: str,
+        summary: str,
+        transcript: str,
+    ) -> None:
+        """Persist the end-of-session summary.
+
+        Writes ``title`` and ``summary`` to the sessions row and upserts
+        the corresponding FTS row. ``transcript`` is stored only in the
+        FTS table (fallback recall when the summary misses a keyword);
+        the on-disk turn log remains the source of truth."""
+        await self._run(
+            self._update_session_metadata_sync,
+            session_id,
+            title,
+            summary,
+            transcript,
+        )
+
+    async def close(self) -> None:
+        await self._run(self._conn.close)
+        self._executor.shutdown(wait=False, cancel_futures=True)

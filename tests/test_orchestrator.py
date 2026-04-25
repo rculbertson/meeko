@@ -7,10 +7,11 @@ and a happy-path drive-through of `run()` with all external services
 
 import asyncio
 import contextlib
+import json
 import logging
 import logging.handlers
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -146,9 +147,19 @@ class _FakeClaudeClient:
 
     def stream_turn(self, text):
         self.turns.append(text)
+        store = self.store
+        sid = self.session_id
 
         async def _gen():
+            # Mirror the real ClaudeClient's persistence so downstream
+            # consumers (end-of-session summarization) see a turn log.
+            if store is not None and sid is not None:
+                await store.persist_turn(sid, "user", text)
             yield "Hi."
+            if store is not None and sid is not None:
+                await store.persist_turn(
+                    sid, "assistant", [{"type": "text", "text": "Hi."}]
+                )
 
         return _gen()
 
@@ -169,6 +180,43 @@ def _disable_wake_word_by_default(monkeypatch):
     into the legacy flow. Tests that exercise the wake-word path opt back
     in by deleting this env var in their own body."""
     monkeypatch.setenv("MEEKO_WAKE_WORD_DISABLED", "1")
+
+
+class _StubAsyncAnthropic:
+    """Stand-in for `anthropic.AsyncAnthropic` in orchestrator tests.
+
+    Real construction trips on env-configured proxies in some dev
+    environments; production also does real network I/O we don't want
+    in unit tests. The default `messages.create` returns a parseable
+    summary response so the background `summarize_session` task
+    completes successfully — tests that want to assert on the payload
+    can replace `_STUB_SUMMARY_TITLE` / `_STUB_SUMMARY_BODY` on the
+    instance before triggering a session rotation."""
+
+    _STUB_SUMMARY_TITLE = "stub title"
+    _STUB_SUMMARY_BODY = "stub summary for tests"
+
+    def __init__(self, *args, **kwargs):
+        body = json.dumps(
+            {
+                "title": self._STUB_SUMMARY_TITLE,
+                "summary": self._STUB_SUMMARY_BODY,
+            }
+        )
+        response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=body)],
+            stop_reason="end_turn",
+        )
+        self.messages = MagicMock()
+        self.messages.create = AsyncMock(return_value=response)
+
+
+@pytest.fixture(autouse=True)
+def _stub_summary_anthropic_client():
+    """Every orchestrator test constructs a summary `AsyncAnthropic`
+    client at startup; stub it unless the test opts into a custom fake."""
+    with patch("meeko.main.anthropic.AsyncAnthropic", _StubAsyncAnthropic):
+        yield
 
 
 @pytest.fixture
@@ -640,7 +688,7 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
             session_id, "assistant", [{"type": "text", "text": "prior reply"}]
         )
     finally:
-        seed.close()
+        await seed.close()
 
     pa_instance = MagicMock()
     mic_stream = MagicMock()
@@ -735,7 +783,7 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
         sid = await seed.create_session("default")
         await seed.persist_turn(sid, "user", "hi")
     finally:
-        seed.close()
+        await seed.close()
 
     with patch("meeko.main.setup_logging"):
         await meeko_main.run(list_sessions=True)
@@ -896,9 +944,17 @@ class _SessionToolClaudeClient(_FakeClaudeClient):
         dispatcher = self.dispatcher
         tool_name = self.TOOL_NAME
         ack = self.ACK
+        store = self.store
+        sid = self.session_id
 
         async def _gen():
+            if store is not None and sid is not None:
+                await store.persist_turn(sid, "user", text)
             yield ack
+            if store is not None and sid is not None:
+                await store.persist_turn(
+                    sid, "assistant", [{"type": "text", "text": ack}]
+                )
             await dispatcher.dispatch(tool_name, {})
 
         return _gen()
@@ -1109,7 +1165,7 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     assert len(rows) == 2
     new_row = rows[0]  # ordered by last_active DESC
     # Claude client was pointed at the new session by reset_session.
@@ -1195,7 +1251,7 @@ async def test_end_session_without_wake_word_transitions_to_listening(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     assert len(rows) == 2
 
 
@@ -1326,10 +1382,114 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     assert len(rows) == 2
     new_row = rows[0]  # ordered by last_active DESC
     assert claude.session_id == new_row["id"]
+
+
+async def test_end_session_fires_background_summary_for_finalized_session(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """After end_session rotates the session, the background summary
+    task should run and write title/summary/FTS for the *finalized*
+    session (not the freshly-created one)."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+    # Autouse fixture already sets MEEKO_WAKE_WORD_DISABLED=1.
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "stop"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _EndSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            # Wait for the claude client to be rebound to a new session
+            # (signal that end_session fired).
+            original_sid = None
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None:
+                    if original_sid is None:
+                        original_sid = c.session_id
+                    if c.session_id is not None and c.session_id != original_sid:
+                        break
+                await real_sleep(0.01)
+            assert original_sid is not None
+
+            # Give the detached summary task a chance to complete.
+            # The background summarize_session call awaits the stubbed
+            # anthropic client (immediate) and then writes SQLite.
+            for _ in range(200):
+                store_check = SessionStore.open(db_path)
+                try:
+                    row = store_check._conn.execute(
+                        "SELECT title, summary FROM sessions WHERE id = ?",
+                        (original_sid,),
+                    ).fetchone()
+                finally:
+                    await store_check.close()
+                if row is not None and row[0] is not None:
+                    break
+                await real_sleep(0.01)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    store = SessionStore.open(db_path)
+    try:
+        row = store._conn.execute(
+            "SELECT title, summary FROM sessions WHERE id = ?", (original_sid,)
+        ).fetchone()
+        fts = store._conn.execute(
+            "SELECT session_id FROM sessions_fts WHERE sessions_fts MATCH ?",
+            ("stub",),
+        ).fetchall()
+    finally:
+        await store.close()
+    assert row == ("stub title", "stub summary for tests")
+    # FTS row exists and matches the finalized session.
+    assert [r[0] for r in fts] == [original_sid]
 
 
 async def test_new_session_after_profile_switch_records_active_profile(
@@ -1420,7 +1580,7 @@ async def test_new_session_after_profile_switch_records_active_profile(
     try:
         rows = await store.list_sessions()
     finally:
-        store.close()
+        await store.close()
     # Two rows: the original (default profile) and the post-switch one
     # (pirate profile). Latest is the fresh one.
     assert len(rows) == 2

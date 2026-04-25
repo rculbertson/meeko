@@ -23,8 +23,8 @@ The next milestones, in rough order, are: SQLite turn persistence → prompt cac
 ## Key Conventions
 
 ### Claude API calls
-- Model: `claude-sonnet-4-6` for main conversation
-- Model: `claude-haiku-4-5` for intent classification and session summarization
+- Model: `claude-sonnet-4-6` for main conversation and end-of-session summarization (long transcripts + summary quality drives resume-by-voice recall)
+- Model: `claude-haiku-4-5` reserved for short, high-volume classification (e.g. future intent detection); not used for summaries
 - Always apply `cache_control` on conversation history — cache hits are ~90% after turn 1
 - Enable auto compaction via the Anthropic SDK; it operates on the in-memory message array only
 - The on-disk SQLite transcript is the source of truth — auto compaction must never cause data loss

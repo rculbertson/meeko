@@ -211,7 +211,7 @@ async def test_stream_turn_persists_user_and_assistant_turns(tmp_path):
         assert rows[1][0] == "assistant"
         assert json.loads(rows[1][1]) == [{"type": "text", "text": "Hi."}]
     finally:
-        store.close()
+        await store.close()
 
 
 async def test_stream_turn_persists_tool_round_messages(tmp_path):
@@ -272,7 +272,7 @@ async def test_stream_turn_persists_tool_round_messages(tmp_path):
             conn.close()
         assert roles == ["user", "assistant", "user", "assistant"]
     finally:
-        store.close()
+        await store.close()
 
 
 async def test_load_history_preloads_messages_sent_on_next_turn():
