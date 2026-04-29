@@ -3,6 +3,10 @@
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, patch
 
+from deepgram.listen.v2 import client as _dg_client
+from deepgram.listen.v2 import raw_client as _dg_raw_client
+
+import meeko.deepgram_stt as deepgram_stt
 from meeko.deepgram_stt import DeepgramSTT, TurnEvent
 
 
@@ -122,6 +126,55 @@ async def test_send_keepalive_sends_websocket_ping():
         await sess.send_keepalive()
 
     assert socket._websocket.pings == 1
+
+
+def test_patch_installed_on_every_sdk_module_that_imports_connect():
+    """Both client.py (the public AsyncV2Client.connect path) and
+    raw_client.py (AsyncRawV2Client) hold their own module-level
+    reference to ``websockets_client_connect``. If we patch only one,
+    the other's call site silently uses the un-tuned default and our
+    fix is dead code at runtime — exactly the bug this guards against."""
+    assert (
+        _dg_client.websockets_client_connect is deepgram_stt._connect_with_tight_pings
+    )
+    assert (
+        _dg_raw_client.websockets_client_connect
+        is deepgram_stt._connect_with_tight_pings
+    )
+
+
+def test_websocket_connect_is_patched_with_tight_pings():
+    """The patched function injects ping_interval and ping_timeout so
+    dead TCP connections are detected in seconds, not ~17–40s."""
+    captured: dict = {}
+
+    def fake_orig(*args, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    with patch.object(deepgram_stt, "_orig_ws_connect", fake_orig):
+        _dg_client.websockets_client_connect("wss://example", extra_headers={})
+
+    assert captured.get("ping_interval") == deepgram_stt._STT_PING_INTERVAL_S
+    assert captured.get("ping_timeout") == deepgram_stt._STT_PING_TIMEOUT_S
+
+
+def test_websocket_connect_patch_does_not_clobber_explicit_kwargs():
+    """If a future SDK version starts forwarding ping settings, we must
+    not overwrite them — ``setdefault`` semantics."""
+    captured: dict = {}
+
+    def fake_orig(*args, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    with patch.object(deepgram_stt, "_orig_ws_connect", fake_orig):
+        _dg_client.websockets_client_connect(
+            "wss://example", extra_headers={}, ping_interval=2, ping_timeout=3
+        )
+
+    assert captured["ping_interval"] == 2
+    assert captured["ping_timeout"] == 3
 
 
 async def test_multiple_turn_events_in_order():
