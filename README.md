@@ -88,7 +88,7 @@ Open the interactive mixer for that card (replace `2` with your card number):
 alsamixer -c 2
 ```
 
-Use the arrow keys to select the **PCM** controls and press `↑` to raise them to 100. Press `Esc` to exit, then save so the levels persist across reboots:
+Use the arrow keys to select the relevant controls (commonly **PCM**, **Master**, or **Headphone**, depending on your hardware) and press `↑` to raise the volume. Press `Esc` to exit, then save so the levels persist across reboots:
 
 ```bash
 sudo alsactl store
