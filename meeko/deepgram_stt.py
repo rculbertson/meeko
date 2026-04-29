@@ -10,12 +10,36 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from deepgram import AsyncDeepgramClient
+from deepgram.listen.v2 import raw_client as _dg_raw_client
 
 logger = logging.getLogger("meeko")
 
 MODEL = "flux-general-en"
 ENCODING = "linear16"
 SAMPLE_RATE = 16000
+
+# Tighten the websockets library's auto-ping watchdog for STT connections.
+# Defaults are ping_interval=20s / ping_timeout=20s, which means a silently
+# dead TCP connection takes up to ~40s to detect — and any mic audio sent
+# during that window is buffered into the dead socket and lost (the user's
+# speech never reaches Deepgram). The Deepgram SDK hard-codes its
+# ``websockets_client_connect(...)`` call without forwarding kwargs (see
+# ``deepgram/listen/v2/raw_client.py`` ~ line 236), so we patch the symbol
+# the SDK module imports to inject ping_interval / ping_timeout. Drop this
+# patch once the SDK exposes these settings via request_options.
+_STT_PING_INTERVAL_S = 5
+_STT_PING_TIMEOUT_S = 5
+
+_orig_ws_connect = _dg_raw_client.websockets_client_connect
+
+
+def _connect_with_tight_pings(*args, **kwargs):
+    kwargs.setdefault("ping_interval", _STT_PING_INTERVAL_S)
+    kwargs.setdefault("ping_timeout", _STT_PING_TIMEOUT_S)
+    return _orig_ws_connect(*args, **kwargs)
+
+
+_dg_raw_client.websockets_client_connect = _connect_with_tight_pings
 
 
 @dataclass
@@ -48,11 +72,13 @@ class _Session:
         await self._socket.send_media(pcm)
 
     async def send_keepalive(self) -> None:
-        """Send a standard websocket ping frame to keep the connection
-        open when we're not streaming audio. v2 Flux does not have an
-        application-level keepalive (unlike v1 which uses
+        """Send a standard websocket ping frame to keep Deepgram from
+        idle-closing the session when we're not streaming audio. v2 Flux
+        has no application-level keepalive (unlike v1's
         ``{"type":"KeepAlive"}``); the Deepgram JS SDK's v2 example uses
-        raw websocket pings for this purpose."""
+        raw websocket pings for the same purpose. This is fire-and-forget
+        — dead-connection detection is the websockets library's job, via
+        the ping_interval / ping_timeout we set at module load."""
         await self._socket._websocket.ping()
 
     async def events(self):
