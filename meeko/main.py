@@ -47,7 +47,7 @@ from meeko.tools.session import handle as session_handle
 from meeko.tools.timer import get_tool_definitions as timer_tools
 from meeko.tools.timer import handle as timer_handle
 from meeko.tools.timer import timer_manager
-from meeko.wake_word import WakeWordDetector, default_model_path
+from meeko.wake_word import DEFAULT_THRESHOLD, WakeWordDetector, default_model_path
 
 LOG_FILE = "meeko.log"
 
@@ -226,9 +226,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         state = State.LISTENING
     else:
         wake_model_path = os.environ.get("MEEKO_WAKE_WORD_MODEL", default_model_path())
-        wake_threshold = float(os.environ.get("MEEKO_WAKE_WORD_THRESHOLD", "0.5"))
+        wake_threshold = float(
+            os.environ.get("MEEKO_WAKE_WORD_THRESHOLD", DEFAULT_THRESHOLD)
+        )
         wake_detector = WakeWordDetector(
-            model_path=wake_model_path, threshold=wake_threshold
+            threshold=wake_threshold, model_path=wake_model_path
         )
         state = State.IDLE
 

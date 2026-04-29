@@ -48,7 +48,7 @@ def fake_model(monkeypatch, tmp_path):
 def test_missing_model_file_raises(tmp_path):
     missing = tmp_path / "nope.onnx"
     with pytest.raises(FileNotFoundError):
-        WakeWordDetector(model_path=str(missing))
+        WakeWordDetector(model_path=str(missing), threshold=0.5)
 
 
 def test_below_threshold_does_not_fire(fake_model):
@@ -194,6 +194,6 @@ def test_preprocessor_download_failure_raises_operator_friendly_error(
     monkeypatch.setattr(wake_word.openwakeword.utils, "download_models", fail_download)
 
     with pytest.raises(RuntimeError) as excinfo:
-        WakeWordDetector(model_path=str(model_path))
+        WakeWordDetector(model_path=str(model_path), threshold=0.5)
     assert "python -m meeko.wake_word" in str(excinfo.value)
     assert excinfo.value.__cause__ is original_cause

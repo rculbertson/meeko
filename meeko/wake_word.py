@@ -58,11 +58,14 @@ def _ensure_preprocessors() -> None:
         ) from exc
 
 
+DEFAULT_THRESHOLD = 0.95
+
+
 class WakeWordDetector:
     def __init__(
         self,
+        threshold: float,
         model_path: str | None = None,
-        threshold: float = 0.5,
     ):
         path = model_path or default_model_path()
         if not os.path.exists(path):
