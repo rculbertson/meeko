@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from deepgram import AsyncDeepgramClient
+from deepgram.listen.v2 import client as _dg_client
 from deepgram.listen.v2 import raw_client as _dg_raw_client
 
 logger = logging.getLogger("meeko")
@@ -23,13 +24,18 @@ SAMPLE_RATE = 16000
 # dead TCP connection takes up to ~40s to detect — and any mic audio sent
 # during that window is buffered into the dead socket and lost (the user's
 # speech never reaches Deepgram). The Deepgram SDK hard-codes its
-# ``websockets_client_connect(...)`` call without forwarding kwargs (see
-# ``deepgram/listen/v2/raw_client.py`` ~ line 236), so we patch the symbol
-# the SDK module imports to inject ping_interval / ping_timeout. Drop this
-# patch once the SDK exposes these settings via request_options.
+# ``websockets_client_connect(...)`` call without forwarding kwargs, so we
+# patch the symbol on every SDK module that imports it. Both client.py
+# (AsyncV2Client.connect, the public path used by self._client.listen.v2)
+# and raw_client.py (AsyncRawV2Client, used via .with_raw_response) hold
+# their own module-level reference to the function via ``from ... import
+# connect as websockets_client_connect``, so each must be patched
+# independently. Drop this patch once the SDK exposes these settings via
+# request_options.
 _STT_PING_INTERVAL_S = 5
 _STT_PING_TIMEOUT_S = 5
 
+_PATCH_TARGETS = (_dg_client, _dg_raw_client)
 _orig_ws_connect = _dg_raw_client.websockets_client_connect
 
 
@@ -39,7 +45,8 @@ def _connect_with_tight_pings(*args, **kwargs):
     return _orig_ws_connect(*args, **kwargs)
 
 
-_dg_raw_client.websockets_client_connect = _connect_with_tight_pings
+for _mod in _PATCH_TARGETS:
+    _mod.websockets_client_connect = _connect_with_tight_pings
 
 
 @dataclass
