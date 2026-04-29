@@ -70,30 +70,6 @@ Example — log to file at debug level:
 MEEKO_LOG_TARGET=file uv run python -m meeko.main
 ```
 
-### Raspberry Pi
-
-#### Adjusting output volume
-
-The ALSA mixer on the Pi defaults to lower levels than a laptop. If audio output is too quiet even with the speaker at maximum, boost the mixer levels for your audio device.
-
-List playback devices to find your card number:
-
-```bash
-aplay -l
-```
-
-Open the interactive mixer for that card (replace `2` with your card number):
-
-```bash
-alsamixer -c 2
-```
-
-Use the arrow keys to select the relevant controls (commonly **PCM**, **Master**, or **Headphone**, depending on your hardware) and press `↑` to raise the volume. Press `Esc` to exit, then save so the levels persist across reboots:
-
-```bash
-sudo alsactl store
-```
-
 ---
 
 ## For Developers
