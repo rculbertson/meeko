@@ -61,6 +61,9 @@ The next milestones, in rough order, are: barge-in (`SpeechStarted`-driven cance
 ### State machine
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.
 
+### Debugging
+- The asyncio event loop's `slow_callback_duration` is set to 100ms in `meeko/main.py`. Any `asyncio` `WARNING` of the form `Executing <Handle ...> took N.NNN seconds` means a synchronous callback held the loop ≥100 ms — investigate (and fix) before shipping. Loop stalls can starve the STT websocket's pong handling and trip its keepalive watchdog, dropping the connection mid-conversation.
+
 ## What's Out of Scope (v1)
 
 Do not add: web/mobile UI, multi-user support, semantic search over sessions, session deletion by voice, cross-device sync. See `meeko-design.md` §9.

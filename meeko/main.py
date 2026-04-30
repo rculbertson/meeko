@@ -69,6 +69,15 @@ def setup_logging() -> None:
     level = os.environ.get("MEEKO_LOG_LEVEL", "DEBUG").upper()
     logger.setLevel(getattr(logging, level, logging.DEBUG))
 
+    # Surface asyncio's "Executing <Handle ...> took N.NNN seconds"
+    # warnings (gated by loop.slow_callback_duration, set in run()).
+    # These flag synchronous callbacks that hold the event loop and
+    # can starve other tasks — e.g. delaying websocket pong frames
+    # past the STT keepalive watchdog deadline.
+    asyncio_logger = logging.getLogger("asyncio")
+    asyncio_logger.addHandler(handler)
+    asyncio_logger.setLevel(logging.WARNING)
+
 
 class State(Enum):
     IDLE = auto()
@@ -110,6 +119,11 @@ async def _resolve_resume(store: SessionStore, resume: str) -> dict[str, object]
 
 async def run(resume: str | None = None, list_sessions: bool = False):
     setup_logging()
+
+    # Warn (via the asyncio logger) when any synchronous callback holds
+    # the event loop for ≥100ms. Helps catch stalls that could starve
+    # the STT websocket's pong handling and trip its keepalive watchdog.
+    asyncio.get_running_loop().slow_callback_duration = 0.1
 
     if list_sessions:
         store = SessionStore.open(default_db_path())
