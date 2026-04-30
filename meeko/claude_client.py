@@ -7,6 +7,7 @@ begin TTS before the full reply is ready.
 """
 
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncIterator
@@ -22,6 +23,25 @@ logger = logging.getLogger("meeko")
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
 MAX_TOOL_ROUNDS = 5
+
+# Server-side compaction (beta `compact-2026-01-12`). When the API sees
+# input tokens cross this threshold it summarizes the early portion of the
+# message array in-flight and prepends a `compaction` block to the assistant
+# response. SQLite remains the verbatim source of truth — the summary lives
+# only in the in-memory message array (see `_persist`).
+COMPACTION_BETA = "compact-2026-01-12"
+COMPACTION_STRATEGY = "compact_20260112"
+COMPACTION_TRIGGER_TOKENS = int(
+    os.environ.get("MEEKO_COMPACTION_TRIGGER_TOKENS", "150000")
+)
+_CONTEXT_MANAGEMENT = {
+    "edits": [
+        {
+            "type": COMPACTION_STRATEGY,
+            "trigger": {"type": "input_tokens", "value": COMPACTION_TRIGGER_TOKENS},
+        }
+    ]
+}
 
 # Split on terminal punctuation that looks like a real sentence break:
 #   - not preceded by a capital letter (skips "U.S.", "N.Y.", "Ph.D.")
@@ -48,6 +68,8 @@ def _serialize_block(block: Any) -> dict[str, Any]:
             "name": block.name,
             "input": block.input,
         }
+    if block.type == "compaction":
+        return {"type": "compaction", "content": block.content}
     return block.model_dump()
 
 
@@ -157,12 +179,14 @@ class ClaudeClient:
             ttft_ms: int | None = None
             buffer = ""
 
-            async with self._client.messages.stream(
+            async with self._client.beta.messages.stream(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
                 system=self._system,
                 tools=self._tools,
                 messages=_with_cache_breakpoint(self._messages),
+                betas=[COMPACTION_BETA],
+                context_management=_CONTEXT_MANAGEMENT,
             ) as stream:
                 async for delta in stream.text_stream:
                     if ttft_ms is None:
@@ -195,9 +219,26 @@ class ClaudeClient:
                 final.stop_reason,
             )
 
+            for it in getattr(usage, "iterations", None) or []:
+                if getattr(it, "type", None) == "compaction":
+                    logger.info(
+                        "[compaction] round=%d in_tok=%s out_tok=%s",
+                        round_idx,
+                        getattr(it, "input_tokens", None),
+                        getattr(it, "output_tokens", None),
+                    )
+
             assistant_blocks = [_serialize_block(block) for block in final.content]
             self._messages.append({"role": "assistant", "content": assistant_blocks})
-            await self._persist("assistant", assistant_blocks)
+            # SQLite is the verbatim source of truth — strip the server's
+            # compaction summary before persisting so on-disk transcripts
+            # never carry derived state. The block stays in-memory so the
+            # next turn's `messages=` payload includes it and the server
+            # doesn't re-summarize the same prefix.
+            persisted_blocks = [
+                b for b in assistant_blocks if b.get("type") != "compaction"
+            ]
+            await self._persist("assistant", persisted_blocks)
 
             if final.stop_reason != "tool_use":
                 return

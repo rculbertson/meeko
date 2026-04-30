@@ -73,6 +73,9 @@ class _FakeAsyncAnthropic:
     def __init__(self, *_, **__):
         self.captured: list[dict[str, Any]] = []
         self.messages = _FakeMessages(self.captured)
+        # Production code calls `client.beta.messages.stream(...)` for the
+        # compaction beta; expose the same fake under both surfaces.
+        self.beta = SimpleNamespace(messages=self.messages)
 
 
 @pytest.fixture
@@ -259,6 +262,7 @@ async def test_breakpoint_applied_each_round_in_tool_use_loop(monkeypatch):
     class _Client:
         def __init__(self, *_, **__):
             self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
 
     monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
 
@@ -289,6 +293,172 @@ async def test_breakpoint_applied_each_round_in_tool_use_loop(monkeypatch):
     tail = msgs_round2[-1]["content"][-1]
     assert tail["type"] == "tool_result"
     assert tail["cache_control"] == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_sends_compaction_context_management(fake_anthropic):
+    client = _make_client()
+    await _drain(client.stream_turn("hello"))
+
+    sent = fake_anthropic["client"].captured[0]
+    assert sent["betas"] == [claude_client_module.COMPACTION_BETA]
+    assert sent["context_management"] == {
+        "edits": [
+            {
+                "type": claude_client_module.COMPACTION_STRATEGY,
+                "trigger": {
+                    "type": "input_tokens",
+                    "value": claude_client_module.COMPACTION_TRIGGER_TOKENS,
+                },
+            }
+        ]
+    }
+
+
+class _CompactionStream(_FakeStream):
+    """Streams a compaction summary alongside a normal text response — the
+    shape the API returns when server-side compaction fires mid-turn."""
+
+    @property
+    def text_stream(self):
+        async def _iter():
+            yield "Compacted reply."
+
+        return _iter()
+
+    async def get_final_message(self):
+        compaction_block = SimpleNamespace(
+            type="compaction",
+            content="Earlier turns: user asked things, assistant answered.",
+        )
+        text_block = SimpleNamespace(type="text", text="Compacted reply.")
+        usage = SimpleNamespace(
+            input_tokens=42,
+            output_tokens=8,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            iterations=[
+                SimpleNamespace(
+                    type="compaction", input_tokens=180000, output_tokens=3500
+                ),
+                SimpleNamespace(type="message", input_tokens=23000, output_tokens=8),
+            ],
+        )
+        return SimpleNamespace(
+            content=[compaction_block, text_block],
+            stop_reason="end_turn",
+            usage=usage,
+        )
+
+
+@pytest.mark.asyncio
+async def test_compaction_block_kept_in_memory_but_not_persisted(monkeypatch, caplog):
+    captured: list[dict[str, Any]] = []
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return _CompactionStream(captured, kwargs)
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+
+    persisted: list[tuple[str, Any]] = []
+
+    class _FakeStore:
+        async def persist_turn(self, session_id, role, content):
+            persisted.append((role, content))
+
+    client = ClaudeClient(
+        api_key="k",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        store=_FakeStore(),
+        session_id="sess-1",
+    )
+
+    with caplog.at_level(logging.INFO, logger="meeko"):
+        await _drain(client.stream_turn("Tell me a long story."))
+
+    # In-memory: the compaction block is preserved so the next turn's
+    # `messages=` payload carries it (otherwise the server would re-summarize).
+    assert client._messages[-1]["role"] == "assistant"
+    types = [b["type"] for b in client._messages[-1]["content"]]
+    assert types == ["compaction", "text"]
+    compaction_block = client._messages[-1]["content"][0]
+    assert compaction_block == {
+        "type": "compaction",
+        "content": "Earlier turns: user asked things, assistant answered.",
+    }
+
+    # SQLite: only the user line + the assistant's text block were persisted.
+    # The compaction summary stays out of the on-disk transcript.
+    assert persisted[0] == ("user", "Tell me a long story.")
+    assert persisted[1][0] == "assistant"
+    persisted_blocks = persisted[1][1]
+    assert [b["type"] for b in persisted_blocks] == ["text"]
+
+    # The new info-level compaction log line fired with the iteration counts.
+    compaction_logs = [
+        rec for rec in caplog.records if rec.getMessage().startswith("[compaction]")
+    ]
+    assert len(compaction_logs) == 1
+    msg = compaction_logs[0].getMessage()
+    assert "in_tok=180000" in msg
+    assert "out_tok=3500" in msg
+
+
+@pytest.mark.asyncio
+async def test_compaction_block_round_trips_into_next_turn(monkeypatch):
+    """After compaction fires on turn 1, turn 2's outgoing `messages=` must
+    include the compaction block on the prior assistant turn — otherwise the
+    server has no record that compaction happened and will redo it."""
+    captured: list[dict[str, Any]] = []
+    call_count = {"n": 0}
+
+    class _Messages:
+        def stream(self, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return _CompactionStream(captured, kwargs)
+            return _FakeStream(captured, kwargs)
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+
+    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    await _drain(client.stream_turn("Turn one."))
+    await _drain(client.stream_turn("Turn two."))
+
+    # Second call's outgoing messages: the prior assistant turn carries the
+    # compaction block as its first content entry.
+    sent = captured[1]["messages"]
+    prior_assistant = sent[1]
+    assert prior_assistant["role"] == "assistant"
+    assert prior_assistant["content"][0]["type"] == "compaction"
+
+
+def test_compaction_trigger_env_var_override(monkeypatch):
+    """Reloading the module with the env var set picks up a new threshold
+    and threads it into `_CONTEXT_MANAGEMENT`."""
+    import importlib
+
+    monkeypatch.setenv("MEEKO_COMPACTION_TRIGGER_TOKENS", "12345")
+    reloaded = importlib.reload(claude_client_module)
+    try:
+        assert reloaded.COMPACTION_TRIGGER_TOKENS == 12345
+        assert reloaded._CONTEXT_MANAGEMENT["edits"][0]["trigger"]["value"] == 12345
+    finally:
+        # Restore the module so later tests in the session see the default.
+        monkeypatch.delenv("MEEKO_COMPACTION_TRIGGER_TOKENS", raising=False)
+        importlib.reload(claude_client_module)
 
 
 # Anthropic's cache minimum for Sonnet is 1024 tokens — pad the system prompt
@@ -352,3 +522,74 @@ async def test_second_turn_hits_prompt_cache(caplog):
         f"turn 2 cache_read ({cache_reads[1]}) should exceed turn 1's "
         f"({cache_reads[0]}) — the breakpoint moves forward each turn"
     )
+
+
+# Padding sized to push the system prompt past the API's 50 000-token
+# minimum compaction trigger. Each repeat is ~13 tokens, so 4500 repeats
+# clears 55k. Used only by the live compaction test below.
+_COMPACTION_SYSTEM_PROMPT = (
+    "You are a terse test assistant. Reply in three words or fewer.\n\n"
+    "Background context (padding so total input crosses the API's 50k "
+    "compaction-trigger floor): "
+    + ("Meeko is a long-running brainstorming voice assistant. " * 4500)
+)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_server_side_compaction_fires_on_long_prefix(monkeypatch, caplog):
+    """End-to-end check that the compaction beta is wired up correctly.
+
+    EXPENSIVE — disabled by default. The Anthropic API enforces a minimum
+    compaction `trigger.value` of 50 000 input tokens, so to force compaction
+    the test ships ~55k tokens of padded system prompt across two turns plus
+    a server-side summarization pass over the same prefix. That works out to
+    roughly $0.30–0.40 per run on Sonnet 4.6 — too expensive to leave on the
+    default `-m integration` runs. Set `RUN_EXPENSIVE_TESTS=1` to opt in
+    (`ANTHROPIC_API_KEY` is loaded from `.env` by `tests/conftest.py`):
+
+        RUN_EXPENSIVE_TESTS=1 uv run pytest -m integration \\
+            tests/test_claude_client.py::test_server_side_compaction_fires_on_long_prefix
+    """
+    if not os.environ.get("RUN_EXPENSIVE_TESTS"):
+        pytest.skip("expensive (~$0.35/run); set RUN_EXPENSIVE_TESTS=1 to enable")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        pytest.skip("ANTHROPIC_API_KEY not set")
+
+    # 50000 is the API floor; the padded system prompt above crosses it on
+    # turn 2 (system + turn-1 history + new user msg).
+    import importlib
+
+    monkeypatch.setenv("MEEKO_COMPACTION_TRIGGER_TOKENS", "50000")
+    reloaded = importlib.reload(claude_client_module)
+    try:
+        client = reloaded.ClaudeClient(
+            api_key=api_key,
+            system_prompt=_COMPACTION_SYSTEM_PROMPT,
+            dispatcher=ToolDispatcher(),
+        )
+
+        with caplog.at_level(logging.INFO, logger="meeko"):
+            async for _ in client.stream_turn("Say 'one'."):
+                pass
+            async for _ in client.stream_turn("Say 'two'."):
+                pass
+
+        compaction_logs = [
+            rec for rec in caplog.records if rec.getMessage().startswith("[compaction]")
+        ]
+        compaction_in_history = any(
+            isinstance(msg.get("content"), list)
+            and any(b.get("type") == "compaction" for b in msg["content"])
+            for msg in client._messages
+            if msg.get("role") == "assistant"
+        )
+
+        assert compaction_logs or compaction_in_history, (
+            "expected server-side compaction to fire with trigger=50000 "
+            "and a ~55k-token padded system prompt"
+        )
+    finally:
+        monkeypatch.delenv("MEEKO_COMPACTION_TRIGGER_TOKENS", raising=False)
+        importlib.reload(claude_client_module)

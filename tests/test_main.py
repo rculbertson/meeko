@@ -79,7 +79,7 @@ def _build_client(rounds: list[tuple[list[str], SimpleNamespace]], tool_handler)
 
     rounds_iter = iter(rounds)
     stream_mock = MagicMock(side_effect=lambda **kw: _FakeStream(*next(rounds_iter)))
-    client._client.messages.stream = stream_mock
+    client._client.beta.messages.stream = stream_mock
     return client, stream_mock
 
 
@@ -188,7 +188,7 @@ async def test_stream_turn_persists_user_and_assistant_turns(tmp_path):
                 session_id=session_id,
             )
         final = _final_message("end_turn", [_text_block("Hi.")])
-        client._client.messages.stream = MagicMock(
+        client._client.beta.messages.stream = MagicMock(
             return_value=_FakeStream(["Hi."], final)
         )
 
@@ -251,7 +251,7 @@ async def test_stream_turn_persists_tool_round_messages(tmp_path):
                 session_id=session_id,
             )
         rounds = iter([([], round1_final), (["Done."], round2_final)])
-        client._client.messages.stream = MagicMock(
+        client._client.beta.messages.stream = MagicMock(
             side_effect=lambda **kw: _FakeStream(*next(rounds))
         )
 
