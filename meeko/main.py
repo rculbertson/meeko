@@ -120,10 +120,22 @@ async def _resolve_resume(store: SessionStore, resume: str) -> dict[str, object]
 async def run(resume: str | None = None, list_sessions: bool = False):
     setup_logging()
 
-    # Warn (via the asyncio logger) when any synchronous callback holds
-    # the event loop for ≥100ms. Helps catch stalls that could starve
-    # the STT websocket's pong handling and trip its keepalive watchdog.
-    asyncio.get_running_loop().slow_callback_duration = 0.1
+    # Opt-in asyncio debug mode. When MEEKO_ASYNCIO_DEBUG=1, the loop
+    # measures callback durations and logs a WARNING for any that hold
+    # the loop ≥100ms (slow_callback_duration). Off by default because
+    # debug mode also wraps every coroutine creation with traceback
+    # capture, which is a real cost on hot paths. Flip this on when
+    # investigating event-loop stalls (e.g. STT websocket disconnects)
+    # and leave it off in normal operation.
+    if os.environ.get("MEEKO_ASYNCIO_DEBUG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        loop = asyncio.get_running_loop()
+        loop.set_debug(True)
+        loop.slow_callback_duration = 0.1
+        logger.info("asyncio debug mode enabled (slow_callback_duration=0.1s)")
 
     if list_sessions:
         store = SessionStore.open(default_db_path())
