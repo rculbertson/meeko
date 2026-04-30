@@ -69,11 +69,12 @@ def setup_logging() -> None:
     level = os.environ.get("MEEKO_LOG_LEVEL", "DEBUG").upper()
     logger.setLevel(getattr(logging, level, logging.DEBUG))
 
-    # Surface asyncio's "Executing <Handle ...> took N.NNN seconds"
-    # warnings (gated by loop.slow_callback_duration, set in run()).
-    # These flag synchronous callbacks that hold the event loop and
-    # can starve other tasks — e.g. delaying websocket pong frames
-    # past the STT keepalive watchdog deadline.
+    # Route asyncio's own warnings through the same handler so they get
+    # Meeko's timestamp format and land in the rotating log file when
+    # MEEKO_LOG_TARGET=file. Covers slow-callback warnings (when run
+    # with PYTHONASYNCIODEBUG=1) plus the always-on ones like
+    # "task was destroyed but it is pending" and "coroutine was never
+    # awaited" — useful signal that would otherwise hit stderr only.
     asyncio_logger = logging.getLogger("asyncio")
     asyncio_logger.addHandler(handler)
     asyncio_logger.setLevel(logging.WARNING)
@@ -119,23 +120,6 @@ async def _resolve_resume(store: SessionStore, resume: str) -> dict[str, object]
 
 async def run(resume: str | None = None, list_sessions: bool = False):
     setup_logging()
-
-    # Opt-in asyncio debug mode. When MEEKO_ASYNCIO_DEBUG=1, the loop
-    # measures callback durations and logs a WARNING for any that hold
-    # the loop ≥100ms (slow_callback_duration). Off by default because
-    # debug mode also wraps every coroutine creation with traceback
-    # capture, which is a real cost on hot paths. Flip this on when
-    # investigating event-loop stalls (e.g. STT websocket disconnects)
-    # and leave it off in normal operation.
-    if os.environ.get("MEEKO_ASYNCIO_DEBUG", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }:
-        loop = asyncio.get_running_loop()
-        loop.set_debug(True)
-        loop.slow_callback_duration = 0.1
-        logger.info("asyncio debug mode enabled (slow_callback_duration=0.1s)")
 
     if list_sessions:
         store = SessionStore.open(default_db_path())

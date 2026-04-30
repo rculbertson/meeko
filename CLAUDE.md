@@ -62,7 +62,7 @@ The next milestones, in rough order, are: barge-in (`SpeechStarted`-driven cance
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.
 
 ### Debugging
-- `MEEKO_ASYNCIO_DEBUG=1` enables asyncio debug mode at startup: the loop logs a WARNING (`Executing <Handle ...> took N.NNN seconds`) whenever a synchronous callback holds the event loop ≥100 ms. Off by default because debug mode wraps every coroutine creation with traceback capture, which is a real cost on hot paths. Flip it on when investigating loop stalls (e.g. STT websocket keepalive timeouts) and leave it off in normal operation.
+- Run with `PYTHONASYNCIODEBUG=1` (Python's built-in env var) to enable asyncio debug mode. The loop will then log a WARNING (`Executing <Handle ...> took N.NNN seconds`) whenever a synchronous callback holds it ≥100 ms — useful for diagnosing loop stalls (e.g. STT websocket keepalive timeouts). Off in normal operation; debug mode wraps every coroutine creation with traceback capture and is a real cost on hot paths. Meeko routes asyncio's own warnings through the same logging handler as `meeko.*` logs, so they pick up the timestamp format and land in the rotating log when `MEEKO_LOG_TARGET=file`.
 
 ## What's Out of Scope (v1)
 
