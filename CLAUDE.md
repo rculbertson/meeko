@@ -10,7 +10,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ## Primary Goal
 
-The next milestones, in rough order, are: prompt caching + auto compaction → barge-in (`SpeechStarted`-driven cancellation during SPEAKING) → ReSpeaker hardware bring-up on the Pi. See `private/meeko-design.md` for the full target architecture.
+The next milestones, in rough order, are: barge-in (`SpeechStarted`-driven cancellation during SPEAKING) → ReSpeaker hardware bring-up on the Pi. See `private/meeko-design.md` for the full target architecture.
 
 ## Tech Stack
 
@@ -26,12 +26,13 @@ The next milestones, in rough order, are: prompt caching + auto compaction → b
 ### Claude API calls
 - Model: `claude-sonnet-4-6` for main conversation and end-of-session summarization (long transcripts + summary quality drives resume-by-voice recall)
 - Model: `claude-haiku-4-5` reserved for short, high-volume classification work; not used for summaries or main conversation
-- Prompt caching (`cache_control` on the stable prefix) and auto compaction are planned but not yet wired up — when added, they must operate on the in-memory message array only
-- The on-disk SQLite transcript is the source of truth — auto compaction (once enabled) must never cause data loss
+- Prompt caching (`cache_control` on the stable prefix) and server-side compaction are wired up in `meeko/claude_client.py` (compaction beta `compact-2026-01-12`, strategy `compact_20260112`). Both operate on the in-memory message array only
+- The on-disk SQLite transcript is the source of truth — the server-emitted `compaction` block stays in-memory and is filtered out before persistence so transcripts remain verbatim
+- `MEEKO_COMPACTION_TRIGGER_TOKENS` — input-token threshold that triggers server-side compaction (default `150000`)
 
 ### Turn persistence
 - Write every turn to SQLite immediately on completion, not buffered, not at session end (see `meeko/sessions.py` and `ClaudeClient._persist`)
-- This is load-bearing: when auto compaction is enabled it will replace early turns in memory; SQLite is the only full record
+- This is load-bearing: server-side compaction replaces early turns in memory with a summary block; SQLite is the only full record
 
 ### Session management (Claude tool-use)
 - Session-management intents are exposed to Sonnet as Claude-native tools, not detected by a separate classifier (see `meeko/tools/session.py`). Sonnet decides when to call them based on full conversation context.
