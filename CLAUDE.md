@@ -54,7 +54,7 @@ The next milestones, in rough order, are: barge-in (`SpeechStarted`-driven cance
 ### Wake word
 - On startup Meeko sits in `IDLE` — mic is open but audio is fed to an openWakeWord detector, not Deepgram STT. Saying "Hey Meeko" transitions the session to `LISTENING` (one-shot per session).
 - `MEEKO_WAKE_WORD_MODEL` — path to the ONNX model. Default `models/hey_meeko.onnx`.
-- `MEEKO_WAKE_WORD_THRESHOLD` — confidence threshold (0–1). Default `1.0`.
+- `MEEKO_WAKE_WORD_THRESHOLD` — confidence threshold (0–1). Default `0.99`.
 - `MEEKO_WAKE_WORD_DISABLED=1` — skip the wake-word gate; start directly in `LISTENING`.
 - First run downloads openWakeWord's preprocessor ONNX files (~3 MB). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
