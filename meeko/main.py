@@ -69,6 +69,16 @@ def setup_logging() -> None:
     level = os.environ.get("MEEKO_LOG_LEVEL", "DEBUG").upper()
     logger.setLevel(getattr(logging, level, logging.DEBUG))
 
+    # Route asyncio's own warnings through the same handler so they get
+    # Meeko's timestamp format and land in the rotating log file when
+    # MEEKO_LOG_TARGET=file. Covers slow-callback warnings (when run
+    # with PYTHONASYNCIODEBUG=1) plus the always-on ones like
+    # "task was destroyed but it is pending" and "coroutine was never
+    # awaited" — useful signal that would otherwise hit stderr only.
+    asyncio_logger = logging.getLogger("asyncio")
+    asyncio_logger.addHandler(handler)
+    asyncio_logger.setLevel(logging.WARNING)
+
 
 class State(Enum):
     IDLE = auto()
