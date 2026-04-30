@@ -338,8 +338,10 @@ class _CompactionStream(_FakeStream):
             cache_creation_input_tokens=0,
             cache_read_input_tokens=0,
             iterations=[
-                {"type": "compaction", "input_tokens": 180000, "output_tokens": 3500},
-                {"type": "message", "input_tokens": 23000, "output_tokens": 8},
+                SimpleNamespace(
+                    type="compaction", input_tokens=180000, output_tokens=3500
+                ),
+                SimpleNamespace(type="message", input_tokens=23000, output_tokens=8),
             ],
         )
         return SimpleNamespace(

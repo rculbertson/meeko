@@ -219,29 +219,13 @@ class ClaudeClient:
                 final.stop_reason,
             )
 
-            iterations = getattr(usage, "iterations", None) or []
-            for it in iterations:
-                it_type = (
-                    it.get("type")
-                    if isinstance(it, dict)
-                    else getattr(it, "type", None)
-                )
-                if it_type == "compaction":
-                    it_in = (
-                        it.get("input_tokens")
-                        if isinstance(it, dict)
-                        else (getattr(it, "input_tokens", None))
-                    )
-                    it_out = (
-                        it.get("output_tokens")
-                        if isinstance(it, dict)
-                        else (getattr(it, "output_tokens", None))
-                    )
+            for it in getattr(usage, "iterations", None) or []:
+                if getattr(it, "type", None) == "compaction":
                     logger.info(
                         "[compaction] round=%d in_tok=%s out_tok=%s",
                         round_idx,
-                        it_in,
-                        it_out,
+                        getattr(it, "input_tokens", None),
+                        getattr(it, "output_tokens", None),
                     )
 
             assistant_blocks = [_serialize_block(block) for block in final.content]
