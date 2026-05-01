@@ -337,6 +337,10 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             if state == State.SPEAKING:
                 # AEC observation mode: don't start a Claude turn while
                 # we're talking. Log so we can gauge echo leakage.
+                # Revisit during barge-in: an EndOfTurn here is either
+                # echo (drop, current behavior) or the user genuinely
+                # speaking through TTS (cancel TTS + process). Barge-in
+                # will distinguish via SpeechStarted; until then, drop.
                 logger.info("[echo?] %s", text)
                 continue
             if not text:
