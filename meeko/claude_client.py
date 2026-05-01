@@ -6,6 +6,7 @@ sentence-sized text chunks as they are generated so the caller can
 begin TTS before the full reply is ready.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -178,29 +179,80 @@ class ClaudeClient:
             api_start = time.perf_counter()
             ttft_ms: int | None = None
             buffer = ""
+            # Track text streamed in this round so a barge-in cancel can
+            # commit a partial assistant message and keep alternating
+            # user/assistant history valid. Reset per round — completed
+            # rounds commit full assistant_blocks via the normal path.
+            streamed_text = ""
 
-            async with self._client.beta.messages.stream(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                system=self._system,
-                tools=self._tools,
-                messages=_with_cache_breakpoint(self._messages),
-                betas=[COMPACTION_BETA],
-                context_management=_CONTEXT_MANAGEMENT,
-            ) as stream:
-                async for delta in stream.text_stream:
-                    if ttft_ms is None:
-                        ttft_ms = int((time.perf_counter() - api_start) * 1000)
-                        logger.debug(
-                            "[timing] claude round=%d ttft=%dms",
-                            round_idx,
-                            ttft_ms,
-                        )
-                    buffer += delta
-                    sentences, buffer = _pop_sentences(buffer)
-                    for s in sentences:
-                        yield s
-                final = await stream.get_final_message()
+            try:
+                async with self._client.beta.messages.stream(
+                    model=MODEL,
+                    max_tokens=MAX_TOKENS,
+                    system=self._system,
+                    tools=self._tools,
+                    messages=_with_cache_breakpoint(self._messages),
+                    betas=[COMPACTION_BETA],
+                    context_management=_CONTEXT_MANAGEMENT,
+                ) as stream:
+                    async for delta in stream.text_stream:
+                        if ttft_ms is None:
+                            ttft_ms = int((time.perf_counter() - api_start) * 1000)
+                            logger.debug(
+                                "[timing] claude round=%d ttft=%dms",
+                                round_idx,
+                                ttft_ms,
+                            )
+                        buffer += delta
+                        streamed_text += delta
+                        sentences, buffer = _pop_sentences(buffer)
+                        for s in sentences:
+                            yield s
+                    final = await stream.get_final_message()
+            except asyncio.CancelledError, GeneratorExit, Exception:
+                # Anything that terminates the stream early — barge-in
+                # (CancelledError), consumer-driven GeneratorExit, or a
+                # network/API error (Exception) — leaves the user
+                # message already appended at the top of stream_turn
+                # without a paired assistant message. Commit a partial
+                # assistant turn so the next user turn doesn't produce
+                # two consecutive user messages and trip a 400 from
+                # the API. Empty stream gets a "…" placeholder rather
+                # than an empty text block (which the API rejects).
+                text = streamed_text.strip() or "…"
+                partial = [{"type": "text", "text": text}]
+                self._messages.append({"role": "assistant", "content": partial})
+                # Best-effort persistence: during process shutdown
+                # asyncio cleans up pending async generators after the
+                # SessionStore has already been closed, so the persist
+                # would crash on a closed DB. The in-memory commit
+                # above is what matters for next-turn correctness; the
+                # on-disk record is nice-to-have.
+                try:
+                    await self._persist("assistant", partial)
+                except Exception:
+                    logger.debug(
+                        "partial-turn persist skipped (store likely closed)",
+                        exc_info=True,
+                    )
+                raise
+
+            # Commit the full assistant turn to history *before* yielding
+            # the trailing partial sentence. If the consumer cancels us
+            # while we're suspended at `yield tail`, GeneratorExit fires
+            # outside the try/except above — without this ordering, the
+            # next user turn would stack on an orphaned user message and
+            # 400 from the API. SQLite is the verbatim source of truth —
+            # strip the server's compaction summary before persisting so
+            # on-disk transcripts never carry derived state. The block
+            # stays in-memory so the next turn's `messages=` payload
+            # includes it and the server doesn't re-summarize the prefix.
+            assistant_blocks = [_serialize_block(block) for block in final.content]
+            self._messages.append({"role": "assistant", "content": assistant_blocks})
+            persisted_blocks = [
+                b for b in assistant_blocks if b.get("type") != "compaction"
+            ]
+            await self._persist("assistant", persisted_blocks)
 
             tail = buffer.strip()
             if tail:
@@ -227,18 +279,6 @@ class ClaudeClient:
                         getattr(it, "input_tokens", None),
                         getattr(it, "output_tokens", None),
                     )
-
-            assistant_blocks = [_serialize_block(block) for block in final.content]
-            self._messages.append({"role": "assistant", "content": assistant_blocks})
-            # SQLite is the verbatim source of truth — strip the server's
-            # compaction summary before persisting so on-disk transcripts
-            # never carry derived state. The block stays in-memory so the
-            # next turn's `messages=` payload includes it and the server
-            # doesn't re-summarize the same prefix.
-            persisted_blocks = [
-                b for b in assistant_blocks if b.get("type") != "compaction"
-            ]
-            await self._persist("assistant", persisted_blocks)
 
             if final.stop_reason != "tool_use":
                 return

@@ -5,12 +5,14 @@ is called directly; STT and TTS are Deepgram-only. Audio runs over
 PyAudio.
 
 By default the mic stays open during TTS — we rely on the ReSpeaker
-XVF3800's hardware AEC to suppress echo, and any EndOfTurn that still
-fires while SPEAKING is logged as `[echo?]` and ignored so it can't
-start a spurious Claude turn. For Mac / no-AEC development, set
-`MEEKO_MUTE_MIC_WHILE_SPEAKING=1`: mic chunks are dropped while
-SPEAKING and the mic queue is drained after playback. True barge-in
-(acting on `SpeechStarted` during SPEAKING) is a later step.
+XVF3800's hardware AEC to suppress echo. A `StartOfTurn` while SPEAKING
+is treated as the user barging in: the in-flight Claude+TTS turn is
+cancelled, the speaker buffer is flushed, and the session transitions
+back to LISTENING so the eventual `EndOfTurn` flows through the normal
+path. An `EndOfTurn` while SPEAKING with no preceding `StartOfTurn`
+having triggered barge-in is still echo and is dropped. For Mac /
+no-AEC development, set `MEEKO_MUTE_MIC_WHILE_SPEAKING=1`: mic chunks
+are dropped while SPEAKING and the mic queue is drained after playback.
 """
 
 import argparse
@@ -312,6 +314,38 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     # which is a separate problem.
     turn_queue: asyncio.Queue[str] = asyncio.Queue()
 
+    # Set in drive_turns while a Claude+TTS turn is running so
+    # request_barge_in() can cancel just that turn without tearing down
+    # the long-lived drive_turns worker.
+    current_speak_task: asyncio.Task | None = None
+    # Set by request_barge_in() so drive_turns can tell the difference
+    # between a real barge-in (continue worker) and a shutdown cancel
+    # (re-raise). Checking stop_event isn't reliable because asyncio
+    # shutdown cancels drive_turns_task directly, before run()'s finally
+    # has a chance to set stop_event.
+    barge_in_requested = False
+
+    def request_barge_in() -> None:
+        """Cancel the in-flight speak task, if any. Called from
+        pull_stt_events when StartOfTurn fires during SPEAKING."""
+        nonlocal barge_in_requested, state
+        # Flip state synchronously so any EndOfTurn arriving before the
+        # cancel propagates through drive_turns isn't dropped as echo
+        # by pull_stt_events. This must happen even when there's no
+        # current_speak_task (e.g. a timer chime is playing via
+        # speaker.speak() — that path enters SPEAKING but is not
+        # cancellable from here): the chime keeps playing, but the
+        # user's interruption is at least captured into turn_queue
+        # instead of silently dropped. drive_turns and speak_stream's
+        # exit_speaking will re-assert LISTENING when they unwind; the
+        # brief PROCESSING window in between is harmless (PROCESSING-
+        # state EndOfTurns are queued normally).
+        state = State.LISTENING
+        if current_speak_task is not None and not current_speak_task.done():
+            logger.info("Barge-in: cancelling in-flight reply")
+            barge_in_requested = True
+            current_speak_task.cancel()
+
     async def pull_stt_events(stt_session):
         """Always drain stt_session.events(); decide synchronously
         whether each EndOfTurn should drive a turn, and queue the ones
@@ -324,8 +358,23 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         async for ev in stt_session.events():
             if stop_event.is_set():
                 return
+            # While SPEAKING, surface every event at DEBUG so a noisy
+            # ~20 Hz Update stream doesn't clutter the INFO log but is
+            # still available with MEEKO_LOG_LEVEL=debug when diagnosing
+            # whether mic audio is reaching Deepgram during TTS.
+            if state == State.SPEAKING:
+                logger.debug(
+                    "[stt-during-speaking] event=%s transcript=%r",
+                    ev.event,
+                    ev.transcript,
+                )
             if ev.event == "StartOfTurn":
                 logger.info("User started speaking (state=%s)", state.name)
+                if state == State.SPEAKING:
+                    # Barge-in: user is talking over the assistant.
+                    # Cancel the speak task; the eventual EndOfTurn will
+                    # arrive in LISTENING and flow through normally.
+                    request_barge_in()
                 continue
             if ev.event != "EndOfTurn":
                 continue
@@ -336,12 +385,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # any stray transcripts must not start a Claude turn.
                 continue
             if state == State.SPEAKING:
-                # AEC observation mode: don't start a Claude turn while
-                # we're talking. Log so we can gauge echo leakage.
-                # Revisit during barge-in: an EndOfTurn here is either
-                # echo (drop, current behavior) or the user genuinely
-                # speaking through TTS (cancel TTS + process). Barge-in
-                # will distinguish via SpeechStarted; until then, drop.
+                # No preceding StartOfTurn triggered barge-in (otherwise
+                # state would already be LISTENING). With AEC on, this
+                # is residual echo; drop it.
                 logger.info("[echo?] %s", text)
                 continue
             if not text:
@@ -350,26 +396,39 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     async def drive_turns():
         """Drive Claude + TTS for queued user turns, one at a time."""
-        nonlocal state, session_id
+        nonlocal state, session_id, current_speak_task, barge_in_requested
         while not stop_event.is_set():
             text = await turn_queue.get()
             logger.info("[user] %s", text)
             state = State.PROCESSING
             t_turn = time.perf_counter()
+            # Run the turn as a sub-task so request_barge_in() can
+            # cancel just this turn without tearing down drive_turns.
+            current_speak_task = asyncio.create_task(
+                speaker.speak_stream(claude.stream_turn(text))
+            )
             try:
-                await speaker.speak_stream(claude.stream_turn(text))
+                await current_speak_task
+            except asyncio.CancelledError:
+                # speak_stream's finally already flushed TTS subtasks
+                # and exit_speaking() restored state. Distinguish a real
+                # barge-in (continue worker) from a shutdown cancel
+                # (re-raise) by the explicit flag — stop_event is racy
+                # because asyncio's shutdown cancels drive_turns_task
+                # before run()'s finally has set it.
+                state = State.LISTENING
+                current_speak_task = None
+                if not barge_in_requested:
+                    raise
+                barge_in_requested = False
+                logger.info("Barge-in: turn cancelled, returning to LISTENING")
+                continue
             except Exception:
                 logger.exception("Claude turn failed")
                 state = State.LISTENING
+                current_speak_task = None
                 continue
-            # NOTE: a CancelledError raised inside speak_stream
-            # propagates without resetting state. Today the only cancel
-            # paths are app shutdown (state irrelevant — we're tearing
-            # down) and the future barge-in path, where SpeechStarted
-            # during SPEAKING will cancel drive_turns to interrupt TTS.
-            # The barge-in PR will own the cancel-cleanup (try/finally
-            # that resets state to LISTENING) since that's where state
-            # coherence after cancel actually matters.
+            current_speak_task = None
             logger.debug(
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),

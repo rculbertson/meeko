@@ -39,6 +39,19 @@ uv run python -m meeko.main
 
 Speak to the assistant. Press `Ctrl+C` to quit.
 
+### ReSpeaker XVF3800 setup (Raspberry Pi)
+
+On the Pi + ReSpeaker XVF3800 hardware path, the chip's default AEC tuning suppresses near-end speech aggressively during far-end playback, which prevents barge-in: your voice never reaches Deepgram while Meeko is talking. Raise the double-talk sensitivity once and persist it to flash.
+
+Grab `xvf_host` from the [reSpeaker XVF3800 repo](https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY/tree/master/host_control) (`host_control/rpi_64bit/`) before running:
+
+```bash
+sudo ./xvf_host PP_DTSENSITIVE 12
+sudo ./xvf_host SAVE_CONFIGURATION 1
+```
+
+`PP_DTSENSITIVE 12` enables the chip's extra near-end speech detector and biases the AEC toward double-talk performance; `SAVE_CONFIGURATION 1` writes the value to flash so it survives power cycles. This is the only parameter that needed changing — Seeed's other defaults work fine. To revert, `sudo ./xvf_host CLEAR_CONFIGURATION 1` and reboot the device.
+
 ### Logging
 
 Two environment variables control logging behavior.

@@ -106,9 +106,19 @@ class Speaker:
                                 )
                             await self._audio.write_speaker(chunk)
 
+                cancelled = False
                 try:
                     await asyncio.gather(produce(), consume())
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
                 finally:
+                    if cancelled:
+                        # Flush the output device first so barge-in is
+                        # audible immediately — otherwise buffered PCM
+                        # keeps playing for the duration of the TTS
+                        # subtask drain below.
+                        self._audio.abort_speaker()
                     for t in tts_tasks:
                         if not t.done():
                             t.cancel()
