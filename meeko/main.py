@@ -346,11 +346,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         async for ev in stt_session.events():
             if stop_event.is_set():
                 return
-            # While SPEAKING, surface every event at INFO so we can see
-            # whether mic audio is reaching Deepgram and what its VAD is
-            # doing — barge-in depends on this signal path being live.
+            # While SPEAKING, surface every event at DEBUG so a noisy
+            # ~20 Hz Update stream doesn't clutter the INFO log but is
+            # still available with MEEKO_LOG_LEVEL=debug when diagnosing
+            # whether mic audio is reaching Deepgram during TTS.
             if state == State.SPEAKING:
-                logger.info(
+                logger.debug(
                     "[stt-during-speaking] event=%s transcript=%r",
                     ev.event,
                     ev.transcript,
