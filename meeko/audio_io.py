@@ -130,6 +130,17 @@ class AudioIO:
         stereo = _mono_to_stereo(chunk) if DEVICE_OUT_CHANNELS == 2 else chunk
         await asyncio.to_thread(self._speaker_stream.write, stereo)
 
+    def abort_speaker(self) -> None:
+        """Drop any PCM still buffered in the PortAudio output ring.
+
+        On barge-in we cancel TTS subtasks, but the OS/driver may already
+        hold ~100–200ms of audio. The stop_stream/start_stream pair is
+        PortAudio's standard idiom for flushing the buffer so the user
+        hears the interrupt immediately rather than the tail of the
+        cancelled reply."""
+        self._speaker_stream.stop_stream()
+        self._speaker_stream.start_stream()
+
     def close(self) -> None:
         if self._mic_capturing:
             self._mic_stream.stop_stream()

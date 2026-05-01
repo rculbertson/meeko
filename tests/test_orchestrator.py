@@ -2217,6 +2217,184 @@ async def test_endofturn_while_idle_does_not_drive_a_turn(
                 await task
 
 
+async def test_start_of_turn_during_speaking_triggers_barge_in(
+    monkeypatch, fake_profiles, tmp_path, caplog
+):
+    """A StartOfTurn observed while state==SPEAKING must cancel the
+    in-flight speak task, flush the speaker buffer, and return the
+    session to LISTENING. A subsequent EndOfTurn drives a fresh turn."""
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    first_write = asyncio.Event()
+    speaker_stream.write.side_effect = lambda data: first_write.set()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+
+    fake_stt = _QueueDrivenSTTClient("dg-test")
+
+    release_tts = asyncio.Event()
+
+    class _SlowTTS:
+        def __init__(self, api_key):
+            self.calls: list[tuple[str, str]] = []
+
+        async def stream(self, text, voice):
+            self.calls.append((text, voice))
+            yield b"\x01\x02\x03\x04"
+            await release_tts.wait()
+
+    fake_tts = _SlowTTS("dg-test")
+
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    caplog.set_level(logging.INFO, logger="meeko")
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            await _wait_until(
+                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
+            )
+            session = fake_stt.session_obj
+
+            # Drive the first turn into SPEAKING.
+            await session.event_queue.put(
+                SimpleNamespace(event="EndOfTurn", transcript="hello")
+            )
+            await asyncio.wait_for(first_write.wait(), timeout=5)
+
+            # User barges in: StartOfTurn while SPEAKING. The speak task
+            # should be cancelled even though release_tts is still
+            # blocking the TTS stream.
+            await session.event_queue.put(
+                SimpleNamespace(event="StartOfTurn", transcript="")
+            )
+            await _wait_until(
+                lambda: any(
+                    "Barge-in: turn cancelled" in rec.getMessage()
+                    for rec in caplog.records
+                ),
+                real_sleep=real_sleep,
+            )
+
+            # Speaker buffer was flushed via stop/start.
+            assert speaker_stream.stop_stream.called
+            assert speaker_stream.start_stream.called
+
+            # Now the user finishes their interruption. The EndOfTurn
+            # arrives in LISTENING (not SPEAKING) and drives a fresh turn.
+            release_tts.set()  # unblock any residual TTS so new turn can run
+            await session.event_queue.put(
+                SimpleNamespace(event="EndOfTurn", transcript="wait, actually")
+            )
+            await _wait_until(
+                lambda: (
+                    fake_claude_holder["client"].turns == ["hello", "wait, actually"]
+                ),
+                real_sleep=real_sleep,
+            )
+        finally:
+            release_tts.set()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+async def test_start_of_turn_outside_speaking_does_not_cancel(
+    monkeypatch, fake_profiles, tmp_path, caplog
+):
+    """StartOfTurn while LISTENING/PROCESSING must not trigger barge-in
+    (there is nothing to cancel) and must not log a barge-in line."""
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+
+    fake_stt = _QueueDrivenSTTClient("dg-test")
+    fake_tts = _FakeTTSClient("dg-test")
+
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    caplog.set_level(logging.INFO, logger="meeko")
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            await _wait_until(
+                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
+            )
+            session = fake_stt.session_obj
+
+            # StartOfTurn arriving while LISTENING — no barge-in.
+            await session.event_queue.put(
+                SimpleNamespace(event="StartOfTurn", transcript="")
+            )
+            await session.event_queue.put(
+                SimpleNamespace(event="EndOfTurn", transcript="hi")
+            )
+            await _wait_until(
+                lambda: fake_claude_holder["client"].turns == ["hi"],
+                real_sleep=real_sleep,
+            )
+
+            assert not any("Barge-in" in rec.getMessage() for rec in caplog.records)
+            assert not speaker_stream.stop_stream.called
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
 async def test_run_missing_api_key_raises(monkeypatch):
     monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

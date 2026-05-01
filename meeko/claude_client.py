@@ -6,6 +6,7 @@ sentence-sized text chunks as they are generated so the caller can
 begin TTS before the full reply is ready.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -178,29 +179,61 @@ class ClaudeClient:
             api_start = time.perf_counter()
             ttft_ms: int | None = None
             buffer = ""
+            # Track text streamed in this round so a barge-in cancel can
+            # commit a partial assistant message and keep alternating
+            # user/assistant history valid. Reset per round — completed
+            # rounds commit full assistant_blocks via the normal path.
+            streamed_text = ""
 
-            async with self._client.beta.messages.stream(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                system=self._system,
-                tools=self._tools,
-                messages=_with_cache_breakpoint(self._messages),
-                betas=[COMPACTION_BETA],
-                context_management=_CONTEXT_MANAGEMENT,
-            ) as stream:
-                async for delta in stream.text_stream:
-                    if ttft_ms is None:
-                        ttft_ms = int((time.perf_counter() - api_start) * 1000)
+            try:
+                async with self._client.beta.messages.stream(
+                    model=MODEL,
+                    max_tokens=MAX_TOKENS,
+                    system=self._system,
+                    tools=self._tools,
+                    messages=_with_cache_breakpoint(self._messages),
+                    betas=[COMPACTION_BETA],
+                    context_management=_CONTEXT_MANAGEMENT,
+                ) as stream:
+                    async for delta in stream.text_stream:
+                        if ttft_ms is None:
+                            ttft_ms = int((time.perf_counter() - api_start) * 1000)
+                            logger.debug(
+                                "[timing] claude round=%d ttft=%dms",
+                                round_idx,
+                                ttft_ms,
+                            )
+                        buffer += delta
+                        streamed_text += delta
+                        sentences, buffer = _pop_sentences(buffer)
+                        for s in sentences:
+                            yield s
+                    final = await stream.get_final_message()
+            except BaseException as exc:
+                # Barge-in (or any other cancel) raises CancelledError
+                # mid-stream. Commit a partial assistant turn so the next
+                # user turn doesn't produce two consecutive user messages.
+                # GeneratorExit can also fire if the consumer stops
+                # iterating early (e.g. speaker cancellation closes the
+                # async generator); same fix applies.
+                if isinstance(exc, asyncio.CancelledError | GeneratorExit):
+                    text = streamed_text.strip() or "…"
+                    partial = [{"type": "text", "text": text}]
+                    self._messages.append({"role": "assistant", "content": partial})
+                    # Best-effort persistence: during process shutdown
+                    # asyncio cleans up pending async generators after
+                    # the SessionStore has already been closed, so the
+                    # persist would crash on a closed DB. The in-memory
+                    # commit above is what matters for next-turn
+                    # correctness; the on-disk record is nice-to-have.
+                    try:
+                        await self._persist("assistant", partial)
+                    except Exception:
                         logger.debug(
-                            "[timing] claude round=%d ttft=%dms",
-                            round_idx,
-                            ttft_ms,
+                            "partial-turn persist skipped (store likely closed)",
+                            exc_info=True,
                         )
-                    buffer += delta
-                    sentences, buffer = _pop_sentences(buffer)
-                    for s in sentences:
-                        yield s
-                final = await stream.get_final_message()
+                raise
 
             tail = buffer.strip()
             if tail:
