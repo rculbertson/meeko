@@ -1929,9 +1929,10 @@ async def _wait_until(predicate, *, timeout=5.0, real_sleep=None):
     """Poll until predicate() is true, or raise TimeoutError. Bypasses
     any monkeypatched asyncio.sleep so it works alongside fast_sleep."""
     sleep = real_sleep if real_sleep is not None else asyncio.sleep
-    deadline = asyncio.get_event_loop().time() + timeout
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     while not predicate():
-        if asyncio.get_event_loop().time() >= deadline:
+        if loop.time() >= deadline:
             raise TimeoutError("predicate never became true")
         await sleep(0.005)
 

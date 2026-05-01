@@ -315,7 +315,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         """Always drain stt_session.events(); decide synchronously
         whether each EndOfTurn should drive a turn, and queue the ones
         that should."""
-        nonlocal state
         # If we want to make it faster, we can also use EagerEndOfTurn and
         # TurnResumed events which allows us to send text to the LLM eagerly.
         # If they're done talking, great, we already sent the text to the LLM.
@@ -358,6 +357,15 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 logger.exception("Claude turn failed")
                 state = State.LISTENING
                 continue
+            # NOTE: a CancelledError raised inside speak_stream (STT
+            # reconnect tearing the session down, or the future barge-in
+            # path) propagates without resetting state — leaving it
+            # stuck at PROCESSING/SPEAKING and causing the puller's
+            # echo-suppression to eat genuine turns after the new
+            # session comes up. Pre-existing in handle_turns; the right
+            # fix is a try/finally that resets state on cancel, landing
+            # alongside barge-in (which is the case where this matters
+            # most).
             logger.debug(
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),
