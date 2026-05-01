@@ -237,6 +237,23 @@ class ClaudeClient:
                     )
                 raise
 
+            # Commit the full assistant turn to history *before* yielding
+            # the trailing partial sentence. If the consumer cancels us
+            # while we're suspended at `yield tail`, GeneratorExit fires
+            # outside the try/except above — without this ordering, the
+            # next user turn would stack on an orphaned user message and
+            # 400 from the API. SQLite is the verbatim source of truth —
+            # strip the server's compaction summary before persisting so
+            # on-disk transcripts never carry derived state. The block
+            # stays in-memory so the next turn's `messages=` payload
+            # includes it and the server doesn't re-summarize the prefix.
+            assistant_blocks = [_serialize_block(block) for block in final.content]
+            self._messages.append({"role": "assistant", "content": assistant_blocks})
+            persisted_blocks = [
+                b for b in assistant_blocks if b.get("type") != "compaction"
+            ]
+            await self._persist("assistant", persisted_blocks)
+
             tail = buffer.strip()
             if tail:
                 yield tail
@@ -262,18 +279,6 @@ class ClaudeClient:
                         getattr(it, "input_tokens", None),
                         getattr(it, "output_tokens", None),
                     )
-
-            assistant_blocks = [_serialize_block(block) for block in final.content]
-            self._messages.append({"role": "assistant", "content": assistant_blocks})
-            # SQLite is the verbatim source of truth — strip the server's
-            # compaction summary before persisting so on-disk transcripts
-            # never carry derived state. The block stays in-memory so the
-            # next turn's `messages=` payload includes it and the server
-            # doesn't re-summarize the same prefix.
-            persisted_blocks = [
-                b for b in assistant_blocks if b.get("type") != "compaction"
-            ]
-            await self._persist("assistant", persisted_blocks)
 
             if final.stop_reason != "tool_use":
                 return

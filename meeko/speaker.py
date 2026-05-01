@@ -113,15 +113,16 @@ class Speaker:
                     cancelled = True
                     raise
                 finally:
+                    if cancelled:
+                        # Flush the output device first so barge-in is
+                        # audible immediately — otherwise buffered PCM
+                        # keeps playing for the duration of the TTS
+                        # subtask drain below.
+                        self._audio.abort_speaker()
                     for t in tts_tasks:
                         if not t.done():
                             t.cancel()
                     await asyncio.gather(*tts_tasks, return_exceptions=True)
-                    if cancelled:
-                        # Drop residual PCM still buffered in the output
-                        # device so a barge-in interrupt is immediate
-                        # instead of trailing the cancelled reply.
-                        self._audio.abort_speaker()
 
                 logger.debug(
                     "[timing] speak_total=%dms",
