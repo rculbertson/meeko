@@ -209,30 +209,32 @@ class ClaudeClient:
                         for s in sentences:
                             yield s
                     final = await stream.get_final_message()
-            except BaseException as exc:
-                # Barge-in (or any other cancel) raises CancelledError
-                # mid-stream. Commit a partial assistant turn so the next
-                # user turn doesn't produce two consecutive user messages.
-                # GeneratorExit can also fire if the consumer stops
-                # iterating early (e.g. speaker cancellation closes the
-                # async generator); same fix applies.
-                if isinstance(exc, asyncio.CancelledError | GeneratorExit):
-                    text = streamed_text.strip() or "…"
-                    partial = [{"type": "text", "text": text}]
-                    self._messages.append({"role": "assistant", "content": partial})
-                    # Best-effort persistence: during process shutdown
-                    # asyncio cleans up pending async generators after
-                    # the SessionStore has already been closed, so the
-                    # persist would crash on a closed DB. The in-memory
-                    # commit above is what matters for next-turn
-                    # correctness; the on-disk record is nice-to-have.
-                    try:
-                        await self._persist("assistant", partial)
-                    except Exception:
-                        logger.debug(
-                            "partial-turn persist skipped (store likely closed)",
-                            exc_info=True,
-                        )
+            except asyncio.CancelledError, GeneratorExit, Exception:
+                # Anything that terminates the stream early — barge-in
+                # (CancelledError), consumer-driven GeneratorExit, or a
+                # network/API error (Exception) — leaves the user
+                # message already appended at the top of stream_turn
+                # without a paired assistant message. Commit a partial
+                # assistant turn so the next user turn doesn't produce
+                # two consecutive user messages and trip a 400 from
+                # the API. Empty stream gets a "…" placeholder rather
+                # than an empty text block (which the API rejects).
+                text = streamed_text.strip() or "…"
+                partial = [{"type": "text", "text": text}]
+                self._messages.append({"role": "assistant", "content": partial})
+                # Best-effort persistence: during process shutdown
+                # asyncio cleans up pending async generators after the
+                # SessionStore has already been closed, so the persist
+                # would crash on a closed DB. The in-memory commit
+                # above is what matters for next-turn correctness; the
+                # on-disk record is nice-to-have.
+                try:
+                    await self._persist("assistant", partial)
+                except Exception:
+                    logger.debug(
+                        "partial-turn persist skipped (store likely closed)",
+                        exc_info=True,
+                    )
                 raise
 
             tail = buffer.strip()

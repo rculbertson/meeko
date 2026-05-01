@@ -739,3 +739,94 @@ async def test_cancelled_stream_with_no_output_uses_placeholder(monkeypatch):
     last = client._messages[-1]
     assert last["role"] == "assistant"
     assert last["content"] == [{"type": "text", "text": "…"}]
+
+
+class _RaisingStream:
+    """A streaming response that yields a couple of deltas, then raises
+    a non-cancel exception to simulate a network/API error mid-stream."""
+
+    def __init__(
+        self,
+        captured: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        early_deltas: list[str],
+        exc: BaseException,
+    ):
+        self._captured = captured
+        self._kwargs = kwargs
+        self._early_deltas = early_deltas
+        self._exc = exc
+
+    async def __aenter__(self):
+        self._captured.append(copy.deepcopy(self._kwargs))
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    @property
+    def text_stream(self):
+        deltas = self._early_deltas
+        exc = self._exc
+
+        async def _iter():
+            for d in deltas:
+                yield d
+            raise exc
+
+        return _iter()
+
+    async def get_final_message(self):  # pragma: no cover - never reached
+        raise AssertionError("stream raised before final message")
+
+
+async def test_stream_error_commits_partial_assistant_turn(monkeypatch):
+    """A non-cancel error mid-stream (e.g. a network drop) must still
+    commit a partial assistant turn — otherwise the next stream_turn
+    call appends a second user message and the API 400s on consecutive
+    user roles."""
+    captured: list[dict[str, Any]] = []
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return _RaisingStream(
+                captured,
+                kwargs,
+                ["Hello there. ", "I was about"],
+                RuntimeError("network dropped"),
+            )
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+
+    persisted: list[tuple[str, Any]] = []
+
+    class _FakeStore:
+        async def persist_turn(self, session_id, role, content):
+            persisted.append((role, content))
+
+    client = ClaudeClient(
+        api_key="k",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        store=_FakeStore(),
+        session_id="sess-1",
+    )
+
+    with pytest.raises(RuntimeError, match="network dropped"):
+        async for _ in client.stream_turn("Hi Claude"):
+            pass
+
+    # History must be balanced: user followed by partial assistant,
+    # so a follow-up turn doesn't stack a second user message.
+    assert client._messages[-2] == {"role": "user", "content": "Hi Claude"}
+    last = client._messages[-1]
+    assert last["role"] == "assistant"
+    assert "Hello there" in last["content"][0]["text"]
+
+    # SQLite mirrors in-memory: both turns persisted.
+    assert [r for r, _ in persisted] == ["user", "assistant"]
