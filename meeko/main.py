@@ -300,9 +300,22 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             except ConnectionClosed:
                 return
 
-    async def handle_turns(stt_session):
-        """Consume STT events, drive a Claude turn on EndOfTurn."""
-        nonlocal state, session_id
+    # Queue of user-turn transcripts handed from the STT puller to the
+    # turn-driving worker. Decouples the (always-fast) STT recv loop
+    # from the (slow) Claude+TTS path so the websockets recv queue
+    # never backs up while the worker is awaiting TTS — backpressure
+    # there used to fill the queue, park transfer_data, starve pong
+    # frames, and trip the keepalive watchdog with 1011 mid-reply.
+    # Unbounded: payloads are short transcript strings, and a long
+    # backlog would only happen if Claude fell catastrophically behind,
+    # which is a separate problem.
+    turn_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def pull_stt_events(stt_session):
+        """Always drain stt_session.events(); decide synchronously
+        whether each EndOfTurn should drive a turn, and queue the ones
+        that should."""
+        nonlocal state
         # If we want to make it faster, we can also use EagerEndOfTurn and
         # TurnResumed events which allows us to send text to the LLM eagerly.
         # If they're done talking, great, we already sent the text to the LLM.
@@ -313,103 +326,112 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 return
             if ev.event == "StartOfTurn":
                 logger.info("User started speaking (state=%s)", state.name)
-            elif ev.event == "EndOfTurn":
-                text = ev.transcript.strip()
-                if state == State.IDLE:
-                    # Safety belt: Deepgram shouldn't emit turns while
-                    # we're gating mic audio behind the wake word, but
-                    # any stray transcripts must not start a Claude turn.
-                    continue
-                if state == State.SPEAKING:
-                    # AEC observation mode: don't start a Claude turn while
-                    # we're talking. Log so we can gauge echo leakage.
-                    logger.info("[echo?] %s", text)
-                    continue
-                logger.info("[user] %s", text)
-                if not text:
-                    continue
-                state = State.PROCESSING
-                t_turn = time.perf_counter()
-                try:
-                    await speaker.speak_stream(claude.stream_turn(text))
-                except Exception:
-                    logger.exception("Claude turn failed")
-                    state = State.LISTENING
-                    continue
-                logger.debug(
-                    "[timing] turn_total_eot_to_speak_done=%dms",
-                    int((time.perf_counter() - t_turn) * 1000),
+                continue
+            if ev.event != "EndOfTurn":
+                continue
+            text = ev.transcript.strip()
+            if state == State.IDLE:
+                # Safety belt: Deepgram shouldn't emit turns while
+                # we're gating mic audio behind the wake word, but
+                # any stray transcripts must not start a Claude turn.
+                continue
+            if state == State.SPEAKING:
+                # AEC observation mode: don't start a Claude turn while
+                # we're talking. Log so we can gauge echo leakage.
+                logger.info("[echo?] %s", text)
+                continue
+            if not text:
+                continue
+            await turn_queue.put(text)
+
+    async def drive_turns():
+        """Drive Claude + TTS for queued user turns, one at a time."""
+        nonlocal state, session_id
+        while not stop_event.is_set():
+            text = await turn_queue.get()
+            logger.info("[user] %s", text)
+            state = State.PROCESSING
+            t_turn = time.perf_counter()
+            try:
+                await speaker.speak_stream(claude.stream_turn(text))
+            except Exception:
+                logger.exception("Claude turn failed")
+                state = State.LISTENING
+                continue
+            logger.debug(
+                "[timing] turn_total_eot_to_speak_done=%dms",
+                int((time.perf_counter() - t_turn) * 1000),
+            )
+            # should_load can coexist with should_end (chain: finalize
+            # current session then load a prior one in one turn). Always
+            # summarize the abandoned session so it stays in the recall
+            # index — summarize_session no-ops on empty sessions, so
+            # this is safe even when the user loads after only a turn
+            # or two.
+            if session_manager.should_load():
+                target_id = session_manager.get_load_target()
+                assert target_id is not None  # guaranteed by should_load()
+                fire_summary(session_id)
+                logger.info(
+                    "load_session: fired summary for abandoned %s",
+                    session_id[:8],
                 )
-                # should_load can coexist with should_end (chain: finalize
-                # current session then load a prior one in one turn). Always
-                # summarize the abandoned session so it stays in the recall
-                # index — summarize_session no-ops on empty sessions, so
-                # this is safe even when the user loads after only a turn
-                # or two.
-                if session_manager.should_load():
-                    target_id = session_manager.get_load_target()
-                    assert target_id is not None  # guaranteed by should_load()
-                    fire_summary(session_id)
+                turns = await store.load_turns(target_id)
+                claude.load_history(turns)
+                claude.rebind_session(target_id)
+                session_id = target_id
+                await store.touch_session(target_id)
+                session_manager.clear()
+                state = State.LISTENING
+                logger.info(
+                    "load_session: swapped history to %s (%d turns), "
+                    "continuing in LISTENING",
+                    target_id[:8],
+                    len(turns),
+                )
+            elif session_manager.should_end():
+                active = profile_manager.active_profile
+                finalized_sid = session_id
+                new_sid = await store.create_session(active.name)
+                claude.reset_session(new_sid)
+                session_id = new_sid
+                session_manager.clear()
+                fire_summary(finalized_sid)
+                if wake_detector is not None:
+                    wake_detector.reset()
+                    state = State.IDLE
                     logger.info(
-                        "load_session: fired summary for abandoned %s",
-                        session_id[:8],
-                    )
-                    turns = await store.load_turns(target_id)
-                    claude.load_history(turns)
-                    claude.rebind_session(target_id)
-                    session_id = target_id
-                    await store.touch_session(target_id)
-                    session_manager.clear()
-                    state = State.LISTENING
-                    logger.info(
-                        "load_session: swapped history to %s (%d turns), "
-                        "continuing in LISTENING",
-                        target_id[:8],
-                        len(turns),
-                    )
-                elif session_manager.should_end():
-                    active = profile_manager.active_profile
-                    finalized_sid = session_id
-                    new_sid = await store.create_session(active.name)
-                    claude.reset_session(new_sid)
-                    session_id = new_sid
-                    session_manager.clear()
-                    fire_summary(finalized_sid)
-                    if wake_detector is not None:
-                        wake_detector.reset()
-                        state = State.IDLE
-                        logger.info(
-                            "Session ended; returning to IDLE "
-                            "(say '%s' to start a new conversation)",
-                            active.wake_word,
-                        )
-                    else:
-                        state = State.LISTENING
-                        logger.info(
-                            "Session ended; wake word disabled, returning to LISTENING"
-                        )
-                elif session_manager.should_start_new():
-                    active = profile_manager.active_profile
-                    finalized_sid = session_id
-                    new_sid = await store.create_session(active.name)
-                    claude.reset_session(new_sid)
-                    session_id = new_sid
-                    session_manager.clear()
-                    fire_summary(finalized_sid)
-                    state = State.LISTENING
-                    logger.info(
-                        "new_session: rotated to %s (profile=%s), "
-                        "continuing in LISTENING",
-                        new_sid[:8],
-                        active.name,
+                        "Session ended; returning to IDLE "
+                        "(say '%s' to start a new conversation)",
+                        active.wake_word,
                     )
                 else:
                     state = State.LISTENING
+                    logger.info(
+                        "Session ended; wake word disabled, returning to LISTENING"
+                    )
+            elif session_manager.should_start_new():
+                active = profile_manager.active_profile
+                finalized_sid = session_id
+                new_sid = await store.create_session(active.name)
+                claude.reset_session(new_sid)
+                session_id = new_sid
+                session_manager.clear()
+                fire_summary(finalized_sid)
+                state = State.LISTENING
+                logger.info(
+                    "new_session: rotated to %s (profile=%s), continuing in LISTENING",
+                    new_sid[:8],
+                    active.name,
+                )
+            else:
+                state = State.LISTENING
 
     async def on_session(stt_session) -> None:
         session_tasks = [
             asyncio.create_task(pump_mic(stt_session)),
-            asyncio.create_task(handle_turns(stt_session)),
+            asyncio.create_task(pull_stt_events(stt_session)),
+            asyncio.create_task(drive_turns()),
             asyncio.create_task(keepalive_pump(stt_session)),
         ]
         try:
