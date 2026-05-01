@@ -328,10 +328,18 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     def request_barge_in() -> None:
         """Cancel the in-flight speak task, if any. Called from
         pull_stt_events when StartOfTurn fires during SPEAKING."""
-        nonlocal barge_in_requested
+        nonlocal barge_in_requested, state
         if current_speak_task is not None and not current_speak_task.done():
             logger.info("Barge-in: cancelling in-flight reply")
             barge_in_requested = True
+            # Flip state synchronously so any EndOfTurn arriving before
+            # the cancel propagates through drive_turns isn't dropped as
+            # echo by pull_stt_events. drive_turns and speak_stream's
+            # exit_speaking will re-assert LISTENING when they unwind;
+            # the brief PROCESSING window between exit_speaking and the
+            # except-clause is harmless (PROCESSING-state EndOfTurns are
+            # queued normally).
+            state = State.LISTENING
             current_speak_task.cancel()
 
     async def pull_stt_events(stt_session):
