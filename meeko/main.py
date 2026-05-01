@@ -15,6 +15,7 @@ SPEAKING and the mic queue is drained after playback. True barge-in
 
 import argparse
 import asyncio
+import contextlib
 import functools
 import logging
 import logging.handlers
@@ -440,10 +441,14 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 state = State.LISTENING
 
     async def on_session(stt_session) -> None:
+        # drive_turns is intentionally NOT in this group — it lives at
+        # run() scope and outlives individual STT sessions, so an STT
+        # blip mid-reply doesn't cut TTS off mid-sentence and doesn't
+        # lose the in-flight turn. The session-scoped tasks are the
+        # ones that legitimately need the live stt_session handle.
         session_tasks = [
             asyncio.create_task(pump_mic(stt_session)),
             asyncio.create_task(pull_stt_events(stt_session)),
-            asyncio.create_task(drive_turns()),
             asyncio.create_task(keepalive_pump(stt_session)),
         ]
         try:
@@ -470,12 +475,19 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     audio.start_mic()
     logger.info("Mic active.")
 
+    # Long-lived turn worker — survives STT reconnects so a connection
+    # blip mid-reply doesn't truncate TTS or lose the in-flight turn.
+    drive_turns_task = asyncio.create_task(drive_turns())
+
     try:
         await supervisor.run()
     except asyncio.CancelledError:
         pass
     finally:
         stop_event.set()
+        drive_turns_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await drive_turns_task
         timer_manager.cancel_all_timers()
         # Cancel in-flight summary tasks before closing the SQLite
         # connection; letting them run into a closed store would crash
