@@ -362,15 +362,14 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 logger.exception("Claude turn failed")
                 state = State.LISTENING
                 continue
-            # NOTE: a CancelledError raised inside speak_stream (STT
-            # reconnect tearing the session down, or the future barge-in
-            # path) propagates without resetting state — leaving it
-            # stuck at PROCESSING/SPEAKING and causing the puller's
-            # echo-suppression to eat genuine turns after the new
-            # session comes up. Pre-existing in handle_turns; the right
-            # fix is a try/finally that resets state on cancel, landing
-            # alongside barge-in (which is the case where this matters
-            # most).
+            # NOTE: a CancelledError raised inside speak_stream
+            # propagates without resetting state. Today the only cancel
+            # paths are app shutdown (state irrelevant — we're tearing
+            # down) and the future barge-in path, where SpeechStarted
+            # during SPEAKING will cancel drive_turns to interrupt TTS.
+            # The barge-in PR will own the cancel-cleanup (try/finally
+            # that resets state to LISTENING) since that's where state
+            # coherence after cancel actually matters.
             logger.debug(
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),
