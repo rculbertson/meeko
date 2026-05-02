@@ -165,10 +165,21 @@ class AudioIO:
             chunk = chunk[:-1]
         if not chunk:
             return
-        stereo = _mono_to_stereo(chunk) if DEVICE_OUT_CHANNELS == 2 else chunk
-        await self._loop.run_in_executor(
-            self._spk_executor, self._speaker_stream.write, stereo
-        )
+        # Slice into CHUNK-sized pieces (50ms each) and re-check the
+        # mute flag between slices so barge-in cancellation latency is
+        # bounded by one slice rather than by the (unbounded) size of
+        # the TTS chunk handed in. abort_speaker() only blocks future
+        # submissions — without slicing, a multi-hundred-ms TTS chunk
+        # already in flight would play to completion.
+        mono_slice_bytes = CHUNK * 2
+        for offset in range(0, len(chunk), mono_slice_bytes):
+            if self._spk_muted:
+                return
+            piece = chunk[offset : offset + mono_slice_bytes]
+            stereo = _mono_to_stereo(piece) if DEVICE_OUT_CHANNELS == 2 else piece
+            await self._loop.run_in_executor(
+                self._spk_executor, self._speaker_stream.write, stereo
+            )
 
     def reset_speaker_buffer(self) -> None:
         """Reset speaker write state at the start of a new utterance.

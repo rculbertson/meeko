@@ -176,6 +176,37 @@ async def test_reset_speaker_buffer_clears_mute(pa_factory):
     speaker_stream.write.assert_called_once_with(b"\x01\x02\x01\x02")
 
 
+async def test_write_speaker_slices_large_chunks_for_bounded_barge_in(pa_factory):
+    """write_speaker must cut a large TTS chunk into CHUNK-sized slices
+    and re-check _spk_muted between them, so abort_speaker() can stop
+    playback within ~one slice rather than waiting out the whole chunk."""
+    from meeko.audio_io import CHUNK
+
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    # 4 slices worth of mono PCM (CHUNK * 2 bytes per slice).
+    slice_bytes = CHUNK * 2
+    big_chunk = b"\x01\x02" * (CHUNK * 4)
+    assert len(big_chunk) == slice_bytes * 4
+
+    # Mute mid-playback: after the second slice runs, abort. The third
+    # slice's pre-write mute check should short-circuit.
+    call_count = 0
+
+    def write_side_effect(data: bytes) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            io.abort_speaker()
+
+    speaker_stream.write.side_effect = write_side_effect
+
+    await io.write_speaker(big_chunk)
+
+    assert call_count == 2
+
+
 async def test_speaker_writes_serialize_across_barge_in(pa_factory):
     """PortAudio's blocking write API is not thread-safe on the same
     stream. If a write is still running in the executor when the
