@@ -2,7 +2,7 @@
 
 Provides four tools:
 
-- ``end_session``: user signals they want to stop ("end conversation",
+- ``end_session``: user signals they want to end the conversation ("end conversation",
   "end session", "that's enough for today", etc.). After SPEAKING the orchestrator
   finalizes the session and returns to IDLE, re-arming the wake word.
 - ``new_session``: user wants to start a fresh thread without stopping
@@ -93,8 +93,9 @@ def get_tool_definitions() -> list[ToolDefinition]:
             "description": (
                 "End the current conversation and return Meeko to idle. "
                 "Call this when the user clearly indicates they want to "
-                "stop — e.g. 'end conversation', 'end session', 'that's "
-                "enough for today', 'let's pick this up later'. Before "
+                "end the conversation — e.g. 'end conversation', "
+                "'end session', 'that's enough for today', 'let's pick "
+                "this up later'. Before "
                 "calling this tool, respond with a brief verbal "
                 "acknowledgement (e.g. 'Talk to you later!'). A bare "
                 "'stop' (or 'wait', 'hold on', 'never mind') is an "
