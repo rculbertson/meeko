@@ -210,95 +210,105 @@ class ClaudeClient:
                             yield s
                     final = await stream.get_final_message()
             except asyncio.CancelledError, GeneratorExit, Exception:
-                # Anything that terminates the stream early — barge-in
-                # (CancelledError), consumer-driven GeneratorExit, or a
-                # network/API error (Exception) — leaves the user
-                # message already appended at the top of stream_turn
-                # without a paired assistant message. Commit a partial
-                # assistant turn so the next user turn doesn't produce
-                # two consecutive user messages and trip a 400 from
-                # the API. Empty stream gets a "…" placeholder rather
-                # than an empty text block (which the API rejects).
-                text = streamed_text.strip() or "…"
-                partial = [{"type": "text", "text": text}]
-                self._messages.append({"role": "assistant", "content": partial})
-                # Best-effort persistence: during process shutdown
-                # asyncio cleans up pending async generators after the
-                # SessionStore has already been closed, so the persist
-                # would crash on a closed DB. The in-memory commit
-                # above is what matters for next-turn correctness; the
-                # on-disk record is nice-to-have.
-                try:
-                    await self._persist("assistant", partial)
-                except Exception:
-                    logger.debug(
-                        "partial-turn persist skipped (store likely closed)",
-                        exc_info=True,
-                    )
+                await self._commit_partial_assistant(streamed_text)
                 raise
 
-            # Commit the full assistant turn to history *before* yielding
-            # the trailing partial sentence. If the consumer cancels us
-            # while we're suspended at `yield tail`, GeneratorExit fires
-            # outside the try/except above — without this ordering, the
-            # next user turn would stack on an orphaned user message and
-            # 400 from the API. SQLite is the verbatim source of truth —
-            # strip the server's compaction summary before persisting so
-            # on-disk transcripts never carry derived state. The block
-            # stays in-memory so the next turn's `messages=` payload
-            # includes it and the server doesn't re-summarize the prefix.
-            assistant_blocks = [_serialize_block(block) for block in final.content]
-            self._messages.append({"role": "assistant", "content": assistant_blocks})
-            persisted_blocks = [
-                b for b in assistant_blocks if b.get("type") != "compaction"
-            ]
-            await self._persist("assistant", persisted_blocks)
+            await self._commit_full_assistant(final)
 
             tail = buffer.strip()
             if tail:
                 yield tail
 
-            usage = getattr(final, "usage", None)
-            logger.debug(
-                "[timing] claude round=%d api_total=%dms in_tok=%s out_tok=%s "
-                "cache_create=%s cache_read=%s stop=%s",
-                round_idx,
-                int((time.perf_counter() - api_start) * 1000),
-                getattr(usage, "input_tokens", None),
-                getattr(usage, "output_tokens", None),
-                getattr(usage, "cache_creation_input_tokens", None),
-                getattr(usage, "cache_read_input_tokens", None),
-                final.stop_reason,
-            )
-
-            for it in getattr(usage, "iterations", None) or []:
-                if getattr(it, "type", None) == "compaction":
-                    logger.info(
-                        "[compaction] round=%d in_tok=%s out_tok=%s",
-                        round_idx,
-                        getattr(it, "input_tokens", None),
-                        getattr(it, "output_tokens", None),
-                    )
+            self._log_round_usage(round_idx, api_start, final)
 
             if final.stop_reason != "tool_use":
                 return
 
-            tool_results = []
-            for block in final.content:
-                if block.type != "tool_use":
-                    continue
-                result = await self._dispatcher.dispatch(block.name, block.input or {})
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    }
-                )
-            self._messages.append({"role": "user", "content": tool_results})
-            await self._persist("user", tool_results)
+            await self._dispatch_tool_calls(final)
 
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
+
+    async def _commit_partial_assistant(self, streamed_text: str) -> None:
+        # Anything that terminates the stream early — barge-in
+        # (CancelledError), consumer-driven GeneratorExit, or a
+        # network/API error (Exception) — leaves the user message
+        # already appended at the top of stream_turn without a paired
+        # assistant message. Commit a partial assistant turn so the
+        # next user turn doesn't produce two consecutive user messages
+        # and trip a 400 from the API. Empty stream gets a "…"
+        # placeholder rather than an empty text block (which the API
+        # rejects).
+        text = streamed_text.strip() or "…"
+        partial = [{"type": "text", "text": text}]
+        self._messages.append({"role": "assistant", "content": partial})
+        # Best-effort persistence: during process shutdown asyncio
+        # cleans up pending async generators after the SessionStore
+        # has already been closed, so the persist would crash on a
+        # closed DB. The in-memory commit above is what matters for
+        # next-turn correctness; the on-disk record is nice-to-have.
+        try:
+            await self._persist("assistant", partial)
+        except Exception:
+            logger.debug(
+                "partial-turn persist skipped (store likely closed)",
+                exc_info=True,
+            )
+
+    async def _commit_full_assistant(self, final: Any) -> None:
+        # Commit the full assistant turn to history *before* the caller
+        # yields the trailing partial sentence. If the consumer cancels
+        # while suspended at `yield tail`, GeneratorExit fires outside
+        # stream_turn's try/except — without this ordering, the next
+        # user turn would stack on an orphaned user message and 400
+        # from the API. SQLite is the verbatim source of truth — strip
+        # the server's compaction summary before persisting so on-disk
+        # transcripts never carry derived state. The block stays
+        # in-memory so the next turn's `messages=` payload includes it
+        # and the server doesn't re-summarize the prefix.
+        assistant_blocks = [_serialize_block(block) for block in final.content]
+        self._messages.append({"role": "assistant", "content": assistant_blocks})
+        persisted_blocks = [
+            b for b in assistant_blocks if b.get("type") != "compaction"
+        ]
+        await self._persist("assistant", persisted_blocks)
+
+    def _log_round_usage(self, round_idx: int, api_start: float, final: Any) -> None:
+        usage = getattr(final, "usage", None)
+        logger.debug(
+            "[timing] claude round=%d api_total=%dms in_tok=%s out_tok=%s "
+            "cache_create=%s cache_read=%s stop=%s",
+            round_idx,
+            int((time.perf_counter() - api_start) * 1000),
+            getattr(usage, "input_tokens", None),
+            getattr(usage, "output_tokens", None),
+            getattr(usage, "cache_creation_input_tokens", None),
+            getattr(usage, "cache_read_input_tokens", None),
+            final.stop_reason,
+        )
+        for it in getattr(usage, "iterations", None) or []:
+            if getattr(it, "type", None) == "compaction":
+                logger.info(
+                    "[compaction] round=%d in_tok=%s out_tok=%s",
+                    round_idx,
+                    getattr(it, "input_tokens", None),
+                    getattr(it, "output_tokens", None),
+                )
+
+    async def _dispatch_tool_calls(self, final: Any) -> None:
+        tool_results = []
+        for block in final.content:
+            if block.type != "tool_use":
+                continue
+            result = await self._dispatcher.dispatch(block.name, block.input or {})
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                }
+            )
+        self._messages.append({"role": "user", "content": tool_results})
+        await self._persist("user", tool_results)
 
     async def _persist(self, role: str, content: str | list[dict[str, Any]]) -> None:
         if self._store is None or self._session_id is None:
