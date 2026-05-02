@@ -6,6 +6,7 @@ PyAudio callback thread to the asyncio event loop.
 
 import array
 import asyncio
+import concurrent.futures
 import logging
 import os
 
@@ -109,6 +110,18 @@ class AudioIO:
         # on ALSA), so we accept the ~one-buffer tail of audio that
         # PortAudio has already queued.
         self._spk_muted = False
+        # Dedicated single-worker executor for speaker writes. PortAudio's
+        # blocking write API is not thread-safe on the same stream
+        # (single-threaded spec; concurrent calls are documented as
+        # illegal). The default to_thread pool has multiple workers, so
+        # if a write is still running in the executor when the asyncio
+        # task is cancelled (barge-in) and the next utterance submits
+        # another write, the two could land on different workers and
+        # call pa.write_stream concurrently. A single-worker executor
+        # serializes writes by FIFO regardless of asyncio cancellation.
+        self._spk_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="meeko-spk"
+        )
 
     def _mic_callback(self, in_data, frame_count, time_info, status):
         mono = _left_channel(in_data, DEVICE_IN_CHANNELS)
@@ -153,7 +166,9 @@ class AudioIO:
         if not chunk:
             return
         stereo = _mono_to_stereo(chunk) if DEVICE_OUT_CHANNELS == 2 else chunk
-        await asyncio.to_thread(self._speaker_stream.write, stereo)
+        await self._loop.run_in_executor(
+            self._spk_executor, self._speaker_stream.write, stereo
+        )
 
     def reset_speaker_buffer(self) -> None:
         """Reset speaker write state at the start of a new utterance.
@@ -185,6 +200,9 @@ class AudioIO:
             self._mic_stream.stop_stream()
             self._mic_capturing = False
         self._mic_stream.close()
+        # Drain any pending speaker writes before closing the stream so
+        # the worker doesn't try to write into a closed handle.
+        self._spk_executor.shutdown(wait=True)
         self._speaker_stream.stop_stream()
         self._speaker_stream.close()
         self._pa.terminate()

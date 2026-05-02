@@ -176,6 +176,71 @@ async def test_reset_speaker_buffer_clears_mute(pa_factory):
     speaker_stream.write.assert_called_once_with(b"\x01\x02\x01\x02")
 
 
+async def test_speaker_writes_serialize_across_barge_in(pa_factory):
+    """PortAudio's blocking write API is not thread-safe on the same
+    stream. If a write is still running in the executor when the
+    asyncio task is cancelled (barge-in) and the next utterance submits
+    another write, the two must not call pa.write_stream concurrently.
+
+    We simulate the race by blocking the first write inside the
+    executor, cancelling its asyncio task (mimicking barge-in), then
+    submitting a second write from the next utterance and asserting it
+    does not start until the first one finishes."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    import threading
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    def write_side_effect(data: bytes) -> None:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        if not first_started.is_set():
+            first_started.set()
+            release_first.wait(timeout=5)
+        else:
+            second_started.set()
+        with lock:
+            in_flight -= 1
+
+    speaker_stream.write.side_effect = write_side_effect
+
+    # First utterance: submit a write that blocks in the executor.
+    first = asyncio.create_task(io.write_speaker(b"\x01\x02"))
+    await asyncio.to_thread(first_started.wait, 5)
+
+    # Barge-in: cancel the asyncio task. The executor thread keeps
+    # running until release_first is set.
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    io.abort_speaker()
+
+    # Next utterance starts while the previous executor write is still
+    # in flight. With a single-worker executor, this submit must queue
+    # behind the running write rather than running concurrently.
+    io.reset_speaker_buffer()
+    second = asyncio.create_task(io.write_speaker(b"\x03\x04"))
+
+    # Give the loop a chance — second should NOT have started yet.
+    await asyncio.sleep(0.05)
+    assert not second_started.is_set()
+
+    # Release the first write; the second now runs.
+    release_first.set()
+    await second
+    assert second_started.is_set()
+    assert max_in_flight == 1
+
+
 def test_left_channel_helper_extracts_every_nth_sample():
     # int16 LE: samples 1, 2, 3, 4 interleaved as stereo frames.
     stereo = b"\x01\x00\x02\x00\x03\x00\x04\x00"
