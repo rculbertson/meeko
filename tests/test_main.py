@@ -311,12 +311,14 @@ async def test_set_system_prompt_takes_effect_on_next_call():
     await _collect(client.stream_turn("hi"))
 
     kwargs = stream_mock.call_args.kwargs
-    # System prompt is wrapped as a single text block carrying the
-    # cache breakpoint.
-    assert kwargs["system"] == [
-        {
-            "type": "text",
-            "text": "new system",
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
+    # The profile-prompt block carries the cache breakpoint; a small
+    # uncached today block follows for date-aware reasoning.
+    blocks = kwargs["system"]
+    assert blocks[0] == {
+        "type": "text",
+        "text": "new system",
+        "cache_control": {"type": "ephemeral"},
+    }
+    assert blocks[-1]["type"] == "text"
+    assert "Today is" in blocks[-1]["text"]
+    assert "cache_control" not in blocks[-1]

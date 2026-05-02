@@ -110,22 +110,20 @@ async def _drain(agen):
 
 
 def test_system_prompt_has_cache_control(fake_anthropic):
-    client = _make_client()
-    assert isinstance(client._system, list)
-    assert client._system[-1]["cache_control"] == {"type": "ephemeral"}
-    assert client._system[-1]["text"] == "You are Meeko."
+    from meeko.claude_client import _system_blocks
+
+    blocks = _system_blocks("You are Meeko.")
+    assert blocks[0]["text"] == "You are Meeko."
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    # Trailing today block sits past the cache breakpoint and is uncached.
+    assert "cache_control" not in blocks[-1]
+    assert "Today is" in blocks[-1]["text"]
 
 
-def test_set_system_prompt_rewraps_with_cache_control(fake_anthropic):
+def test_set_system_prompt_updates_profile_prompt(fake_anthropic):
     client = _make_client()
     client.set_system_prompt("New persona.")
-    assert client._system == [
-        {
-            "type": "text",
-            "text": "New persona.",
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
+    assert client._profile_prompt == "New persona."
 
 
 def test_with_cache_breakpoint_wraps_string_user_message():
@@ -172,9 +170,11 @@ async def test_stream_turn_sets_cache_breakpoint_on_last_message(fake_anthropic)
     last_block = sent_msgs[-1]["content"][-1]
     assert last_block["cache_control"] == {"type": "ephemeral"}
 
-    # System breakpoint is also present.
+    # System breakpoint sits on the profile-prompt block; the trailing
+    # today block is uncached (past the breakpoint).
     sent_system = captured[0]["system"]
-    assert sent_system[-1]["cache_control"] == {"type": "ephemeral"}
+    assert sent_system[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in sent_system[-1]
 
     # Stored history kept its canonical plain-string shape.
     assert client._messages[0] == {"role": "user", "content": "Hello!"}

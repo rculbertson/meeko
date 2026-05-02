@@ -245,27 +245,71 @@ class SessionStore:
             transcript,
         )
 
-    def _search_sessions_sync(self, query: str, limit: int) -> list[dict[str, Any]]:
-        clean = _FTS_STRIP_RE.sub(" ", query).strip()
-        if not clean:
+    def _search_sessions_sync(
+        self,
+        query: str | None,
+        since: str | None,
+        until: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        clean = _FTS_STRIP_RE.sub(" ", query).strip() if query else ""
+        date_clauses: list[str] = []
+        date_params: list[Any] = []
+        if since is not None:
+            date_clauses.append("s.last_active >= ?")
+            date_params.append(since)
+        if until is not None:
+            date_clauses.append("s.last_active < ?")
+            date_params.append(until)
+
+        if clean:
+            sql = (
+                "SELECT f.session_id, f.title, s.last_active "
+                "FROM sessions_fts f JOIN sessions s ON s.id = f.session_id "
+                "WHERE sessions_fts MATCH ?"
+            )
+            params: list[Any] = [clean]
+            for c in date_clauses:
+                sql += f" AND {c}"
+            params.extend(date_params)
+            sql += " ORDER BY bm25(sessions_fts, 0.0, 10.0, 5.0, 1.0) LIMIT ?"
+            params.append(limit)
+        elif date_clauses:
+            # Date-only path hits the base sessions table so unfinalized
+            # sessions (which haven't been written to sessions_fts yet)
+            # are still counted — important for "today"/"yesterday" asks.
+            sql = (
+                "SELECT s.id, s.title, s.last_active FROM sessions s WHERE "
+                + " AND ".join(date_clauses)
+                + " ORDER BY s.last_active DESC LIMIT ?"
+            )
+            params = [*date_params, limit]
+        else:
             return []
-        rows = self._conn.execute(
-            "SELECT f.session_id, f.title, s.last_active "
-            "FROM sessions_fts f JOIN sessions s ON s.id = f.session_id "
-            "WHERE sessions_fts MATCH ? "
-            "ORDER BY bm25(sessions_fts, 0.0, 10.0, 5.0, 1.0) "
-            "LIMIT ?",
-            (clean, limit),
-        ).fetchall()
+
+        rows = self._conn.execute(sql, params).fetchall()
         return [{"session_id": r[0], "title": r[1], "last_active": r[2]} for r in rows]
 
-    async def search_sessions(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        """Full-text search over session titles, summaries, and transcripts.
+    async def search_sessions(
+        self,
+        query: str | None = None,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Search sessions by keyword and/or `last_active` range.
 
-        Returns up to ``limit`` rows ordered by BM25 relevance (title matches
-        rank highest). Query operators are stripped so user speech is always
-        treated as a literal multi-token match."""
-        return await self._run(self._search_sessions_sync, query, limit)
+        ``query`` runs an FTS5 match over titles/summaries/transcripts of
+        finalized sessions (operators stripped so user speech is treated
+        as a literal multi-token match). ``since`` (inclusive) and
+        ``until`` (exclusive) are ISO-8601 timestamps compared lexically
+        against ``last_active``; either bound may be omitted.
+
+        Returns up to ``limit`` rows. With a query, results are ordered
+        by BM25 relevance (title matches rank highest); date-only
+        queries are ordered by ``last_active`` descending."""
+        return await self._run(self._search_sessions_sync, query, since, until, limit)
 
     async def close(self) -> None:
         await self._run(self._conn.close)
