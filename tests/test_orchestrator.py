@@ -2302,9 +2302,12 @@ async def test_start_of_turn_during_speaking_triggers_barge_in(
                 real_sleep=real_sleep,
             )
 
-            # Speaker buffer was flushed via stop/start.
-            assert speaker_stream.stop_stream.called
-            assert speaker_stream.start_stream.called
+            # Barge-in mutes further writes via the audio_io flag rather
+            # than touching the PortAudio stream — stop_stream from the
+            # asyncio thread races a blocking write_stream still running
+            # in the to_thread executor and corrupts the stream on ALSA.
+            assert not speaker_stream.stop_stream.called
+            assert not speaker_stream.start_stream.called
 
             # Now the user finishes their interruption. The EndOfTurn
             # arrives in LISTENING (not SPEAKING) and drives a fresh turn.

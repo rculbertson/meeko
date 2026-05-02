@@ -140,17 +140,40 @@ async def test_reset_speaker_buffer_drops_leftover_byte(pa_factory):
     assert speaker_stream.write.call_args_list[-1].args[0] == b"\x02\x03\x02\x03"
 
 
-async def test_abort_speaker_clears_leftover_byte(pa_factory):
-    """Barge-in must drop any buffered odd byte so it doesn't bleed into
-    the next utterance and cause a phase-flipped sample."""
+async def test_abort_speaker_mutes_subsequent_writes(pa_factory):
+    """Barge-in must drop any further chunks from the cancelled
+    utterance — speak_stream's consume() may still push queued PCM after
+    the cancel propagates."""
     _, _, speaker_stream = pa_factory
     io = AudioIO(asyncio.Event())
 
-    await io.write_speaker(b"\x01")
-    assert io._spk_leftover == b"\x01"
+    io.abort_speaker()
+    await io.write_speaker(b"\x01\x02\x03\x04")
+    speaker_stream.write.assert_not_called()
+
+
+async def test_abort_speaker_does_not_touch_portaudio_stream(pa_factory):
+    """stop_stream/start_stream from the asyncio thread races a blocking
+    write_stream still running in the to_thread executor and corrupts
+    the stream on ALSA. abort_speaker must only set the mute flag."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
 
     io.abort_speaker()
-    assert io._spk_leftover == b""
+    speaker_stream.stop_stream.assert_not_called()
+    speaker_stream.start_stream.assert_not_called()
+
+
+async def test_reset_speaker_buffer_clears_mute(pa_factory):
+    """The mute set by barge-in must be cleared at the start of the next
+    utterance so playback resumes."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    io.abort_speaker()
+    io.reset_speaker_buffer()
+    await io.write_speaker(b"\x01\x02")
+    speaker_stream.write.assert_called_once_with(b"\x01\x02\x01\x02")
 
 
 def test_left_channel_helper_extracts_every_nth_sample():
