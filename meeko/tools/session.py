@@ -2,8 +2,8 @@
 
 Provides four tools:
 
-- ``end_session``: user signals they want to stop ("stop", "goodnight",
-  "that's enough for today", etc.). After SPEAKING the orchestrator
+- ``end_session``: user signals they want to stop ("end conversation",
+  "end session", "that's enough for today", etc.). After SPEAKING the orchestrator
   finalizes the session and returns to IDLE, re-arming the wake word.
 - ``new_session``: user wants to start a fresh thread without stopping
   Meeko ("let's start fresh", "different topic"). After SPEAKING the
@@ -93,13 +93,15 @@ def get_tool_definitions() -> list[ToolDefinition]:
             "description": (
                 "End the current conversation and return Meeko to idle. "
                 "Call this when the user clearly indicates they want to "
-                "stop — e.g. 'stop', 'goodnight', 'that's enough for "
-                "today', 'let's pick this up later'. Before calling this "
-                "tool, respond with a brief verbal acknowledgement (e.g. "
-                "'Goodnight!'). Do not call this tool when the user is "
-                "ambiguous or immediately walks back the signal "
-                "('stop interrupting me', 'that's enough about X, let's "
-                "talk about Y')."
+                "stop — e.g. 'end conversation', 'end session', 'that's "
+                "enough for today', 'let's pick this up later'. Before "
+                "calling this tool, respond with a brief verbal "
+                "acknowledgement (e.g. 'Talk to you later!'). A bare "
+                "'stop' (or 'wait', 'hold on', 'never mind') is an "
+                "interrupt, not an end-session signal — do not call this "
+                "tool in that case. Also do not call when the user is "
+                "ambiguous or immediately walks back the signal ('that's "
+                "enough about X, let's talk about Y')."
             ),
             "input_schema": {"type": "object", "properties": {}},
         },
