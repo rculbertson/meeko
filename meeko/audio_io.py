@@ -94,6 +94,12 @@ class AudioIO:
             output_device_index=OUTPUT_DEVICE_INDEX,
             frames_per_buffer=CHUNK,
         )
+        # TTS chunks arrive at arbitrary byte boundaries; an int16 sample
+        # can be split across two chunks. Buffer any odd trailing byte
+        # and prepend it to the next chunk so frombytes always sees an
+        # even-length buffer. Reset on barge-in (abort_speaker) so a
+        # leftover byte doesn't bleed into the next utterance.
+        self._spk_leftover = b""
 
     def _mic_callback(self, in_data, frame_count, time_info, status):
         mono = _left_channel(in_data, DEVICE_IN_CHANNELS)
@@ -127,6 +133,14 @@ class AudioIO:
     async def write_speaker(self, chunk: bytes) -> None:
         # PyAudio write is blocking; run in a thread so the mic silence
         # pump + STT loop run.
+        if self._spk_leftover:
+            chunk = self._spk_leftover + chunk
+            self._spk_leftover = b""
+        if len(chunk) % 2:
+            self._spk_leftover = chunk[-1:]
+            chunk = chunk[:-1]
+        if not chunk:
+            return
         stereo = _mono_to_stereo(chunk) if DEVICE_OUT_CHANNELS == 2 else chunk
         await asyncio.to_thread(self._speaker_stream.write, stereo)
 
@@ -140,6 +154,7 @@ class AudioIO:
         cancelled reply."""
         self._speaker_stream.stop_stream()
         self._speaker_stream.start_stream()
+        self._spk_leftover = b""
 
     def close(self) -> None:
         if self._mic_capturing:

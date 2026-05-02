@@ -92,6 +92,50 @@ async def test_write_speaker_duplicates_mono_to_stereo(pa_factory):
     speaker_stream.write.assert_called_once_with(b"\x01\x02\x01\x02")
 
 
+async def test_write_speaker_buffers_odd_byte_across_chunks(pa_factory):
+    """A TTS chunk may end mid-sample; the trailing byte must carry over
+    to the next chunk rather than crash _mono_to_stereo."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    # First chunk has an odd length: 3 bytes. Only the first 2 form a
+    # complete sample (0x0201); the trailing 0x03 must be buffered.
+    await io.write_speaker(b"\x01\x02\x03")
+    speaker_stream.write.assert_called_once_with(b"\x01\x02\x01\x02")
+
+    # Next chunk supplies the missing byte (0x04), completing sample
+    # 0x0403, plus another full sample 0x0605.
+    await io.write_speaker(b"\x04\x05\x06")
+    assert speaker_stream.write.call_args_list[1].args[0] == (
+        b"\x03\x04\x03\x04\x05\x06\x05\x06"
+    )
+    assert io._spk_leftover == b""
+
+
+async def test_write_speaker_single_byte_does_not_call_write(pa_factory):
+    """A 1-byte chunk has nothing complete to play — buffer it and skip
+    the underlying write rather than passing an empty buffer to PyAudio."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    await io.write_speaker(b"\x01")
+    speaker_stream.write.assert_not_called()
+    assert io._spk_leftover == b"\x01"
+
+
+async def test_abort_speaker_clears_leftover_byte(pa_factory):
+    """Barge-in must drop any buffered odd byte so it doesn't bleed into
+    the next utterance and cause a phase-flipped sample."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    await io.write_speaker(b"\x01")
+    assert io._spk_leftover == b"\x01"
+
+    io.abort_speaker()
+    assert io._spk_leftover == b""
+
+
 def test_left_channel_helper_extracts_every_nth_sample():
     # int16 LE: samples 1, 2, 3, 4 interleaved as stereo frames.
     stereo = b"\x01\x00\x02\x00\x03\x00\x04\x00"
