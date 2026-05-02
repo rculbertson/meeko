@@ -6,6 +6,7 @@ PyAudio callback thread to the asyncio event loop.
 
 import array
 import asyncio
+import concurrent.futures
 import logging
 import os
 
@@ -100,6 +101,27 @@ class AudioIO:
         # even-length buffer. Reset on barge-in (abort_speaker) so a
         # leftover byte doesn't bleed into the next utterance.
         self._spk_leftover = b""
+        # Set by abort_speaker() to drop any further writes from the
+        # cancelled utterance. Cleared at the start of the next utterance
+        # via reset_speaker_buffer(). We can't safely flush PortAudio's
+        # output buffer mid-playback (stop_stream from the asyncio thread
+        # races a blocking write_stream still running in the to_thread
+        # executor — that race left the stream in a closed/errored state
+        # on ALSA), so we accept the ~one-buffer tail of audio that
+        # PortAudio has already queued.
+        self._spk_muted = False
+        # Dedicated single-worker executor for speaker writes. PortAudio's
+        # blocking write API is not thread-safe on the same stream
+        # (single-threaded spec; concurrent calls are documented as
+        # illegal). The default to_thread pool has multiple workers, so
+        # if a write is still running in the executor when the asyncio
+        # task is cancelled (barge-in) and the next utterance submits
+        # another write, the two could land on different workers and
+        # call pa.write_stream concurrently. A single-worker executor
+        # serializes writes by FIFO regardless of asyncio cancellation.
+        self._spk_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="meeko-spk"
+        )
 
     def _mic_callback(self, in_data, frame_count, time_info, status):
         mono = _left_channel(in_data, DEVICE_IN_CHANNELS)
@@ -133,6 +155,8 @@ class AudioIO:
     async def write_speaker(self, chunk: bytes) -> None:
         # PyAudio write is blocking; run in a thread so the mic silence
         # pump + STT loop run.
+        if self._spk_muted:
+            return
         if self._spk_leftover:
             chunk = self._spk_leftover + chunk
             self._spk_leftover = b""
@@ -141,35 +165,55 @@ class AudioIO:
             chunk = chunk[:-1]
         if not chunk:
             return
-        stereo = _mono_to_stereo(chunk) if DEVICE_OUT_CHANNELS == 2 else chunk
-        await asyncio.to_thread(self._speaker_stream.write, stereo)
+        # Slice into CHUNK-sized pieces (50ms each) and re-check the
+        # mute flag between slices so barge-in cancellation latency is
+        # bounded by one slice rather than by the (unbounded) size of
+        # the TTS chunk handed in. abort_speaker() only blocks future
+        # submissions — without slicing, a multi-hundred-ms TTS chunk
+        # already in flight would play to completion.
+        mono_slice_bytes = CHUNK * 2
+        for offset in range(0, len(chunk), mono_slice_bytes):
+            if self._spk_muted:
+                return
+            piece = chunk[offset : offset + mono_slice_bytes]
+            stereo = _mono_to_stereo(piece) if DEVICE_OUT_CHANNELS == 2 else piece
+            await self._loop.run_in_executor(
+                self._spk_executor, self._speaker_stream.write, stereo
+            )
 
     def reset_speaker_buffer(self) -> None:
-        """Drop any odd trailing byte left over from a prior utterance.
+        """Reset speaker write state at the start of a new utterance.
 
-        Cleared on barge-in and at the start of each new utterance so a
-        producer that errored mid-sample (e.g. TTS websocket drop) can't
-        bleed a stale byte into the next utterance and byte-swap every
-        int16 sample that follows."""
+        Drops the odd-byte carry from a prior utterance so a producer
+        that errored mid-sample (e.g. TTS websocket drop) can't bleed a
+        stale byte into the next utterance and byte-swap every int16
+        sample that follows. Also clears the barge-in mute so writes
+        flow again."""
         self._spk_leftover = b""
+        self._spk_muted = False
 
     def abort_speaker(self) -> None:
-        """Drop any PCM still buffered in the PortAudio output ring.
+        """Drop any further writes from the cancelled utterance.
 
-        On barge-in we cancel TTS subtasks, but the OS/driver may already
-        hold ~100–200ms of audio. The stop_stream/start_stream pair is
-        PortAudio's standard idiom for flushing the buffer so the user
-        hears the interrupt immediately rather than the tail of the
-        cancelled reply."""
-        self._speaker_stream.stop_stream()
-        self._speaker_stream.start_stream()
-        self.reset_speaker_buffer()
+        On barge-in we cancel the speak task, but a blocking write_stream
+        may still be in flight in the to_thread executor and any chunks
+        already queued in speak_stream's consume() will follow. Setting
+        _spk_muted causes write_speaker() to no-op for the remainder of
+        the utterance; reset at the start of the next one. We don't
+        touch the PortAudio stream itself — stop_stream/start_stream
+        races the in-flight write and corrupts the stream. The user
+        will still hear whatever PortAudio has already buffered (~one
+        CHUNK plus driver buffer, ~100ms on the Pi)."""
+        self._spk_muted = True
 
     def close(self) -> None:
         if self._mic_capturing:
             self._mic_stream.stop_stream()
             self._mic_capturing = False
         self._mic_stream.close()
+        # Drain any pending speaker writes before closing the stream so
+        # the worker doesn't try to write into a closed handle.
+        self._spk_executor.shutdown(wait=True)
         self._speaker_stream.stop_stream()
         self._speaker_stream.close()
         self._pa.terminate()

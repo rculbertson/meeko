@@ -140,17 +140,143 @@ async def test_reset_speaker_buffer_drops_leftover_byte(pa_factory):
     assert speaker_stream.write.call_args_list[-1].args[0] == b"\x02\x03\x02\x03"
 
 
-async def test_abort_speaker_clears_leftover_byte(pa_factory):
-    """Barge-in must drop any buffered odd byte so it doesn't bleed into
-    the next utterance and cause a phase-flipped sample."""
+async def test_abort_speaker_mutes_subsequent_writes(pa_factory):
+    """Barge-in must drop any further chunks from the cancelled
+    utterance — speak_stream's consume() may still push queued PCM after
+    the cancel propagates."""
     _, _, speaker_stream = pa_factory
     io = AudioIO(asyncio.Event())
 
-    await io.write_speaker(b"\x01")
-    assert io._spk_leftover == b"\x01"
+    io.abort_speaker()
+    await io.write_speaker(b"\x01\x02\x03\x04")
+    speaker_stream.write.assert_not_called()
+
+
+async def test_abort_speaker_does_not_touch_portaudio_stream(pa_factory):
+    """stop_stream/start_stream from the asyncio thread races a blocking
+    write_stream still running in the to_thread executor and corrupts
+    the stream on ALSA. abort_speaker must only set the mute flag."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
 
     io.abort_speaker()
-    assert io._spk_leftover == b""
+    speaker_stream.stop_stream.assert_not_called()
+    speaker_stream.start_stream.assert_not_called()
+
+
+async def test_reset_speaker_buffer_clears_mute(pa_factory):
+    """The mute set by barge-in must be cleared at the start of the next
+    utterance so playback resumes."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    io.abort_speaker()
+    io.reset_speaker_buffer()
+    await io.write_speaker(b"\x01\x02")
+    speaker_stream.write.assert_called_once_with(b"\x01\x02\x01\x02")
+
+
+async def test_write_speaker_slices_large_chunks_for_bounded_barge_in(pa_factory):
+    """write_speaker must cut a large TTS chunk into CHUNK-sized slices
+    and re-check _spk_muted between them, so abort_speaker() can stop
+    playback within ~one slice rather than waiting out the whole chunk."""
+    from meeko.audio_io import CHUNK
+
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    # 4 slices worth of mono PCM (CHUNK * 2 bytes per slice).
+    slice_bytes = CHUNK * 2
+    big_chunk = b"\x01\x02" * (CHUNK * 4)
+    assert len(big_chunk) == slice_bytes * 4
+
+    # Mute mid-playback: after the second slice runs, abort. The third
+    # slice's pre-write mute check should short-circuit.
+    call_count = 0
+
+    def write_side_effect(data: bytes) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            io.abort_speaker()
+
+    speaker_stream.write.side_effect = write_side_effect
+
+    await io.write_speaker(big_chunk)
+
+    assert call_count == 2
+    # Both writes must be exactly one slice (CHUNK*2 mono bytes,
+    # doubled to CHUNK*4 by _mono_to_stereo with default 2-channel
+    # output). A regression that handed the whole chunk to a single
+    # write — or split it unevenly — would still pass the count check.
+    expected_stereo_bytes = slice_bytes * 2
+    for call in speaker_stream.write.call_args_list:
+        assert len(call.args[0]) == expected_stereo_bytes
+
+
+async def test_speaker_writes_serialize_across_barge_in(pa_factory):
+    """PortAudio's blocking write API is not thread-safe on the same
+    stream. If a write is still running in the executor when the
+    asyncio task is cancelled (barge-in) and the next utterance submits
+    another write, the two must not call pa.write_stream concurrently.
+
+    We simulate the race by blocking the first write inside the
+    executor, cancelling its asyncio task (mimicking barge-in), then
+    submitting a second write from the next utterance and asserting it
+    does not start until the first one finishes."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    import threading
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    def write_side_effect(data: bytes) -> None:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        if not first_started.is_set():
+            first_started.set()
+            release_first.wait(timeout=5)
+        else:
+            second_started.set()
+        with lock:
+            in_flight -= 1
+
+    speaker_stream.write.side_effect = write_side_effect
+
+    # First utterance: submit a write that blocks in the executor.
+    first = asyncio.create_task(io.write_speaker(b"\x01\x02"))
+    await asyncio.to_thread(first_started.wait, 5)
+
+    # Barge-in: cancel the asyncio task. The executor thread keeps
+    # running until release_first is set.
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    io.abort_speaker()
+
+    # Next utterance starts while the previous executor write is still
+    # in flight. With a single-worker executor, this submit must queue
+    # behind the running write rather than running concurrently.
+    io.reset_speaker_buffer()
+    second = asyncio.create_task(io.write_speaker(b"\x03\x04"))
+
+    # Give the loop a chance — second should NOT have started yet.
+    await asyncio.sleep(0.05)
+    assert not second_started.is_set()
+
+    # Release the first write; the second now runs.
+    release_first.set()
+    await second
+    assert second_started.is_set()
+    assert max_in_flight == 1
 
 
 def test_left_channel_helper_extracts_every_nth_sample():
