@@ -23,6 +23,7 @@ load is requested, so Sonnet doesn't need to chain end_session first.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING
 
 from meeko.tools.dispatch import ToolDefinition
@@ -86,6 +87,29 @@ class SessionManager:
         self._load_target = None
 
 
+def _local_date_to_utc_iso(local_date: str) -> str:
+    """Convert a local-date ``YYYY-MM-DD`` to a UTC ISO timestamp string
+    suitable for lexicographic comparison against the ``last_active``
+    column (which is also written via ``datetime.now(UTC).isoformat()``)."""
+    parsed = datetime.strptime(local_date, "%Y-%m-%d").date()
+    local_tz = datetime.now().astimezone().tzinfo
+    local_midnight = datetime.combine(parsed, time.min, tzinfo=local_tz)
+    return local_midnight.astimezone(UTC).isoformat()
+
+
+def _describe_criteria(query: str | None, since: str | None, until: str | None) -> str:
+    parts: list[str] = []
+    if query:
+        parts.append(f"matching '{query}'")
+    if since and until:
+        parts.append(f"from {since} to {until}")
+    elif since:
+        parts.append(f"since {since}")
+    elif until:
+        parts.append(f"before {until}")
+    return " ".join(parts) if parts else ""
+
+
 def get_tool_definitions() -> list[ToolDefinition]:
     return [
         {
@@ -125,13 +149,20 @@ def get_tool_definitions() -> list[ToolDefinition]:
         {
             "name": "list_sessions",
             "description": (
-                "Search prior conversations by keyword and return a short "
-                "list of matches. Call this when the user asks about a "
-                "previous conversation — e.g. 'what were we working on?', "
-                "'find the todo app session', 'go back to our discussion "
-                "about Supabase'. Pass the user's key terms as `query`. "
-                "Read the top result titles back to the user so they can "
-                "confirm which session to load."
+                "Search prior conversations by keyword and/or date range. "
+                "Call this when the user asks about a previous conversation "
+                "— e.g. 'what were we working on?', 'find the todo app "
+                "session', 'how many conversations did we have yesterday?'. "
+                "Pass key terms as `query` and/or a date range as `since` "
+                "(inclusive) and `until` (exclusive), formatted YYYY-MM-DD "
+                "in the user's local timezone. The system prompt tells you "
+                "today's local date — use it to convert relative phrases: "
+                "'yesterday' is since=<yesterday>, until=<today>; 'today' "
+                "is since=<today>, until=<tomorrow>; 'last week' is a "
+                "7-day range ending today. At least one of `query`, "
+                "`since`, `until` must be provided. Read the top result "
+                "titles back to the user so they can confirm which "
+                "session to load."
             ),
             "input_schema": {
                 "type": "object",
@@ -140,11 +171,24 @@ def get_tool_definitions() -> list[ToolDefinition]:
                         "type": "string",
                         "description": (
                             "Keywords to search for in session titles,"
-                            " summaries, and transcripts."
+                            " summaries, and transcripts. Optional."
                         ),
-                    }
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": (
+                            "Inclusive start date, YYYY-MM-DD in the "
+                            "user's local timezone. Optional."
+                        ),
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": (
+                            "Exclusive end date, YYYY-MM-DD in the "
+                            "user's local timezone. Optional."
+                        ),
+                    },
                 },
-                "required": ["query"],
             },
         },
         {
@@ -192,15 +236,23 @@ async def handle(
         return "Starting a fresh session. Meeko will swap the context after this turn."
 
     if fn_name == "list_sessions":
-        query = str(args.get("query", "")).strip()
-        if not query:
-            return "Please provide a search query."
+        query = str(args.get("query", "")).strip() or None
+        since_arg = str(args.get("since", "")).strip() or None
+        until_arg = str(args.get("until", "")).strip() or None
+        if not (query or since_arg or until_arg):
+            return "Please provide a search query or date range."
         if store is None:
             return "Session search is not available."
-        results = await store.search_sessions(query)
+        try:
+            since_iso = _local_date_to_utc_iso(since_arg) if since_arg else None
+            until_iso = _local_date_to_utc_iso(until_arg) if until_arg else None
+        except ValueError:
+            return "Invalid date format. Use YYYY-MM-DD for `since` and `until`."
+        results = await store.search_sessions(query, since=since_iso, until=until_iso)
+        criteria = _describe_criteria(query, since_arg, until_arg)
         if not results:
-            return f"No sessions found matching '{query}'."
-        lines = [f"Found {len(results)} session(s) matching '{query}':"]
+            return f"No sessions found {criteria}."
+        lines = [f"Found {len(results)} session(s) {criteria}:"]
         for i, r in enumerate(results, 1):
             title = r["title"] or "(no title)"
             date = r["last_active"][:10] if r["last_active"] else "?"

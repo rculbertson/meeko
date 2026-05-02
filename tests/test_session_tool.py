@@ -176,7 +176,68 @@ async def test_handle_list_sessions_no_store_returns_error():
 async def test_handle_list_sessions_empty_query_returns_prompt():
     manager = SessionManager()
     result = await handle("list_sessions", {"query": ""}, manager=manager)
-    assert "query" in result.lower()
+    assert "query" in result.lower() or "date" in result.lower()
+
+
+async def test_handle_list_sessions_no_args_prompts_user():
+    """At least one of query/since/until is required."""
+    manager = SessionManager()
+    result = await handle("list_sessions", {}, manager=manager)
+    assert "query" in result.lower() or "date" in result.lower()
+
+
+async def test_handle_list_sessions_invalid_date_returns_error(tmp_path):
+    store = SessionStore.open(tmp_path / "meeko.db")
+    try:
+        manager = SessionManager()
+        result = await handle(
+            "list_sessions",
+            {"since": "yesterday"},
+            manager=manager,
+            store=store,
+        )
+        assert "invalid" in result.lower()
+    finally:
+        await store.close()
+
+
+async def test_handle_list_sessions_date_only_finds_unfinalized(tmp_path):
+    """A date-only call must find an active session that hasn't been
+    summarized into the FTS table yet — this is the bug the feature fixes."""
+    from datetime import date, timedelta
+
+    store = SessionStore.open(tmp_path / "meeko.db")
+    try:
+        sid = await store.create_session("default")
+        await store.persist_turn(sid, "user", "hi")
+        today = date.today().isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        manager = SessionManager()
+        result = await handle(
+            "list_sessions",
+            {"since": today, "until": tomorrow},
+            manager=manager,
+            store=store,
+        )
+        assert sid in result
+        assert "Found 1" in result
+    finally:
+        await store.close()
+
+
+async def test_handle_list_sessions_date_no_results(tmp_path):
+    store = SessionStore.open(tmp_path / "meeko.db")
+    try:
+        manager = SessionManager()
+        result = await handle(
+            "list_sessions",
+            {"since": "1970-01-01", "until": "1971-01-01"},
+            manager=manager,
+            store=store,
+        )
+        assert "No sessions found" in result
+    finally:
+        await store.close()
 
 
 async def test_handle_list_sessions_no_results(tmp_path):

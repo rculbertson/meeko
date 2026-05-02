@@ -404,6 +404,66 @@ async def test_search_sessions_respects_limit(store):
     assert len(results) <= 3
 
 
+async def test_search_sessions_date_only_includes_unfinalized(tmp_path, store):
+    """Date-only queries hit the base sessions table, so sessions that
+    haven't been summarized into sessions_fts yet still match."""
+    sid = await store.create_session("default")
+    await store.persist_turn(sid, "user", "hello")
+    last_active = (await store.get_session(sid))["last_active"]
+    # Bracket the actual last_active timestamp.
+    results = await store.search_sessions(since=last_active[:10] + "T00:00:00+00:00")
+    assert any(r["session_id"] == sid for r in results)
+
+
+async def test_search_sessions_date_range_filters(store):
+    """`since` and `until` form a half-open range against last_active."""
+    sid = await store.create_session("default")
+    await store.persist_turn(sid, "user", "hi")
+    la = (await store.get_session(sid))["last_active"]
+
+    in_range = await store.search_sessions(
+        since="1970-01-01T00:00:00+00:00",
+        until="2999-01-01T00:00:00+00:00",
+    )
+    assert any(r["session_id"] == sid for r in in_range)
+
+    out_of_range = await store.search_sessions(
+        since="1970-01-01T00:00:00+00:00",
+        until="1971-01-01T00:00:00+00:00",
+    )
+    assert all(r["session_id"] != sid for r in out_of_range)
+    # `until` is exclusive — using last_active itself excludes the session.
+    excluded = await store.search_sessions(since="1970-01-01T00:00:00+00:00", until=la)
+    assert all(r["session_id"] != sid for r in excluded)
+
+
+async def test_search_sessions_query_and_date_intersect(store):
+    sid_match = await store.create_session("default")
+    sid_other = await store.create_session("default")
+    await store.update_session_metadata(
+        sid_match, title="Supabase plan", summary="schema", transcript="t"
+    )
+    await store.update_session_metadata(
+        sid_other, title="Supabase notes", summary="more", transcript="t"
+    )
+    # No bound that would exclude the rows: both should match the query.
+    both = await store.search_sessions("supabase", since="1970-01-01T00:00:00+00:00")
+    assert {r["session_id"] for r in both} == {sid_match, sid_other}
+    # Tight `until` excludes everything, even though the query matches.
+    none = await store.search_sessions(
+        "supabase",
+        since="1970-01-01T00:00:00+00:00",
+        until="1971-01-01T00:00:00+00:00",
+    )
+    assert none == []
+
+
+async def test_search_sessions_no_args_returns_empty(store):
+    sid = await store.create_session("default")
+    await store.update_session_metadata(sid, title="t", summary="s", transcript="x")
+    assert await store.search_sessions() == []
+
+
 def test_default_db_path_honors_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "custom.db"))
     assert default_db_path() == tmp_path / "custom.db"

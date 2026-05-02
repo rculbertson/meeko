@@ -12,6 +12,7 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 
 import anthropic
@@ -91,13 +92,38 @@ def _pop_sentences(buffer: str) -> tuple[list[str], str]:
 _CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 
 
-def _system_blocks(prompt: str) -> list[dict[str, Any]]:
-    """Wrap a system prompt as a single text block with a cache breakpoint.
+def _today_block() -> dict[str, Any]:
+    """A small, uncached system block carrying the user's local date.
 
-    Tools and the system prompt are stable per session, so a cache_control
-    on the (single) system block caches the entire `tools + system` prefix.
+    Sonnet uses this to interpret relative time references like "yesterday"
+    in `list_sessions` calls. Recomputed per turn so long-running sessions
+    that span midnight don't see a stale date.
     """
-    return [{"type": "text", "text": prompt, "cache_control": _CACHE_CONTROL}]
+    now = datetime.now().astimezone()
+    tz = now.tzname() or "local time"
+    return {
+        "type": "text",
+        "text": (
+            f"Today is {now.strftime('%Y-%m-%d (%A)')} in {tz}. "
+            "Use this when interpreting relative time references."
+        ),
+    }
+
+
+def _system_blocks(prompt: str) -> list[dict[str, Any]]:
+    """Wrap the profile's system prompt with a cache breakpoint and append
+    a small dynamic block carrying today's local date.
+
+    The profile prompt is stable per session, so a cache_control on it
+    caches the entire `tools + profile prompt` prefix. The trailing
+    today block is recomputed per turn (see ``_today_block``); it sits
+    after the cache breakpoint so cache hits aren't invalidated by the
+    daily date change.
+    """
+    return [
+        {"type": "text", "text": prompt, "cache_control": _CACHE_CONTROL},
+        _today_block(),
+    ]
 
 
 def _with_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -140,7 +166,7 @@ class ClaudeClient:
         session_id: str | None = None,
     ):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
-        self._system = _system_blocks(system_prompt)
+        self._profile_prompt = system_prompt
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
         self._messages: list[dict[str, Any]] = []
@@ -148,7 +174,7 @@ class ClaudeClient:
         self._session_id = session_id
 
     def set_system_prompt(self, prompt: str) -> None:
-        self._system = _system_blocks(prompt)
+        self._profile_prompt = prompt
 
     def load_history(self, messages: list[dict[str, Any]]) -> None:
         self._messages = list(messages)
@@ -189,7 +215,7 @@ class ClaudeClient:
                 async with self._client.beta.messages.stream(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
-                    system=self._system,
+                    system=_system_blocks(self._profile_prompt),
                     tools=self._tools,
                     messages=_with_cache_breakpoint(self._messages),
                     betas=[COMPACTION_BETA],
