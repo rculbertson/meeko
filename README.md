@@ -52,6 +52,16 @@ sudo ./xvf_host SAVE_CONFIGURATION 1
 
 `PP_DTSENSITIVE 12` enables the chip's extra near-end speech detector and biases the AEC toward double-talk performance; `SAVE_CONFIGURATION 1` writes the value to flash so it survives power cycles. This is the only parameter that needed changing — Seeed's other defaults work fine. To revert, `sudo ./xvf_host CLEAR_CONFIGURATION 1` and reboot the device.
 
+For the LED ring, Meeko talks to the XVF3800 directly over libusb. Linux defaults the USB control interface to root-only, so install the udev rule once so a non-root user (in `plugdev`) can drive it:
+
+```bash
+sudo cp scripts/99-meeko-xvf3800.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+sudo udevadm trigger --action=add --subsystem-match=usb
+```
+
+No reboot or replug needed. To skip LED control entirely (e.g. on macOS dev runs with no XVF3800 attached), set `MEEKO_LED_DISABLED=1`. The controller also auto-disables if the device isn't found.
+
 ### Logging
 
 Two environment variables control logging behavior.

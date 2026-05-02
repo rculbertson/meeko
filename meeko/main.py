@@ -36,6 +36,7 @@ from meeko.audio_io import AudioIO
 from meeko.claude_client import ClaudeClient
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
+from meeko.leds import LedController, LedState
 from meeko.profiles import Profile, load_profiles
 from meeko.session_summary import summarize_session
 from meeko.sessions import SessionStore, default_db_path
@@ -89,6 +90,14 @@ class State(Enum):
     LISTENING = auto()
     PROCESSING = auto()
     SPEAKING = auto()
+
+
+_STATE_TO_LED = {
+    State.IDLE: LedState.IDLE,
+    State.LISTENING: LedState.LISTENING,
+    State.PROCESSING: LedState.PROCESSING,
+    State.SPEAKING: LedState.SPEAKING,
+}
 
 
 RESUME_LATEST = "__latest__"
@@ -398,17 +407,26 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     stop_event = asyncio.Event()
     audio = AudioIO(stop_event)
 
+    leds = LedController()
+    leds.start()
+
+    def notify_leds() -> None:
+        leds.set_state(_STATE_TO_LED[state])
+
     wake_detector, state = _create_wake_detector(wake_word_disabled)
+    notify_leds()
 
     def enter_speaking() -> State:
         nonlocal state
         prev = state
         state = State.SPEAKING
+        notify_leds()
         return prev
 
     def exit_speaking(prev: State) -> None:
         nonlocal state
         state = prev if prev != State.SPEAKING else State.LISTENING
+        notify_leds()
 
     speaker = Speaker(
         tts,
@@ -440,6 +458,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 assert wake_detector is not None
                 if wake_detector.process(data):
                     state = State.LISTENING
+                    notify_leds()
                     logger.info("Wake word accepted; entering LISTENING")
                 continue
             if mute_mic_while_speaking and state == State.SPEAKING:
@@ -546,6 +565,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # state EndOfTurns are queued normally).
         state = State.LISTENING
         cancel_idle_monitor()
+        notify_leds()
         if current_speak_task is not None and not current_speak_task.done():
             logger.info("Barge-in: cancelling in-flight reply")
             barge_in_requested = True
@@ -583,6 +603,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     # Cancel the speak task; the eventual EndOfTurn will
                     # arrive in LISTENING and flow through normally.
                     request_barge_in()
+                elif state == State.LISTENING:
+                    # Switch from solid "I heard the wake word" to DoA
+                    # mode so the ring tracks the user's direction while
+                    # they speak. Reverts on EndOfTurn → PROCESSING.
+                    leds.set_state(LedState.LISTENING_ACTIVE)
                 continue
             if ev.event != "EndOfTurn":
                 continue
@@ -628,6 +653,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             assert isinstance(text, str)
             logger.info("[user] %s", text)
             state = State.PROCESSING
+            notify_leds()
             t_turn = time.perf_counter()
             # Run the turn as a sub-task so request_barge_in() can
             # cancel just this turn without tearing down drive_turns.
@@ -644,6 +670,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # because asyncio's shutdown cancels drive_turns_task
                 # before run()'s finally has set it.
                 state = State.LISTENING
+                notify_leds()
                 current_speak_task = None
                 if not barge_in_requested:
                     raise
@@ -652,13 +679,20 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 continue
             except Exception:
                 logger.exception("Claude turn failed")
+                leds.error()
                 state = State.LISTENING
+                notify_leds()
                 current_speak_task = None
                 continue
             current_speak_task = None
             logger.debug(
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),
+            )
+            session_changed = (
+                session_manager.should_load()
+                or session_manager.should_end()
+                or session_manager.should_start_new()
             )
             session_id, state = await _apply_post_turn_session_change(
                 session_manager=session_manager,
@@ -674,6 +708,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             # next interaction needs the wake word.
             if state == State.LISTENING:
                 start_idle_monitor()
+            if session_changed:
+                leds.session_transition()
+            notify_leds()
 
     async def on_session(stt_session) -> None:
         # drive_turns is intentionally NOT in this group — it lives at
@@ -740,6 +777,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         if summary_tasks:
             await asyncio.gather(*summary_tasks, return_exceptions=True)
         audio.close()
+        leds.close()
         await store.close()
         try:
             await summary_client.close()
