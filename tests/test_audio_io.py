@@ -123,6 +123,23 @@ async def test_write_speaker_single_byte_does_not_call_write(pa_factory):
     assert io._spk_leftover == b"\x01"
 
 
+async def test_reset_speaker_buffer_drops_leftover_byte(pa_factory):
+    """Each new utterance starts from a clean buffer so a stale byte
+    from a producer that errored mid-sample can't byte-swap the next
+    utterance's samples."""
+    _, _, speaker_stream = pa_factory
+    io = AudioIO(asyncio.Event())
+
+    await io.write_speaker(b"\x01")
+    assert io._spk_leftover == b"\x01"
+
+    io.reset_speaker_buffer()
+    assert io._spk_leftover == b""
+
+    await io.write_speaker(b"\x02\x03")
+    assert speaker_stream.write.call_args_list[-1].args[0] == b"\x02\x03\x02\x03"
+
+
 async def test_abort_speaker_clears_leftover_byte(pa_factory):
     """Barge-in must drop any buffered odd byte so it doesn't bleed into
     the next utterance and cause a phase-flipped sample."""

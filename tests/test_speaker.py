@@ -87,6 +87,30 @@ async def test_speak_empty_is_noop(profile, audio_mock, tts_mock, fast_sleep):
     assert calls == []
 
 
+async def test_speak_stream_resets_audio_buffer_before_writes(
+    profile, audio_mock, tts_mock, fast_sleep
+):
+    """Each utterance must start from a clean leftover buffer so a stale
+    odd byte from a prior errored TTS stream can't byte-swap this
+    utterance's samples. The reset must happen before the first
+    write_speaker call."""
+    enter, exit_, _ = _state_hooks()
+    sp = Speaker(tts_mock, audio_mock, profile, enter, exit_)
+
+    call_order: list[str] = []
+    audio_mock.reset_speaker_buffer = MagicMock(
+        side_effect=lambda: call_order.append("reset")
+    )
+    audio_mock.write_speaker = AsyncMock(
+        side_effect=lambda _chunk: call_order.append("write")
+    )
+
+    await sp.speak_stream(_aiter(["Hi."]))
+
+    assert call_order[0] == "reset"
+    assert "write" in call_order
+
+
 async def test_speak_stream_plays_sentences_in_order(
     profile, audio_mock, tts_mock, fast_sleep
 ):

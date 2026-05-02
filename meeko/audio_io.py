@@ -144,6 +144,15 @@ class AudioIO:
         stereo = _mono_to_stereo(chunk) if DEVICE_OUT_CHANNELS == 2 else chunk
         await asyncio.to_thread(self._speaker_stream.write, stereo)
 
+    def reset_speaker_buffer(self) -> None:
+        """Drop any odd trailing byte left over from a prior utterance.
+
+        Cleared on barge-in and at the start of each new utterance so a
+        producer that errored mid-sample (e.g. TTS websocket drop) can't
+        bleed a stale byte into the next utterance and byte-swap every
+        int16 sample that follows."""
+        self._spk_leftover = b""
+
     def abort_speaker(self) -> None:
         """Drop any PCM still buffered in the PortAudio output ring.
 
@@ -154,7 +163,7 @@ class AudioIO:
         cancelled reply."""
         self._speaker_stream.stop_stream()
         self._speaker_stream.start_stream()
-        self._spk_leftover = b""
+        self.reset_speaker_buffer()
 
     def close(self) -> None:
         if self._mic_capturing:
