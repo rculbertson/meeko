@@ -205,6 +205,13 @@ async def test_write_speaker_slices_large_chunks_for_bounded_barge_in(pa_factory
     await io.write_speaker(big_chunk)
 
     assert call_count == 2
+    # Both writes must be exactly one slice (CHUNK*2 mono bytes,
+    # doubled to CHUNK*4 by _mono_to_stereo with default 2-channel
+    # output). A regression that handed the whole chunk to a single
+    # write — or split it unevenly — would still pass the count check.
+    expected_stereo_bytes = slice_bytes * 2
+    for call in speaker_stream.write.call_args_list:
+        assert len(call.args[0]) == expected_stereo_bytes
 
 
 async def test_speaker_writes_serialize_across_barge_in(pa_factory):
