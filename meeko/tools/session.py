@@ -97,6 +97,20 @@ def _local_date_to_utc_iso(local_date: str) -> str:
     return local_midnight.astimezone(UTC).isoformat()
 
 
+def _format_local_date(utc_iso: str | None) -> str:
+    """Render a UTC ISO timestamp as a local-date YYYY-MM-DD.
+
+    `last_active` is stored in UTC; results are displayed alongside the
+    user's local "today", so we convert to the same local timezone to
+    avoid an off-by-one date when sessions end late in the evening."""
+    if not utc_iso:
+        return "?"
+    try:
+        return datetime.fromisoformat(utc_iso).astimezone().strftime("%Y-%m-%d")
+    except ValueError:
+        return "?"
+
+
 def _describe_criteria(query: str | None, since: str | None, until: str | None) -> str:
     parts: list[str] = []
     if query:
@@ -255,8 +269,10 @@ async def handle(
         lines = [f"Found {len(results)} session(s) {criteria}:"]
         for i, r in enumerate(results, 1):
             title = r["title"] or "(no title)"
-            date = r["last_active"][:10] if r["last_active"] else "?"
-            lines.append(f'{i}. "{title}" — {date} (id: {r["session_id"]})')
+            lines.append(
+                f'{i}. "{title}" — {_format_local_date(r["last_active"])} '
+                f"(id: {r['session_id']})"
+            )
         return "\n".join(lines)
 
     if fn_name == "load_session":
