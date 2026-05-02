@@ -60,6 +60,7 @@ class Speaker:
         async with self._speak_lock:
             prev = self._enter_speaking()
             try:
+                self._audio.reset_speaker_buffer()
                 voice = self._profile.voice or DEFAULT_VOICE
                 t_start = time.perf_counter()
                 t_first_play: float | None = None
