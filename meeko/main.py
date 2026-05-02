@@ -25,6 +25,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from enum import Enum, auto
 
 import anthropic
@@ -35,7 +36,7 @@ from meeko.audio_io import AudioIO
 from meeko.claude_client import ClaudeClient
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
-from meeko.profiles import load_profiles
+from meeko.profiles import Profile, load_profiles
 from meeko.session_summary import summarize_session
 from meeko.sessions import SessionStore, default_db_path
 from meeko.speaker import Speaker
@@ -121,39 +122,21 @@ async def _resolve_resume(store: SessionStore, resume: str) -> dict[str, object]
     return row
 
 
-async def run(resume: str | None = None, list_sessions: bool = False):
-    setup_logging()
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
 
-    if list_sessions:
-        store = SessionStore.open(default_db_path())
-        try:
-            await _list_sessions_cmd(store)
-        finally:
-            await store.close()
-        return
 
-    load_dotenv()
-
-    deepgram_key = os.environ["DEEPGRAM_API_KEY"]
-    anthropic_key = os.environ["ANTHROPIC_API_KEY"]
-    mute_mic_while_speaking = os.environ.get(
-        "MEEKO_MUTE_MIC_WHILE_SPEAKING", ""
-    ).strip().lower() in {"1", "true", "yes"}
-    wake_word_disabled = os.environ.get(
-        "MEEKO_WAKE_WORD_DISABLED", ""
-    ).strip().lower() in {"1", "true", "yes"}
-
-    profiles = load_profiles()
-
-    store = SessionStore.open(default_db_path())
-
+async def _init_session_state(
+    store: SessionStore,
+    resume: str | None,
+    profiles: dict[str, Profile],
+) -> tuple[Profile, str, list[dict] | None]:
+    """Resolve the active profile, session id, and prior history (if any)."""
     resumed_row: dict[str, object] | None = None
     if resume is not None:
         try:
             resumed_row = await _resolve_resume(store, resume)
         except SystemExit:
-            # _resolve_resume raises SystemExit on unknown ids; make sure
-            # the store we just opened doesn't leak past that exit.
             await store.close()
             raise
 
@@ -177,15 +160,21 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             profile.name,
             len(history),
         )
-    else:
-        profile = profiles["default"]
-        session_id = await store.create_session(profile.name)
-        history = None
-        logger.info("Started session %s (profile=%s)", session_id, profile.name)
+        return profile, session_id, history
 
-    profile_manager = ProfileManager(profiles)
-    session_manager = SessionManager()
+    profile = profiles["default"]
+    session_id = await store.create_session(profile.name)
+    logger.info("Started session %s (profile=%s)", session_id, profile.name)
+    return profile, session_id, None
 
+
+def _build_dispatcher(
+    profiles: dict[str, Profile],
+    profile_manager: ProfileManager,
+    session_manager: SessionManager,
+    store: SessionStore,
+    get_session_id: Callable[[], str],
+) -> ToolDispatcher:
     dispatcher = ToolDispatcher()
     dispatcher.register(timer_tools(), timer_handle)
     dispatcher.register(
@@ -199,10 +188,134 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             args,
             manager=session_manager,
             store=store,
-            current_session_id=session_id,
+            current_session_id=get_session_id(),
         )
 
     dispatcher.register(session_tools(), session_handle_wrapper)
+    return dispatcher
+
+
+def _create_wake_detector(
+    disabled: bool,
+) -> tuple[WakeWordDetector | None, State]:
+    if disabled:
+        return None, State.LISTENING
+    wake_model_path = os.environ.get("MEEKO_WAKE_WORD_MODEL", default_model_path())
+    wake_threshold = float(
+        os.environ.get("MEEKO_WAKE_WORD_THRESHOLD", DEFAULT_THRESHOLD)
+    )
+    return (
+        WakeWordDetector(threshold=wake_threshold, model_path=wake_model_path),
+        State.IDLE,
+    )
+
+
+async def _apply_post_turn_session_change(
+    *,
+    session_manager: SessionManager,
+    profile_manager: ProfileManager,
+    claude: ClaudeClient,
+    store: SessionStore,
+    wake_detector: WakeWordDetector | None,
+    session_id: str,
+    fire_summary: Callable[[str], None],
+) -> tuple[str, State]:
+    """Apply pending session-management actions queued during the last turn.
+
+    Returns the (possibly updated) session id and the next State to enter.
+    `should_load` can coexist with `should_end` (chain: finalize current
+    then load a prior one in one turn). Always summarize the abandoned
+    session so it stays in the recall index — `summarize_session` no-ops
+    on empty sessions, so this is safe even when the user loads after
+    only a turn or two.
+    """
+    if session_manager.should_load():
+        target_id = session_manager.get_load_target()
+        assert target_id is not None  # guaranteed by should_load()
+        fire_summary(session_id)
+        logger.info(
+            "load_session: fired summary for abandoned %s",
+            session_id[:8],
+        )
+        turns = await store.load_turns(target_id)
+        claude.load_history(turns)
+        claude.rebind_session(target_id)
+        await store.touch_session(target_id)
+        session_manager.clear()
+        logger.info(
+            "load_session: swapped history to %s (%d turns), continuing in LISTENING",
+            target_id[:8],
+            len(turns),
+        )
+        return target_id, State.LISTENING
+
+    if session_manager.should_end():
+        active = profile_manager.active_profile
+        finalized_sid = session_id
+        new_sid = await store.create_session(active.name)
+        claude.reset_session(new_sid)
+        session_manager.clear()
+        fire_summary(finalized_sid)
+        if wake_detector is not None:
+            wake_detector.reset()
+            logger.info(
+                "Session ended; returning to IDLE "
+                "(say '%s' to start a new conversation)",
+                active.wake_word,
+            )
+            return new_sid, State.IDLE
+        logger.info("Session ended; wake word disabled, returning to LISTENING")
+        return new_sid, State.LISTENING
+
+    if session_manager.should_start_new():
+        active = profile_manager.active_profile
+        finalized_sid = session_id
+        new_sid = await store.create_session(active.name)
+        claude.reset_session(new_sid)
+        session_manager.clear()
+        fire_summary(finalized_sid)
+        logger.info(
+            "new_session: rotated to %s (profile=%s), continuing in LISTENING",
+            new_sid[:8],
+            active.name,
+        )
+        return new_sid, State.LISTENING
+
+    return session_id, State.LISTENING
+
+
+async def run(resume: str | None = None, list_sessions: bool = False):
+    setup_logging()
+
+    if list_sessions:
+        store = SessionStore.open(default_db_path())
+        try:
+            await _list_sessions_cmd(store)
+        finally:
+            await store.close()
+        return
+
+    load_dotenv()
+
+    deepgram_key = os.environ["DEEPGRAM_API_KEY"]
+    anthropic_key = os.environ["ANTHROPIC_API_KEY"]
+    mute_mic_while_speaking = _env_flag("MEEKO_MUTE_MIC_WHILE_SPEAKING")
+    wake_word_disabled = _env_flag("MEEKO_WAKE_WORD_DISABLED")
+
+    profiles = load_profiles()
+    store = SessionStore.open(default_db_path())
+    profile, session_id, history = await _init_session_state(store, resume, profiles)
+
+    profile_manager = ProfileManager(profiles)
+    session_manager = SessionManager()
+
+    dispatcher = _build_dispatcher(
+        profiles,
+        profile_manager,
+        session_manager,
+        store,
+        lambda: session_id,
+    )
 
     claude = ClaudeClient(
         api_key=anthropic_key,
@@ -234,18 +347,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     stop_event = asyncio.Event()
     audio = AudioIO(stop_event)
 
-    if wake_word_disabled:
-        wake_detector = None
-        state = State.LISTENING
-    else:
-        wake_model_path = os.environ.get("MEEKO_WAKE_WORD_MODEL", default_model_path())
-        wake_threshold = float(
-            os.environ.get("MEEKO_WAKE_WORD_THRESHOLD", DEFAULT_THRESHOLD)
-        )
-        wake_detector = WakeWordDetector(
-            threshold=wake_threshold, model_path=wake_model_path
-        )
-        state = State.IDLE
+    wake_detector, state = _create_wake_detector(wake_word_disabled)
 
     def enter_speaking() -> State:
         nonlocal state
@@ -433,70 +535,15 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),
             )
-            # should_load can coexist with should_end (chain: finalize
-            # current session then load a prior one in one turn). Always
-            # summarize the abandoned session so it stays in the recall
-            # index — summarize_session no-ops on empty sessions, so
-            # this is safe even when the user loads after only a turn
-            # or two.
-            if session_manager.should_load():
-                target_id = session_manager.get_load_target()
-                assert target_id is not None  # guaranteed by should_load()
-                fire_summary(session_id)
-                logger.info(
-                    "load_session: fired summary for abandoned %s",
-                    session_id[:8],
-                )
-                turns = await store.load_turns(target_id)
-                claude.load_history(turns)
-                claude.rebind_session(target_id)
-                session_id = target_id
-                await store.touch_session(target_id)
-                session_manager.clear()
-                state = State.LISTENING
-                logger.info(
-                    "load_session: swapped history to %s (%d turns), "
-                    "continuing in LISTENING",
-                    target_id[:8],
-                    len(turns),
-                )
-            elif session_manager.should_end():
-                active = profile_manager.active_profile
-                finalized_sid = session_id
-                new_sid = await store.create_session(active.name)
-                claude.reset_session(new_sid)
-                session_id = new_sid
-                session_manager.clear()
-                fire_summary(finalized_sid)
-                if wake_detector is not None:
-                    wake_detector.reset()
-                    state = State.IDLE
-                    logger.info(
-                        "Session ended; returning to IDLE "
-                        "(say '%s' to start a new conversation)",
-                        active.wake_word,
-                    )
-                else:
-                    state = State.LISTENING
-                    logger.info(
-                        "Session ended; wake word disabled, returning to LISTENING"
-                    )
-            elif session_manager.should_start_new():
-                active = profile_manager.active_profile
-                finalized_sid = session_id
-                new_sid = await store.create_session(active.name)
-                claude.reset_session(new_sid)
-                session_id = new_sid
-                session_manager.clear()
-                fire_summary(finalized_sid)
-                state = State.LISTENING
-                logger.info(
-                    "new_session: rotated to %s (profile=%s), continuing in LISTENING",
-                    new_sid[:8],
-                    active.name,
-                )
-            else:
-                state = State.LISTENING
+            session_id, state = await _apply_post_turn_session_change(
+                session_manager=session_manager,
+                profile_manager=profile_manager,
+                claude=claude,
+                store=store,
+                wake_detector=wake_detector,
+                session_id=session_id,
+                fire_summary=fire_summary,
+            )
 
     async def on_session(stt_session) -> None:
         # drive_turns is intentionally NOT in this group — it lives at
