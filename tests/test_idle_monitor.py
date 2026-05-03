@@ -1,10 +1,14 @@
-"""Tests for the post-turn idle monitor (Stage 1: query mode)."""
+"""Tests for the post-turn idle monitor (query and conversation modes)."""
 
 import asyncio
 
 import pytest
 
-from meeko.main import _idle_monitor
+from meeko.main import (
+    CONVERSATION_CLOSE_TEXT,
+    CONVERSATION_PROMPT_TEXT,
+    _idle_monitor,
+)
 from meeko.profiles import Profile
 
 
@@ -18,14 +22,29 @@ def _query_profile(timeout: float = 0.05) -> Profile:
     )
 
 
-def _conversation_profile() -> Profile:
+def _conversation_profile(idle: float = 0.02, close: float = 0.02) -> Profile:
     return Profile(
         name="test",
         wake_word="meeko",
         prompt="...",
         mode="conversation",
-        conversation_idle_seconds=60.0,
+        conversation_idle_seconds=idle,
+        conversation_close_seconds=close,
     )
+
+
+def _recording_speak() -> tuple[list[str], callable]:
+    calls: list[str] = []
+
+    async def speak(text: str) -> None:
+        calls.append(text)
+
+    return calls, speak
+
+
+# ---------------------------------------------------------------------------
+# Query mode
+# ---------------------------------------------------------------------------
 
 
 async def test_query_mode_fires_after_timeout():
@@ -35,8 +54,7 @@ async def test_query_mode_fires_after_timeout():
     def on_timeout() -> None:
         fired.append(True)
 
-    profile = _query_profile(timeout=0.02)
-    await _idle_monitor(profile, on_timeout)
+    await _idle_monitor(_query_profile(timeout=0.02), on_timeout)
 
     assert fired == [True]
 
@@ -48,9 +66,7 @@ async def test_query_mode_cancellation_does_not_fire():
     def on_timeout() -> None:
         fired.append(True)
 
-    profile = _query_profile(timeout=10.0)
-    task = asyncio.create_task(_idle_monitor(profile, on_timeout))
-    # Let the task start its sleep
+    task = asyncio.create_task(_idle_monitor(_query_profile(timeout=10.0), on_timeout))
     await asyncio.sleep(0.01)
     task.cancel()
 
@@ -60,14 +76,168 @@ async def test_query_mode_cancellation_does_not_fire():
     assert fired == []
 
 
-async def test_conversation_mode_no_op_in_stage_1():
-    """Conversation mode is a no-op in Stage 1; monitor returns immediately."""
+async def test_query_mode_disabled_when_timeout_non_positive():
+    """idle_timeout_seconds <= 0 disables the monitor entirely."""
     fired = []
 
     def on_timeout() -> None:
         fired.append(True)
 
-    profile = _conversation_profile()
-    await asyncio.wait_for(_idle_monitor(profile, on_timeout), timeout=0.5)
+    await _idle_monitor(_query_profile(timeout=0), on_timeout)
 
     assert fired == []
+
+
+# ---------------------------------------------------------------------------
+# Conversation mode
+# ---------------------------------------------------------------------------
+
+
+async def test_conversation_mode_full_flow():
+    """Idle window → prompt → close window → close line → on_timeout."""
+    fired = []
+    calls, speak = _recording_speak()
+
+    def on_timeout() -> None:
+        fired.append(True)
+
+    await _idle_monitor(
+        _conversation_profile(idle=0.02, close=0.02),
+        on_timeout,
+        speak=speak,
+    )
+
+    assert calls == [CONVERSATION_PROMPT_TEXT, CONVERSATION_CLOSE_TEXT]
+    assert fired == [True]
+
+
+async def test_conversation_mode_cancel_during_idle_wait():
+    """Cancelling during the initial idle window: no prompt, no close, no end."""
+    fired = []
+    calls, speak = _recording_speak()
+
+    def on_timeout() -> None:
+        fired.append(True)
+
+    task = asyncio.create_task(
+        _idle_monitor(
+            _conversation_profile(idle=10.0, close=10.0),
+            on_timeout,
+            speak=speak,
+        )
+    )
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == []
+    assert fired == []
+
+
+async def test_conversation_mode_cancel_during_close_window():
+    """Cancelling after the prompt but before the close window expires."""
+    fired = []
+    calls, speak = _recording_speak()
+
+    def on_timeout() -> None:
+        fired.append(True)
+
+    task = asyncio.create_task(
+        _idle_monitor(
+            _conversation_profile(idle=0.01, close=10.0),
+            on_timeout,
+            speak=speak,
+        )
+    )
+    # Wait long enough for the prompt to be spoken but well within the
+    # 10s close window.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == [CONVERSATION_PROMPT_TEXT]
+    assert fired == []
+
+
+async def test_conversation_mode_cancel_during_prompt_speak():
+    """Cancelling while the prompt is being spoken: no close, no end."""
+    fired = []
+    calls: list[str] = []
+    started = asyncio.Event()
+
+    async def slow_speak(text: str) -> None:
+        calls.append(text)
+        started.set()
+        await asyncio.sleep(10.0)  # simulate long TTS
+
+    def on_timeout() -> None:
+        fired.append(True)
+
+    task = asyncio.create_task(
+        _idle_monitor(
+            _conversation_profile(idle=0.01, close=0.5),
+            on_timeout,
+            speak=slow_speak,
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == [CONVERSATION_PROMPT_TEXT]
+    assert fired == []
+
+
+async def test_conversation_mode_disabled_when_idle_non_positive():
+    """conversation_idle_seconds <= 0 disables the monitor entirely."""
+    fired = []
+    calls, speak = _recording_speak()
+
+    def on_timeout() -> None:
+        fired.append(True)
+
+    await _idle_monitor(
+        _conversation_profile(idle=0, close=10.0),
+        on_timeout,
+        speak=speak,
+    )
+
+    assert calls == []
+    assert fired == []
+
+
+async def test_conversation_mode_close_window_absolute_from_prompt_start():
+    """The close window timer accounts for prompt-speak duration."""
+    fired = []
+    calls: list[str] = []
+    speak_duration = 0.1
+    close_window = 0.15
+
+    async def slow_speak(text: str) -> None:
+        calls.append(text)
+        await asyncio.sleep(speak_duration)
+
+    def on_timeout() -> None:
+        fired.append(True)
+
+    loop = asyncio.get_running_loop()
+    t_start = loop.time()
+    await _idle_monitor(
+        _conversation_profile(idle=0.01, close=close_window),
+        on_timeout,
+        speak=slow_speak,
+    )
+    elapsed = loop.time() - t_start
+
+    # Total: idle (0.01) + prompt-speak (0.1) + close window measured
+    # from prompt start (0.15 - 0.1 = 0.05 remaining sleep) +
+    # close-speak (0.1) ≈ 0.26s. If the close window was reset by the
+    # prompt instead of being absolute, total would be ≈ 0.36s.
+    assert calls == [CONVERSATION_PROMPT_TEXT, CONVERSATION_CLOSE_TEXT]
+    assert fired == [True]
+    assert elapsed < 0.30, (
+        f"close window not absolute from prompt start: {elapsed:.3f}s"
+    )
