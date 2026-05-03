@@ -732,6 +732,7 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
             wake_word="meeko",
             prompt="system",
             voice=None,
+            idle_timeout_seconds=0,
         )
     }
 
@@ -835,6 +836,7 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
             wake_word="meeko",
             prompt="system",
             voice=None,
+            idle_timeout_seconds=0,
         )
     }
 
@@ -1080,6 +1082,7 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
             wake_word="meeko",
             prompt="system",
             voice=None,
+            idle_timeout_seconds=0,
         )
     }
 
@@ -1302,6 +1305,7 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
             wake_word="meeko",
             prompt="system",
             voice=None,
+            idle_timeout_seconds=0,
         )
     }
 
@@ -1527,10 +1531,18 @@ async def test_new_session_after_profile_switch_records_active_profile(
 
     two_profiles = {
         "default": Profile(
-            name="default", wake_word="meeko", prompt="default system", voice=None
+            name="default",
+            wake_word="meeko",
+            prompt="default system",
+            voice=None,
+            idle_timeout_seconds=0,
         ),
         "pirate": Profile(
-            name="pirate", wake_word="meeko", prompt="pirate system", voice=None
+            name="pirate",
+            wake_word="meeko",
+            prompt="pirate system",
+            voice=None,
+            idle_timeout_seconds=0,
         ),
     }
 
@@ -2155,7 +2167,11 @@ async def test_endofturn_while_idle_does_not_drive_a_turn(
 
     wake_profiles = {
         "default": Profile(
-            name="default", wake_word="meeko", prompt="system", voice=None
+            name="default",
+            wake_word="meeko",
+            prompt="system",
+            voice=None,
+            idle_timeout_seconds=0,
         )
     }
 
