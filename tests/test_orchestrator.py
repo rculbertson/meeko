@@ -234,6 +234,10 @@ def fake_profiles():
             wake_word="meeko",
             prompt="system",
             voice=None,
+            # Disable the post-turn idle monitor: orchestrator tests
+            # patch asyncio.sleep, which would otherwise short-circuit
+            # the idle timer and trigger spurious session ends.
+            idle_timeout_seconds=0,
         )
     }
 
