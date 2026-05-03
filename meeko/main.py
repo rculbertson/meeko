@@ -679,13 +679,17 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         pass
     finally:
         stop_event.set()
-        cancel_idle_monitor()
+        # Cancel and await the idle monitor directly; can't use
+        # cancel_idle_monitor() here because it nulls the reference
+        # before we can await it.
+        if idle_monitor_task is not None:
+            if not idle_monitor_task.done():
+                idle_monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await idle_monitor_task
         drive_turns_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await drive_turns_task
-        if idle_monitor_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await idle_monitor_task
         timer_manager.cancel_all_timers()
         # Cancel in-flight summary tasks before closing the SQLite
         # connection; letting them run into a closed store would crash
