@@ -8,10 +8,6 @@ Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed
 
 Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** directly, with **Claude called directly via the Anthropic SDK** (`claude-sonnet-4-6`). Wake-word gating (openWakeWord), SQLite turn persistence, end-of-session summarization with FTS recall, CLI session resume, and a Claude-native tool-use loop for timers, profile switching, and session management (`end_session`, `new_session`, `list_sessions`, `load_session`) are all implemented.
 
-## Primary Goal
-
-The next milestones, in rough order, are: barge-in (`SpeechStarted`-driven cancellation during SPEAKING) → ReSpeaker hardware bring-up on the Pi. See `private/meeko-design.md` for the full target architecture.
-
 ## Tech Stack
 
 - **Python 3.14+**, async/await throughout
@@ -25,7 +21,6 @@ The next milestones, in rough order, are: barge-in (`SpeechStarted`-driven cance
 
 ### Claude API calls
 - Model: `claude-sonnet-4-6` for main conversation and end-of-session summarization (long transcripts + summary quality drives resume-by-voice recall)
-- Model: `claude-haiku-4-5` reserved for short, high-volume classification work; not used for summaries or main conversation
 - Prompt caching (`cache_control` on the stable prefix) and server-side compaction are wired up in `meeko/claude_client.py` (compaction beta `compact-2026-01-12`, strategy `compact_20260112`). Both operate on the in-memory message array only
 - The on-disk SQLite transcript is the source of truth — the server-emitted `compaction` block stays in-memory and is filtered out before persistence so transcripts remain verbatim
 - `MEEKO_COMPACTION_TRIGGER_TOKENS` — input-token threshold that triggers server-side compaction (default `150000`)
