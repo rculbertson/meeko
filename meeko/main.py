@@ -133,7 +133,8 @@ async def _idle_monitor(
     elif profile.mode == "conversation":
         if profile.conversation_idle_seconds <= 0:
             return
-        assert speak is not None, "conversation mode requires a speak callback"
+        if speak is None:
+            raise ValueError("conversation mode requires a speak callback")
         await asyncio.sleep(profile.conversation_idle_seconds)
         # Window is absolute from prompt start: subtract the time the
         # prompt itself takes to speak so the close fires
@@ -493,9 +494,18 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         if state != State.LISTENING:
             return
         active = profile_manager.active_profile
+        # Report the timeout that actually drove the close so the log
+        # line matches the user's experience — query mode counts
+        # silence after Meeko's last reply, conversation mode counts
+        # silence after the close-line prompt.
+        timeout_s = (
+            active.idle_timeout_seconds
+            if active.mode == "query"
+            else active.conversation_close_seconds
+        )
         logger.info(
             "Idle timeout (%.1fs, mode=%s); ending session",
-            active.idle_timeout_seconds,
+            timeout_s,
             active.mode,
         )
         session_manager.request_end()
