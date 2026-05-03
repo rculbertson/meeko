@@ -130,7 +130,7 @@ async def _idle_monitor(
         on_timeout()
         return
 
-    if profile.mode == "conversation":
+    elif profile.mode == "conversation":
         if profile.conversation_idle_seconds <= 0:
             return
         assert speak is not None, "conversation mode requires a speak callback"
@@ -147,6 +147,7 @@ async def _idle_monitor(
             await asyncio.sleep(remaining)
         await speak(CONVERSATION_CLOSE_TEXT)
         on_timeout()
+        return
 
 
 async def _list_sessions_cmd(store: SessionStore) -> None:

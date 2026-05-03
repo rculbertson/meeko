@@ -55,12 +55,18 @@ def load_profiles(path: str | Path = "profiles.toml") -> dict[str, Profile]:
             prompt=fields["prompt"],
             voice=fields.get("voice"),
             mode=mode,
-            idle_timeout_seconds=float(fields.get("idle_timeout_seconds", 5.0)),
+            idle_timeout_seconds=float(
+                fields.get("idle_timeout_seconds", Profile.idle_timeout_seconds)
+            ),
             conversation_idle_seconds=float(
-                fields.get("conversation_idle_seconds", 60.0)
+                fields.get(
+                    "conversation_idle_seconds", Profile.conversation_idle_seconds
+                )
             ),
             conversation_close_seconds=float(
-                fields.get("conversation_close_seconds", 20.0)
+                fields.get(
+                    "conversation_close_seconds", Profile.conversation_close_seconds
+                )
             ),
         )
 
