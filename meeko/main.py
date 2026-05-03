@@ -92,12 +92,35 @@ class State(Enum):
     SPEAKING = auto()
 
 
-_STATE_TO_LED = {
-    State.IDLE: LedState.IDLE,
-    State.LISTENING: LedState.LISTENING,
-    State.PROCESSING: LedState.PROCESSING,
-    State.SPEAKING: LedState.SPEAKING,
-}
+class StateManager:
+    _STATE_TO_LED = {
+        State.IDLE: LedState.IDLE,
+        State.LISTENING: LedState.LISTENING,
+        State.PROCESSING: LedState.PROCESSING,
+        State.SPEAKING: LedState.SPEAKING,
+    }
+
+    def __init__(self, initial: State, leds: LedController) -> None:
+        self._state = initial
+        self._leds = leds
+
+    @property
+    def state(self) -> State:
+        return self._state
+
+    def set(self, new: State) -> None:
+        if new != self._state:
+            logger.debug("[state] %s → %s", self._state.name, new.name)
+            self._state = new
+        self._leds.set_state(self._STATE_TO_LED[new])
+
+    def enter_speaking(self) -> State:
+        prev = self._state
+        self.set(State.SPEAKING)
+        return prev
+
+    def exit_speaking(self, prev: State) -> None:
+        self.set(prev if prev != State.SPEAKING else State.LISTENING)
 
 
 RESUME_LATEST = "__latest__"
@@ -410,30 +433,16 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     leds = LedController()
     leds.start()
 
-    def notify_leds() -> None:
-        leds.set_state(_STATE_TO_LED[state])
-
-    wake_detector, state = _create_wake_detector(wake_word_disabled)
-    notify_leds()
-
-    def enter_speaking() -> State:
-        nonlocal state
-        prev = state
-        state = State.SPEAKING
-        notify_leds()
-        return prev
-
-    def exit_speaking(prev: State) -> None:
-        nonlocal state
-        state = prev if prev != State.SPEAKING else State.LISTENING
-        notify_leds()
+    wake_detector, initial_state = _create_wake_detector(wake_word_disabled)
+    state_manager = StateManager(initial_state, leds)
+    state_manager.set(initial_state)
 
     speaker = Speaker(
         tts,
         audio,
         profile,
-        enter_speaking,
-        exit_speaking,
+        state_manager.enter_speaking,
+        state_manager.exit_speaking,
         mute_mic_while_speaking=mute_mic_while_speaking,
     )
     timer_manager.set_speak_callback(speaker.speak)
@@ -448,20 +457,18 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         MEEKO_MUTE_MIC_WHILE_SPEAKING set, chunks are dropped while the
         assistant is SPEAKING (Mac / no-AEC dev path). Otherwise the
         pump stays on and we rely on hardware AEC to suppress echo."""
-        nonlocal state
         while not stop_event.is_set():
             try:
                 data = await asyncio.wait_for(audio.mic_queue.get(), timeout=0.1)
             except TimeoutError:
                 continue
-            if state == State.IDLE:
+            if state_manager.state == State.IDLE:
                 assert wake_detector is not None
                 if wake_detector.process(data):
-                    state = State.LISTENING
-                    notify_leds()
+                    state_manager.set(State.LISTENING)
                     logger.info("Wake word accepted; entering LISTENING")
                 continue
-            if mute_mic_while_speaking and state == State.SPEAKING:
+            if mute_mic_while_speaking and state_manager.state == State.SPEAKING:
                 continue
             await stt_session.send_audio(data)
 
@@ -506,7 +513,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # user transcript is already queued ahead of us — letting the
         # sentinel land behind real text would end a session right
         # after a successful turn.
-        if state != State.LISTENING or not turn_queue.empty():
+        if state_manager.state != State.LISTENING or not turn_queue.empty():
             return
         active = profile_manager.active_profile
         if active.mode == "query":
@@ -551,7 +558,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     def request_barge_in() -> None:
         """Cancel the in-flight speak task, if any. Called from
         pull_stt_events when StartOfTurn fires during SPEAKING."""
-        nonlocal barge_in_requested, state
+        nonlocal barge_in_requested
         # Flip state synchronously so any EndOfTurn arriving before the
         # cancel propagates through drive_turns isn't dropped as echo
         # by pull_stt_events. This must happen even when there's no
@@ -563,9 +570,8 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # exit_speaking will re-assert LISTENING when they unwind; the
         # brief PROCESSING window in between is harmless (PROCESSING-
         # state EndOfTurns are queued normally).
-        state = State.LISTENING
         cancel_idle_monitor()
-        notify_leds()
+        state_manager.set(State.LISTENING)
         if current_speak_task is not None and not current_speak_task.done():
             logger.info("Barge-in: cancelling in-flight reply")
             barge_in_requested = True
@@ -583,27 +589,19 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         async for ev in stt_session.events():
             if stop_event.is_set():
                 return
-            # While SPEAKING, surface every event at DEBUG so a noisy
-            # ~20 Hz Update stream doesn't clutter the INFO log but is
-            # still available with MEEKO_LOG_LEVEL=debug when diagnosing
-            # whether mic audio is reaching Deepgram during TTS.
-            if state == State.SPEAKING:
-                logger.debug(
-                    "[stt-during-speaking] event=%s transcript=%r",
-                    ev.event,
-                    ev.transcript,
-                )
             if ev.event == "StartOfTurn":
-                logger.info("User started speaking (state=%s)", state.name)
+                logger.info(
+                    "User started speaking (state=%s)", state_manager.state.name
+                )
                 # User activity always cancels a pending idle close; the
                 # branch below handles barge-in for the SPEAKING case.
                 cancel_idle_monitor()
-                if state == State.SPEAKING:
+                if state_manager.state == State.SPEAKING:
                     # Barge-in: user is talking over the assistant.
                     # Cancel the speak task; the eventual EndOfTurn will
                     # arrive in LISTENING and flow through normally.
                     request_barge_in()
-                elif state == State.LISTENING:
+                elif state_manager.state == State.LISTENING:
                     # Switch from solid "I heard the wake word" to DoA
                     # mode so the ring tracks the user's direction while
                     # they speak. Reverts on EndOfTurn → PROCESSING.
@@ -612,12 +610,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             if ev.event != "EndOfTurn":
                 continue
             text = ev.transcript.strip()
-            if state == State.IDLE:
+            if state_manager.state == State.IDLE:
                 # Safety belt: Deepgram shouldn't emit turns while
                 # we're gating mic audio behind the wake word, but
                 # any stray transcripts must not start a Claude turn.
                 continue
-            if state == State.SPEAKING:
+            if state_manager.state == State.SPEAKING:
                 # No preceding StartOfTurn triggered barge-in (otherwise
                 # state would already be LISTENING). With AEC on, this
                 # is residual echo; drop it.
@@ -629,7 +627,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     async def drive_turns():
         """Drive Claude + TTS for queued user turns, one at a time."""
-        nonlocal state, session_id, current_speak_task, barge_in_requested
+        nonlocal session_id, current_speak_task, barge_in_requested
         while not stop_event.is_set():
             item = await turn_queue.get()
             cancel_idle_monitor()
@@ -639,7 +637,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # post-turn block to finalize and (with wake word) return
                 # to IDLE. No Claude/TTS round-trip on this path, so we
                 # do not start a fresh idle window after.
-                session_id, state = await _apply_post_turn_session_change(
+                session_id, new_state = await _apply_post_turn_session_change(
                     session_manager=session_manager,
                     profile_manager=profile_manager,
                     claude=claude,
@@ -648,12 +646,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     session_id=session_id,
                     fire_summary=fire_summary,
                 )
+                state_manager.set(new_state)
                 continue
             text = item
             assert isinstance(text, str)
             logger.info("[user] %s", text)
-            state = State.PROCESSING
-            notify_leds()
+            state_manager.set(State.PROCESSING)
             t_turn = time.perf_counter()
             # Run the turn as a sub-task so request_barge_in() can
             # cancel just this turn without tearing down drive_turns.
@@ -669,8 +667,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # (re-raise) by the explicit flag — stop_event is racy
                 # because asyncio's shutdown cancels drive_turns_task
                 # before run()'s finally has set it.
-                state = State.LISTENING
-                notify_leds()
+                state_manager.set(State.LISTENING)
                 current_speak_task = None
                 if not barge_in_requested:
                     raise
@@ -680,8 +677,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             except Exception:
                 logger.exception("Claude turn failed")
                 leds.error()
-                state = State.LISTENING
-                notify_leds()
+                state_manager.set(State.LISTENING)
                 current_speak_task = None
                 continue
             current_speak_task = None
@@ -694,7 +690,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 or session_manager.should_end()
                 or session_manager.should_start_new()
             )
-            session_id, state = await _apply_post_turn_session_change(
+            session_id, new_state = await _apply_post_turn_session_change(
                 session_manager=session_manager,
                 profile_manager=profile_manager,
                 claude=claude,
@@ -706,11 +702,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             # Start the post-turn idle window. Only when state is
             # LISTENING — IDLE means the session already ended and the
             # next interaction needs the wake word.
-            if state == State.LISTENING:
+            if new_state == State.LISTENING:
                 start_idle_monitor()
             if session_changed:
                 leds.session_transition()
-            notify_leds()
+            state_manager.set(new_state)
 
     async def on_session(stt_session) -> None:
         # drive_turns is intentionally NOT in this group — it lives at
@@ -741,7 +737,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             await asyncio.gather(*session_tasks, return_exceptions=True)
 
     supervisor = STTSupervisor(
-        stt, audio, stop_event, on_session, lambda: state == State.SPEAKING
+        stt,
+        audio,
+        stop_event,
+        on_session,
+        lambda: state_manager.state == State.SPEAKING,
     )
 
     audio.start_mic()
