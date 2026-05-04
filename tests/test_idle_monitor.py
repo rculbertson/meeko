@@ -209,16 +209,18 @@ async def test_conversation_mode_disabled_when_idle_non_positive():
     assert fired == []
 
 
-async def test_conversation_mode_close_window_absolute_from_prompt_start():
-    """The close window timer accounts for prompt-speak duration."""
+async def test_conversation_mode_close_window_runs_after_prompt_finishes():
+    """The close window starts after the prompt-speak completes, so a
+    slow prompt does not eat into the user's response time."""
     fired = []
     calls: list[str] = []
-    speak_duration = 0.1
-    close_window = 0.15
+    prompt_speak_duration = 0.1
+    close_window = 0.05
 
     async def slow_speak(text: str) -> None:
         calls.append(text)
-        await asyncio.sleep(speak_duration)
+        if text == CONVERSATION_PROMPT_TEXT:
+            await asyncio.sleep(prompt_speak_duration)
 
     def on_timeout() -> None:
         fired.append(True)
@@ -232,12 +234,12 @@ async def test_conversation_mode_close_window_absolute_from_prompt_start():
     )
     elapsed = loop.time() - t_start
 
-    # Total: idle (0.01) + prompt-speak (0.1) + close window measured
-    # from prompt start (0.15 - 0.1 = 0.05 remaining sleep) +
-    # close-speak (0.1) ≈ 0.26s. If the close window was reset by the
-    # prompt instead of being absolute, total would be ≈ 0.36s.
+    # Total ≈ idle (0.01) + prompt-speak (0.1) + full close window
+    # (0.05) ≈ 0.16s. If the close window were absolute from prompt
+    # start instead, the wait would be skipped (close < prompt_speak)
+    # and total would be ≈ 0.11s.
     assert calls == [CONVERSATION_PROMPT_TEXT, CONVERSATION_CLOSE_TEXT]
     assert fired == [True]
-    assert elapsed < 0.30, (
-        f"close window not absolute from prompt start: {elapsed:.3f}s"
+    assert elapsed >= 0.01 + prompt_speak_duration + close_window, (
+        f"close window not given after prompt finishes: {elapsed:.3f}s"
     )

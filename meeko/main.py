@@ -116,8 +116,8 @@ async def _idle_monitor(
 
     Query mode: silent close after `idle_timeout_seconds`.
     Conversation mode: after `conversation_idle_seconds`, speak a prompt;
-    if no response within `conversation_close_seconds` (measured from
-    prompt start), speak a closing line and end the session.
+    if no response within `conversation_close_seconds` after the prompt
+    finishes, speak a closing line and end the session.
 
     A non-positive timeout (`idle_timeout_seconds` for query,
     `conversation_idle_seconds` for conversation) disables the monitor —
@@ -136,17 +136,10 @@ async def _idle_monitor(
         if speak is None:
             raise ValueError("conversation mode requires a speak callback")
         await asyncio.sleep(profile.conversation_idle_seconds)
-        # Window is absolute from prompt start: subtract the time the
-        # prompt itself takes to speak so the close fires
-        # `conversation_close_seconds` after we *began* prompting.
-        # Use the running loop's clock for consistency with
-        # asyncio.sleep above (matters under mocked-clock tests).
-        loop = asyncio.get_running_loop()
-        prompt_start = loop.time()
         await speak(CONVERSATION_PROMPT_TEXT)
-        remaining = profile.conversation_close_seconds - (loop.time() - prompt_start)
-        if remaining > 0:
-            await asyncio.sleep(remaining)
+        # Full close window after the prompt finishes — Meeko's own
+        # talking does not eat into the user's response time.
+        await asyncio.sleep(profile.conversation_close_seconds)
         await speak(CONVERSATION_CLOSE_TEXT)
         on_timeout()
         return
@@ -495,20 +488,16 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         if state != State.LISTENING:
             return
         active = profile_manager.active_profile
-        # Report the timeout that actually drove the close so the log
-        # line matches the user's experience — query mode counts
-        # silence after Meeko's last reply, conversation mode counts
-        # silence after the close-line prompt.
-        timeout_s = (
-            active.idle_timeout_seconds
-            if active.mode == "query"
-            else active.conversation_close_seconds
-        )
-        logger.info(
-            "Idle timeout (%.1fs, mode=%s); ending session",
-            timeout_s,
-            active.mode,
-        )
+        if active.mode == "query":
+            logger.info(
+                "Idle timeout (%.1fs, mode=query); ending session",
+                active.idle_timeout_seconds,
+            )
+        else:
+            logger.info(
+                "Idle timeout (%.1fs after prompt, mode=conversation); ending session",
+                active.conversation_close_seconds,
+            )
         session_manager.request_end()
         turn_queue.put_nowait(_IDLE_TIMEOUT_SENTINEL)
 
