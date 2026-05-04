@@ -25,7 +25,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from enum import Enum, auto
 
 import anthropic
@@ -98,25 +98,51 @@ RESUME_LATEST = "__latest__"
 # session) without spending a Claude/TTS round-trip first.
 _IDLE_TIMEOUT_SENTINEL: object = object()
 
+CONVERSATION_PROMPT_TEXT = (
+    "Would you like to continue, or should we end the session now?"
+)
+CONVERSATION_CLOSE_TEXT = "Okay, ending the session now."
 
-async def _idle_monitor(profile: Profile, on_timeout: Callable[[], None]) -> None:
+
+async def _idle_monitor(
+    profile: Profile,
+    on_timeout: Callable[[], None],
+    speak: Callable[[str], Awaitable[None]] | None = None,
+) -> None:
     """Wait for the active mode's idle window, then call on_timeout.
 
     Cancellation at any await bails cleanly without firing. Called from
     drive_turns after each turn that left the state in LISTENING.
 
-    Stage 1: only query mode is implemented. Conversation mode (Stage 2)
-    will add a prompt-then-close sequence here.
+    Query mode: silent close after `idle_timeout_seconds`.
+    Conversation mode: after `conversation_idle_seconds`, speak a prompt;
+    if no response within `conversation_close_seconds` after the prompt
+    finishes, speak a closing line and end the session.
+
+    A non-positive timeout (`idle_timeout_seconds` for query,
+    `conversation_idle_seconds` for conversation) disables the monitor —
+    used as a test escape hatch and an operator override.
     """
     if profile.mode == "query":
-        # Non-positive timeout disables auto-close. Useful as a test
-        # escape hatch (orchestrator tests that patch asyncio.sleep) and
-        # as an operator override for users who want a query-tuned
-        # system prompt without the silent close.
         if profile.idle_timeout_seconds <= 0:
             return
         await asyncio.sleep(profile.idle_timeout_seconds)
         on_timeout()
+        return
+
+    elif profile.mode == "conversation":
+        if profile.conversation_idle_seconds <= 0:
+            return
+        if speak is None:
+            raise ValueError("conversation mode requires a speak callback")
+        await asyncio.sleep(profile.conversation_idle_seconds)
+        await speak(CONVERSATION_PROMPT_TEXT)
+        # Full close window after the prompt finishes — Meeko's own
+        # talking does not eat into the user's response time.
+        await asyncio.sleep(profile.conversation_close_seconds)
+        await speak(CONVERSATION_CLOSE_TEXT)
+        on_timeout()
+        return
 
 
 async def _list_sessions_cmd(store: SessionStore) -> None:
@@ -455,18 +481,29 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         idle_monitor_task = None
 
     def on_idle_timeout() -> None:
-        # Race guard: a turn may have started in the gap between
-        # asyncio.sleep waking and on_timeout running. If state is no
-        # longer LISTENING, skip — the imminent turn will run normally
-        # and start a fresh idle window when it completes.
-        if state != State.LISTENING:
+        # Race guard: a turn may have arrived in the gap between
+        # asyncio.sleep waking and on_timeout running. Skip if state
+        # is no longer LISTENING (turn already in flight) or if a
+        # user transcript is already queued ahead of us — letting the
+        # sentinel land behind real text would end a session right
+        # after a successful turn.
+        if state != State.LISTENING or not turn_queue.empty():
             return
         active = profile_manager.active_profile
-        logger.info(
-            "Idle timeout (%.1fs, mode=%s); ending session",
-            active.idle_timeout_seconds,
-            active.mode,
-        )
+        if active.mode == "query":
+            logger.info(
+                "Idle timeout (%.1fs, mode=query); ending session",
+                active.idle_timeout_seconds,
+            )
+        elif active.mode == "conversation":
+            logger.info(
+                "Idle timeout (%.1fs after prompt, mode=conversation); ending session",
+                active.conversation_close_seconds,
+            )
+        else:
+            logger.warning(
+                "Idle timeout for unknown mode: %s; ending session", active.mode
+            )
         session_manager.request_end()
         turn_queue.put_nowait(_IDLE_TIMEOUT_SENTINEL)
 
@@ -474,7 +511,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         nonlocal idle_monitor_task
         cancel_idle_monitor()
         idle_monitor_task = asyncio.create_task(
-            _idle_monitor(profile_manager.active_profile, on_idle_timeout)
+            _idle_monitor(
+                profile_manager.active_profile,
+                on_idle_timeout,
+                speak=speaker.speak,
+            )
         )
 
     # Set in drive_turns while a Claude+TTS turn is running so

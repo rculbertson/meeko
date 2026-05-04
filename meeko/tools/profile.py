@@ -69,7 +69,16 @@ def get_tool_definitions(profiles: dict[str, Profile]) -> list[ToolDefinition]:
             "name": "switch_profile",
             "description": (
                 "Switch the assistant to a different profile/persona. "
-                f"Available profiles: {names_list}"
+                f"Available profiles: {names_list}. "
+                "Profiles also determine the conversation mode (query — "
+                "auto-closes after a short silence; conversation — stays "
+                "open for long, in-depth talks). When the user asks to "
+                "switch modes (e.g. 'switch to conversation mode', "
+                "'let's have a long conversation', 'switch back to query "
+                "mode', 'just quick questions from now on'), call this "
+                "tool with the profile whose mode matches their intent: "
+                "the 'default' profile is query mode and the "
+                "'conversation' profile is conversation mode."
             ),
             "input_schema": {
                 "type": "object",

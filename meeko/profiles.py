@@ -23,9 +23,9 @@ class Profile:
     # "conversation" prompts after `conversation_idle_seconds` then closes
     # after `conversation_close_seconds` more silence (Stage 2).
     mode: str = "query"
-    idle_timeout_seconds: float = 8.0
-    conversation_idle_seconds: float = 120.0
-    conversation_close_seconds: float = 30.0
+    idle_timeout_seconds: float = 5.0
+    conversation_idle_seconds: float = 60.0
+    conversation_close_seconds: float = 20.0
 
 
 def load_profiles(path: str | Path = "profiles.toml") -> dict[str, Profile]:
@@ -55,12 +55,18 @@ def load_profiles(path: str | Path = "profiles.toml") -> dict[str, Profile]:
             prompt=fields["prompt"],
             voice=fields.get("voice"),
             mode=mode,
-            idle_timeout_seconds=float(fields.get("idle_timeout_seconds", 8.0)),
+            idle_timeout_seconds=float(
+                fields.get("idle_timeout_seconds", Profile.idle_timeout_seconds)
+            ),
             conversation_idle_seconds=float(
-                fields.get("conversation_idle_seconds", 120.0)
+                fields.get(
+                    "conversation_idle_seconds", Profile.conversation_idle_seconds
+                )
             ),
             conversation_close_seconds=float(
-                fields.get("conversation_close_seconds", 30.0)
+                fields.get(
+                    "conversation_close_seconds", Profile.conversation_close_seconds
+                )
             ),
         )
 
