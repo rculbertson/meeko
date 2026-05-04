@@ -58,7 +58,7 @@ def _ensure_preprocessors() -> None:
         ) from exc
 
 
-DEFAULT_THRESHOLD = 0.99
+DEFAULT_THRESHOLD = 0.96
 
 
 class WakeWordDetector:
