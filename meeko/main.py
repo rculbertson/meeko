@@ -139,11 +139,12 @@ async def _idle_monitor(
         # Window is absolute from prompt start: subtract the time the
         # prompt itself takes to speak so the close fires
         # `conversation_close_seconds` after we *began* prompting.
-        prompt_start = time.monotonic()
+        # Use the running loop's clock for consistency with
+        # asyncio.sleep above (matters under mocked-clock tests).
+        loop = asyncio.get_running_loop()
+        prompt_start = loop.time()
         await speak(CONVERSATION_PROMPT_TEXT)
-        remaining = profile.conversation_close_seconds - (
-            time.monotonic() - prompt_start
-        )
+        remaining = profile.conversation_close_seconds - (loop.time() - prompt_start)
         if remaining > 0:
             await asyncio.sleep(remaining)
         await speak(CONVERSATION_CLOSE_TEXT)
