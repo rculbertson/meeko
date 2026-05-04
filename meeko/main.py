@@ -481,11 +481,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         idle_monitor_task = None
 
     def on_idle_timeout() -> None:
-        # Race guard: a turn may have started in the gap between
-        # asyncio.sleep waking and on_timeout running. If state is no
-        # longer LISTENING, skip — the imminent turn will run normally
-        # and start a fresh idle window when it completes.
-        if state != State.LISTENING:
+        # Race guard: a turn may have arrived in the gap between
+        # asyncio.sleep waking and on_timeout running. Skip if state
+        # is no longer LISTENING (turn already in flight) or if a
+        # user transcript is already queued ahead of us — letting the
+        # sentinel land behind real text would end a session right
+        # after a successful turn.
+        if state != State.LISTENING or not turn_queue.empty():
             return
         active = profile_manager.active_profile
         if active.mode == "query":
