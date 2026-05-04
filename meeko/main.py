@@ -493,10 +493,14 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 "Idle timeout (%.1fs, mode=query); ending session",
                 active.idle_timeout_seconds,
             )
-        else:
+        elif active.mode == "conversation":
             logger.info(
                 "Idle timeout (%.1fs after prompt, mode=conversation); ending session",
                 active.conversation_close_seconds,
+            )
+        else:
+            logger.warning(
+                "Idle timeout for unknown mode: %s; ending session", active.mode
             )
         session_manager.request_end()
         turn_queue.put_nowait(_IDLE_TIMEOUT_SENTINEL)
