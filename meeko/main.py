@@ -122,6 +122,18 @@ class StateManager:
     def exit_speaking(self, prev: State) -> None:
         self.set(prev if prev != State.SPEAKING else State.LISTENING)
 
+    def set_listening_active(self, active: bool) -> None:
+        """LISTENING_ACTIVE is a LED sub-state of LISTENING (DoA mode
+        on, vs. solid cyan). The orchestrator stays in State.LISTENING
+        either way — only the LED display changes. Calls from outside
+        LISTENING are no-ops so the LED never diverges from the
+        logical state."""
+        if self._state != State.LISTENING:
+            return
+        self._leds.set_state(
+            LedState.LISTENING_ACTIVE if active else LedState.LISTENING
+        )
+
 
 RESUME_LATEST = "__latest__"
 
@@ -605,12 +617,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     # rather than the solid "ready" cyan that
                     # request_barge_in's state change would otherwise
                     # leave on the ring.
-                    leds.set_state(LedState.LISTENING_ACTIVE)
+                    state_manager.set_listening_active(True)
                 elif state_manager.state == State.LISTENING:
                     # Switch from solid "I heard the wake word" to DoA
                     # mode so the ring tracks the user's direction while
                     # they speak. Reverts on EndOfTurn → PROCESSING.
-                    leds.set_state(LedState.LISTENING_ACTIVE)
+                    state_manager.set_listening_active(True)
                 continue
             if ev.event != "EndOfTurn":
                 continue
@@ -632,7 +644,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             # dark for the empty-transcript path, and briefly for the
             # window before drive_turns picks up the turn and
             # transitions to PROCESSING.)
-            leds.set_state(LedState.LISTENING)
+            state_manager.set_listening_active(False)
             if not text:
                 continue
             await turn_queue.put(text)

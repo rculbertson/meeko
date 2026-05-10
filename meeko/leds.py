@@ -319,7 +319,7 @@ class LedController:
         d = self._device
         d.set_color(PALETTE.error)
         d.set_brightness(PALETTE.breath_brightness)
-        d.set_speed(2)
+        d.set_speed(PALETTE.breath_speed)
         d.set_effect(EFFECT_BREATH)
         return self._sleep_or_interrupt(_ERROR_FLASH_S)
 

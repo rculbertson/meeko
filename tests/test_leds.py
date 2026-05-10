@@ -206,7 +206,7 @@ def test_error_plays_red_breath_then_restores_state(
 
         assert new_calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.error))
         assert new_calls[1] == _vendor_out_call(13, bytes([PALETTE.breath_brightness]))
-        assert new_calls[2] == _vendor_out_call(15, bytes([2]))
+        assert new_calls[2] == _vendor_out_call(15, bytes([PALETTE.breath_speed]))
         assert new_calls[3] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
         # State restoration after the flash (LISTENING solid):
         assert new_calls[4] == _vendor_out_call(
