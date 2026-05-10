@@ -608,10 +608,15 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # User activity always cancels a pending idle close; the
                 # branch below handles barge-in for the SPEAKING case.
                 cancel_idle_monitor()
-                if state_manager.state == State.SPEAKING:
-                    # Barge-in: user is talking over the assistant.
-                    # Cancel the speak task; the eventual EndOfTurn will
-                    # arrive in LISTENING and flow through normally.
+                if state_manager.state in (State.SPEAKING, State.PROCESSING):
+                    # Barge-in: user is talking over the assistant, or
+                    # they changed their mind during the window between
+                    # EndOfTurn and first audio (Claude TTFT + Deepgram
+                    # TTS first-byte synthesis, often >1s now that the
+                    # Speaker defers SPEAKING entry until first chunk).
+                    # Cancel the in-flight speak task in either case;
+                    # the eventual EndOfTurn arrives in LISTENING and
+                    # flows through normally.
                     request_barge_in()
                     # User is already mid-utterance; show DoA tracking
                     # rather than the solid "ready" cyan that

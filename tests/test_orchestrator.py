@@ -2348,6 +2348,117 @@ async def test_start_of_turn_during_speaking_triggers_barge_in(
                 await task
 
 
+async def test_start_of_turn_during_processing_triggers_barge_in(
+    monkeypatch, fake_profiles, tmp_path, caplog
+):
+    """A StartOfTurn observed while state==PROCESSING (after EndOfTurn,
+    before first audio plays — the window covers Claude TTFT plus
+    Deepgram TTS first-byte synthesis) must cancel the in-flight turn
+    and return the session to LISTENING so the user's interruption is
+    captured rather than silently dropped."""
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+
+    fake_stt = _QueueDrivenSTTClient("dg-test")
+    fake_tts = _FakeTTSClient("dg-test")
+
+    # Block Claude before it yields any text — keeps the turn in
+    # PROCESSING (no TTS first-byte → no SPEAKING transition).
+    release_claude = asyncio.Event()
+    claude_called = asyncio.Event()
+
+    class _SlowClaude(_FakeClaudeClient):
+        def stream_turn(self, text):
+            self.turns.append(text)
+
+            async def _gen():
+                claude_called.set()
+                await release_claude.wait()
+                yield "Hi."
+
+            return _gen()
+
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _SlowClaude(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    caplog.set_level(logging.INFO, logger="meeko")
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            await _wait_until(
+                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
+            )
+            session = fake_stt.session_obj
+
+            # Drive the first turn into PROCESSING.
+            await session.event_queue.put(
+                SimpleNamespace(event="EndOfTurn", transcript="hello")
+            )
+            await asyncio.wait_for(claude_called.wait(), timeout=5)
+
+            # No audio has played — state is still PROCESSING. User
+            # barges in: StartOfTurn must cancel the in-flight turn.
+            await session.event_queue.put(
+                SimpleNamespace(event="StartOfTurn", transcript="")
+            )
+            await _wait_until(
+                lambda: any(
+                    "Barge-in: turn cancelled" in rec.getMessage()
+                    for rec in caplog.records
+                ),
+                real_sleep=real_sleep,
+            )
+
+            # Release Claude in case any partial cleanup is awaiting it.
+            release_claude.set()
+
+            # The user finishes their interruption. The EndOfTurn
+            # arrives in LISTENING (not PROCESSING/SPEAKING) and drives
+            # a fresh turn — meaning the user's change-of-mind was
+            # captured, not silently dropped.
+            await session.event_queue.put(
+                SimpleNamespace(event="EndOfTurn", transcript="wait, actually")
+            )
+            await _wait_until(
+                lambda: (
+                    fake_claude_holder["client"].turns == ["hello", "wait, actually"]
+                ),
+                real_sleep=real_sleep,
+            )
+        finally:
+            release_claude.set()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
 async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
     monkeypatch, fake_profiles, tmp_path, caplog
 ):
@@ -2450,11 +2561,13 @@ async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
                 await task
 
 
-async def test_start_of_turn_outside_speaking_does_not_cancel(
+async def test_start_of_turn_while_listening_does_not_cancel(
     monkeypatch, fake_profiles, tmp_path, caplog
 ):
-    """StartOfTurn while LISTENING/PROCESSING must not trigger barge-in
-    (there is nothing to cancel) and must not log a barge-in line."""
+    """StartOfTurn while LISTENING must not trigger barge-in (there is
+    nothing to cancel) and must not log a barge-in line. PROCESSING is
+    a separate case — it does trigger barge-in, covered by
+    test_start_of_turn_during_processing_triggers_barge_in."""
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
