@@ -601,6 +601,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     # Cancel the speak task; the eventual EndOfTurn will
                     # arrive in LISTENING and flow through normally.
                     request_barge_in()
+                    # User is already mid-utterance; show DoA tracking
+                    # rather than the solid "ready" cyan that
+                    # request_barge_in's state change would otherwise
+                    # leave on the ring.
+                    leds.set_state(LedState.LISTENING_ACTIVE)
                 elif state_manager.state == State.LISTENING:
                     # Switch from solid "I heard the wake word" to DoA
                     # mode so the ring tracks the user's direction while
@@ -621,6 +626,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # is residual echo; drop it.
                 logger.info("[echo?] %s", text)
                 continue
+            # Speech is over — leave DoA mode so the ring shows the
+            # solid "ready" cue. (DoA's firmware only lights the ring
+            # while speech is detected, so without this the ring goes
+            # dark for the empty-transcript path, and briefly for the
+            # window before drive_turns picks up the turn and
+            # transitions to PROCESSING.)
+            leds.set_state(LedState.LISTENING)
             if not text:
                 continue
             await turn_queue.put(text)

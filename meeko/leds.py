@@ -5,8 +5,8 @@ Drives the WS2812 ring on the XVF3800 to reflect Meeko's state machine
 error cues.
 
 We talk to the XVF3800 directly via pyusb vendor control transfers
-rather than vendoring ReSpeaker's xvf_host.py — only six commands are
-needed (LED_EFFECT, LED_BRIGHTNESS, LED_GAMMIFY, LED_SPEED, LED_COLOR,
+rather than vendoring ReSpeaker's xvf_host.py — only five commands are
+needed (LED_EFFECT, LED_BRIGHTNESS, LED_SPEED, LED_COLOR,
 LED_DOA_COLOR), all on the GPO servicer resid (20). Wire format:
 
     bmRequestType = OUT|VENDOR|DEVICE   (write)
@@ -48,7 +48,6 @@ _RESID_GPO = 20
 
 _CMD_LED_EFFECT = 12
 _CMD_LED_BRIGHTNESS = 13
-_CMD_LED_GAMMIFY = 14
 _CMD_LED_SPEED = 15
 _CMD_LED_COLOR = 16
 _CMD_LED_DOA_COLOR = 17
@@ -187,7 +186,7 @@ def _find_xvf_device() -> XvfLedDevice | None:
 
 @dataclass
 class _Action:
-    kind: str  # "state" | "session" | "error" | "close"
+    kind: str  # "state" | "error" | "close"
     state: LedState | None = None
 
 
