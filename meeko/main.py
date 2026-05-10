@@ -676,19 +676,19 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 continue
             except Exception:
                 logger.exception("Claude turn failed")
-                leds.error()
+                # Set state first so the worker applies LISTENING before
+                # the error animation, and the post-flash restore picks
+                # up LISTENING as _current_state. Reversing the order
+                # makes _sleep_or_interrupt see the queued state action
+                # and abort the breath immediately.
                 state_manager.set(State.LISTENING)
+                leds.error()
                 current_speak_task = None
                 continue
             current_speak_task = None
             logger.debug(
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),
-            )
-            session_changed = (
-                session_manager.should_load()
-                or session_manager.should_end()
-                or session_manager.should_start_new()
             )
             session_id, new_state = await _apply_post_turn_session_change(
                 session_manager=session_manager,
@@ -704,8 +704,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             # next interaction needs the wake word.
             if new_state == State.LISTENING:
                 start_idle_monitor()
-            if session_changed:
-                leds.session_transition()
             state_manager.set(new_state)
 
     async def on_session(stt_session) -> None:

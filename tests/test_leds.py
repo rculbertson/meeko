@@ -20,7 +20,6 @@ from meeko.leds import (
     EFFECT_BREATH,
     EFFECT_DOA,
     EFFECT_OFF,
-    EFFECT_RAINBOW,
     EFFECT_SOLID,
     PALETTE,
     LedController,
@@ -82,7 +81,6 @@ def test_disabled_when_device_missing() -> None:
     assert not controller.enabled
     # Should not raise:
     controller.set_state(LedState.LISTENING)
-    controller.session_transition()
     controller.error()
     controller.close()
 
@@ -190,37 +188,6 @@ def test_set_state_speaking_configures_solid() -> None:
 # --- animations ----------------------------------------------------------
 
 
-def test_session_transition_plays_rainbow_then_restores_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Rainbow flash should run then re-apply the most recent state."""
-    monkeypatch.setattr(leds, "_SESSION_FLASH_S", 0.05)
-    fake = FakeUsbDevice()
-    controller = _make_controller(fake)
-    controller.start()
-    try:
-        controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 2)
-        baseline = len(fake.snapshot())
-
-        controller.session_transition()
-        # Expect: brightness, speed, rainbow effect, [sleep], then state re-apply
-        # (LISTENING solid = color + effect = 2 more calls)
-        _wait_for_calls(fake, baseline + 5, timeout=2.0)
-        new_calls = fake.snapshot()[baseline:]
-
-        assert new_calls[0] == _vendor_out_call(13, bytes([PALETTE.breath_brightness]))
-        assert new_calls[1] == _vendor_out_call(15, bytes([8]))
-        assert new_calls[2] == _vendor_out_call(12, bytes([EFFECT_RAINBOW]))
-        # After flash, listening state is reapplied (solid color + effect):
-        assert new_calls[3] == _vendor_out_call(
-            16, struct.pack("<I", PALETTE.listening)
-        )
-        assert new_calls[4] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
-    finally:
-        controller.close()
-
-
 def test_error_plays_red_breath_then_restores_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,6 +213,48 @@ def test_error_plays_red_breath_then_restores_state(
             16, struct.pack("<I", PALETTE.listening)
         )
         assert new_calls[5] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
+    finally:
+        controller.close()
+
+
+def test_error_plays_full_duration_when_state_set_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The orchestrator's error path sets state BEFORE calling error()
+    so the worker drains the state action first, leaving the queue
+    empty when _sleep_or_interrupt enters its wait. Reversing that
+    order would leave the state action queued while the breath starts,
+    aborting the sleep immediately and squashing the 3s breath into a
+    momentary flash."""
+    # Use a real (short) flash duration so we can observe whether the
+    # sleep actually waits.
+    monkeypatch.setattr(leds, "_ERROR_FLASH_S", 0.1)
+    fake = FakeUsbDevice()
+    controller = _make_controller(fake)
+    controller.start()
+    try:
+        # Mimic what main.py's exception path does: set new state, then
+        # request the error animation.
+        controller.set_state(LedState.LISTENING)
+        controller.error()
+
+        start = time.monotonic()
+        # Expected writes: LISTENING (2) + error setup (4) + LISTENING
+        # restore (2) = 8.
+        _wait_for_calls(fake, 8, timeout=2.0)
+        elapsed = time.monotonic() - start
+        # The breath must have actually slept; otherwise this would
+        # finish in a few ms.
+        assert elapsed >= 0.08, (
+            f"Error breath was aborted; elapsed={elapsed:.3f}s — "
+            f"the sleep in _apply_error_flash should have waited "
+            f"~_ERROR_FLASH_S=0.1s"
+        )
+        calls = fake.snapshot()
+        # Restore picks up _current_state = LISTENING (set before
+        # error()), not whatever was there before.
+        assert calls[-2] == _vendor_out_call(16, struct.pack("<I", PALETTE.listening))
+        assert calls[-1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
         controller.close()
 
@@ -285,37 +294,6 @@ def test_animation_preempted_by_new_state(
         # The writes after the error setup must be the PROCESSING block,
         # not a LISTENING restore.
         assert calls[6] == _vendor_out_call(16, struct.pack("<I", PALETTE.processing))
-    finally:
-        controller.close()
-
-
-def test_session_transition_preempted_skips_restore(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same flicker-avoidance check as the error-flash version, but for
-    session_transition() — the rainbow sweep must not bookend back to
-    the previous state when a new state is queued mid-flash."""
-    monkeypatch.setattr(leds, "_SESSION_FLASH_S", 5.0)
-    fake = FakeUsbDevice()
-    controller = _make_controller(fake)
-    controller.start()
-    try:
-        controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 2)
-        controller.session_transition()
-        # Rainbow flash setup is 3 writes (brightness, speed, effect).
-        _wait_for_calls(fake, 5, timeout=1.0)
-        controller.set_state(LedState.PROCESSING)
-        # LISTENING (2) + rainbow setup (3) + PROCESSING (4) = 9. A
-        # spurious LISTENING restore would push it to 11.
-        _wait_for_calls(fake, 9, timeout=2.0)
-        calls = fake.snapshot()
-        assert calls[-1] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
-        assert len(calls) == 9, (
-            f"Expected exactly 9 writes (no LISTENING restore between rainbow "
-            f"and PROCESSING), got {len(calls)}: {calls}"
-        )
-        assert calls[5] == _vendor_out_call(16, struct.pack("<I", PALETTE.processing))
     finally:
         controller.close()
 

@@ -54,7 +54,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - First run downloads openWakeWord's preprocessor ONNX files (~3 MB). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
 ### LEDs
-- The XVF3800's WS2812 ring is driven by `meeko/leds.py` to mirror the state machine: IDLE off, LISTENING DoA (cyan indicator on dim teal), PROCESSING amber breath, SPEAKING solid blue. Session transitions get a ~0.5s rainbow sweep; errors get a ~3s red breath.
+- The XVF3800's WS2812 ring is driven by `meeko/leds.py` to mirror the state machine: IDLE off, LISTENING solid cyan, LISTENING_ACTIVE DoA (cyan indicator on darker cyan) while the user is speaking, PROCESSING blue breath, SPEAKING solid green. Errors get a ~3s red breath.
 - We talk to the chip directly over libusb (pyusb vendor control transfers on resid 20) — not via ReSpeaker's `xvf_host.py`.
 - Linux defaults the USB control interface to root-only. Install `scripts/99-meeko-xvf3800.rules` once (see README) so the `plugdev` group can drive it.
 - `MEEKO_LED_DISABLED=1` — skip LED control entirely. Also auto-disabled if the XVF3800 isn't found or pyusb/libusb is unavailable, so Mac dev runs need no special handling.

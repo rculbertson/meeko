@@ -56,14 +56,11 @@ _CMD_LED_DOA_COLOR = 17
 # LED_EFFECT modes per XVF3800 firmware.
 EFFECT_OFF = 0
 EFFECT_BREATH = 1
-EFFECT_RAINBOW = 2
 EFFECT_SOLID = 3
 EFFECT_DOA = 4
 
 _USB_TIMEOUT_MS = 1000
 
-# Session-transition rainbow sweep duration.
-_SESSION_FLASH_S = 0.5
 # Error red-breath duration.
 _ERROR_FLASH_S = 3.0
 
@@ -103,7 +100,7 @@ class _Palette:
     listening_active_base: int = 0x008888  # darker cyan underlay during DoA
     listening_active_indicator: int = 0x00FFFF  # brighter cyan direction marker
     processing: int = 0x0055FF  # blue (breath)
-    speaking: int = 0x00A020  # soft green (breath)
+    speaking: int = 0x00A020  # soft green (solid)
     error: int = 0xFF0000  # red
     breath_brightness: int = 255
     breath_speed: int = 2
@@ -201,10 +198,10 @@ class LedController:
     for an internal daemon thread that issues the actual USB control
     transfers. If the device is unavailable, every method is a no-op.
 
-    Animation methods (``session_transition``, ``error``) play a short
-    sequence then re-apply the most recent state. They can be preempted
-    by a newer item on the queue, so a barge-in immediately after an
-    error doesn't get stuck behind the red flash.
+    The ``error`` animation plays a short red breath then re-applies
+    the most recent state. It can be preempted by a newer item on the
+    queue, so a barge-in immediately after an error isn't stuck behind
+    the red flash.
     """
 
     def __init__(
@@ -246,11 +243,6 @@ class LedController:
             return
         self._queue.put(_Action(kind="state", state=state))
 
-    def session_transition(self) -> None:
-        if not self._enabled:
-            return
-        self._queue.put(_Action(kind="session"))
-
     def error(self) -> None:
         if not self._enabled:
             return
@@ -279,10 +271,6 @@ class LedController:
                         assert action.state is not None
                         self._apply_state(action.state)
                         self._current_state = action.state
-                    elif action.kind == "session":
-                        interrupted = self._apply_session_flash()
-                        if not interrupted and self._current_state is not None:
-                            self._apply_state(self._current_state)
                     elif action.kind == "error":
                         interrupted = self._apply_error_flash()
                         if not interrupted and self._current_state is not None:
@@ -324,16 +312,6 @@ class LedController:
             self._device.set_effect(EFFECT_OFF)
         except Exception:
             pass
-
-    def _apply_session_flash(self) -> bool:
-        """Returns True if interrupted by a queued action, False if the
-        full flash duration elapsed."""
-        assert self._device is not None
-        d = self._device
-        d.set_brightness(PALETTE.breath_brightness)
-        d.set_speed(8)  # snappy sweep
-        d.set_effect(EFFECT_RAINBOW)
-        return self._sleep_or_interrupt(_SESSION_FLASH_S)
 
     def _apply_error_flash(self) -> bool:
         """Returns True if interrupted by a queued action, False if the
