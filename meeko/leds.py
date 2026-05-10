@@ -99,14 +99,14 @@ class _Palette:
     # confirmation, which is the whole point, would be invisible until
     # the user starts talking. The DoA sub-state takes over on
     # Deepgram's StartOfTurn.
-    listening: int = 0x00A0A0  # teal — "I heard you"
-    listening_active_base: int = 0x004848  # dim teal underlay during DoA
-    listening_active_indicator: int = 0x00FFFF  # cyan direction marker
-    processing: int = 0x2040A0  # soft blue (breath)
-    speaking: int = 0x2040A0  # soft blue (solid)
+    listening: int = 0x00C8C8  # cyan — "I heard you"
+    listening_active_base: int = 0x008888  # darker cyan underlay during DoA
+    listening_active_indicator: int = 0x00FFFF  # brighter cyan direction marker
+    processing: int = 0x0055FF  # blue (breath)
+    speaking: int = 0x00A020  # soft green (breath)
     error: int = 0xFF0000  # red
-    brightness: int = 128
-    breath_speed: int = 1
+    breath_brightness: int = 255
+    breath_speed: int = 2
 
 
 PALETTE = _Palette()
@@ -302,7 +302,6 @@ class LedController:
             d.set_effect(EFFECT_OFF)
         elif state == LedState.LISTENING:
             d.set_color(PALETTE.listening)
-            d.set_brightness(PALETTE.brightness)
             d.set_effect(EFFECT_SOLID)
         elif state == LedState.LISTENING_ACTIVE:
             d.set_doa_color(
@@ -312,12 +311,11 @@ class LedController:
             d.set_effect(EFFECT_DOA)
         elif state == LedState.PROCESSING:
             d.set_color(PALETTE.processing)
-            d.set_brightness(PALETTE.brightness)
+            d.set_brightness(PALETTE.breath_brightness)
             d.set_speed(PALETTE.breath_speed)
             d.set_effect(EFFECT_BREATH)
         elif state == LedState.SPEAKING:
             d.set_color(PALETTE.speaking)
-            d.set_brightness(PALETTE.brightness)
             d.set_effect(EFFECT_SOLID)
 
     def _apply_off(self) -> None:
@@ -330,7 +328,7 @@ class LedController:
     def _apply_session_flash(self) -> None:
         assert self._device is not None
         d = self._device
-        d.set_brightness(PALETTE.brightness)
+        d.set_brightness(PALETTE.breath_brightness)
         d.set_speed(8)  # snappy sweep
         d.set_effect(EFFECT_RAINBOW)
         self._sleep_or_interrupt(_SESSION_FLASH_S)
@@ -339,7 +337,7 @@ class LedController:
         assert self._device is not None
         d = self._device
         d.set_color(PALETTE.error)
-        d.set_brightness(PALETTE.brightness)
+        d.set_brightness(PALETTE.breath_brightness)
         d.set_speed(2)
         d.set_effect(EFFECT_BREATH)
         self._sleep_or_interrupt(_ERROR_FLASH_S)

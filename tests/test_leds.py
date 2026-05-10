@@ -128,11 +128,10 @@ def test_set_state_listening_configures_solid() -> None:
     controller.start()
     try:
         controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 3)
-        calls = fake.snapshot()[:3]
+        _wait_for_calls(fake, 2)
+        calls = fake.snapshot()[:2]
         assert calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.listening))
-        assert calls[1] == _vendor_out_call(13, bytes([PALETTE.brightness]))
-        assert calls[2] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
+        assert calls[1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
         controller.close()
 
@@ -167,7 +166,7 @@ def test_set_state_processing_configures_breath() -> None:
         _wait_for_calls(fake, 4)
         calls = fake.snapshot()[:4]
         assert calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.processing))
-        assert calls[1] == _vendor_out_call(13, bytes([PALETTE.brightness]))
+        assert calls[1] == _vendor_out_call(13, bytes([PALETTE.breath_brightness]))
         assert calls[2] == _vendor_out_call(15, bytes([PALETTE.breath_speed]))
         assert calls[3] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
     finally:
@@ -180,11 +179,10 @@ def test_set_state_speaking_configures_solid() -> None:
     controller.start()
     try:
         controller.set_state(LedState.SPEAKING)
-        _wait_for_calls(fake, 3)
-        calls = fake.snapshot()[:3]
+        _wait_for_calls(fake, 2)
+        calls = fake.snapshot()[:2]
         assert calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.speaking))
-        assert calls[1] == _vendor_out_call(13, bytes([PALETTE.brightness]))
-        assert calls[2] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
+        assert calls[1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
         controller.close()
 
@@ -202,24 +200,23 @@ def test_session_transition_plays_rainbow_then_restores_state(
     controller.start()
     try:
         controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 3)
+        _wait_for_calls(fake, 2)
         baseline = len(fake.snapshot())
 
         controller.session_transition()
         # Expect: brightness, speed, rainbow effect, [sleep], then state re-apply
-        # (LISTENING solid = color + brightness + effect = 3 more calls)
-        _wait_for_calls(fake, baseline + 6, timeout=2.0)
+        # (LISTENING solid = color + effect = 2 more calls)
+        _wait_for_calls(fake, baseline + 5, timeout=2.0)
         new_calls = fake.snapshot()[baseline:]
 
-        assert new_calls[0] == _vendor_out_call(13, bytes([PALETTE.brightness]))
+        assert new_calls[0] == _vendor_out_call(13, bytes([PALETTE.breath_brightness]))
         assert new_calls[1] == _vendor_out_call(15, bytes([8]))
         assert new_calls[2] == _vendor_out_call(12, bytes([EFFECT_RAINBOW]))
-        # After flash, listening state is reapplied (solid color + brightness + effect):
+        # After flash, listening state is reapplied (solid color + effect):
         assert new_calls[3] == _vendor_out_call(
             16, struct.pack("<I", PALETTE.listening)
         )
-        assert new_calls[4] == _vendor_out_call(13, bytes([PALETTE.brightness]))
-        assert new_calls[5] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
+        assert new_calls[4] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
         controller.close()
 
@@ -233,23 +230,22 @@ def test_error_plays_red_breath_then_restores_state(
     controller.start()
     try:
         controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 3)
+        _wait_for_calls(fake, 2)
         baseline = len(fake.snapshot())
 
         controller.error()
-        _wait_for_calls(fake, baseline + 7, timeout=2.0)
+        _wait_for_calls(fake, baseline + 6, timeout=2.0)
         new_calls = fake.snapshot()[baseline:]
 
         assert new_calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.error))
-        assert new_calls[1] == _vendor_out_call(13, bytes([PALETTE.brightness]))
+        assert new_calls[1] == _vendor_out_call(13, bytes([PALETTE.breath_brightness]))
         assert new_calls[2] == _vendor_out_call(15, bytes([2]))
         assert new_calls[3] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
         # State restoration after the flash (LISTENING solid):
         assert new_calls[4] == _vendor_out_call(
             16, struct.pack("<I", PALETTE.listening)
         )
-        assert new_calls[5] == _vendor_out_call(13, bytes([PALETTE.brightness]))
-        assert new_calls[6] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
+        assert new_calls[5] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
         controller.close()
 
@@ -266,21 +262,21 @@ def test_animation_preempted_by_new_state(
     controller.start()
     try:
         controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 3)
+        _wait_for_calls(fake, 2)
         controller.error()
         # Wait until the error flash has issued its 4 setup writes:
-        _wait_for_calls(fake, 7, timeout=1.0)
+        _wait_for_calls(fake, 6, timeout=1.0)
         # Now interrupt with a new state. The flash should abort early
         # and the new state should be applied.
         controller.set_state(LedState.PROCESSING)
         # PROCESSING adds 4 writes, plus the auto-restore from the
-        # interrupted error (LISTENING solid = 3 writes) gets queued
+        # interrupted error (LISTENING solid = 2 writes) gets queued
         # before PROCESSING. Eventually the last write is the PROCESSING
         # breath effect.
         end = time.monotonic() + 2.0
         while time.monotonic() < end:
             calls = fake.snapshot()
-            if len(calls) >= 10 and calls[-1] == _vendor_out_call(
+            if len(calls) >= 8 and calls[-1] == _vendor_out_call(
                 12, bytes([EFFECT_BREATH])
             ):
                 break
@@ -301,7 +297,7 @@ def test_close_turns_leds_off() -> None:
     controller = _make_controller(fake)
     controller.start()
     controller.set_state(LedState.LISTENING)
-    _wait_for_calls(fake, 3)
+    _wait_for_calls(fake, 2)
     controller.close()
     # Last call should be EFFECT_OFF from the close action.
     last = fake.snapshot()[-1]
