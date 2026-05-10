@@ -1,0 +1,9 @@
+# Grant the plugdev group access to the ReSpeaker XVF3800 USB control
+# interface so meeko can drive the LED ring without root.
+#
+# Install:
+#   sudo cp scripts/99-meeko-xvf3800.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload
+#   sudo udevadm trigger
+# Then unplug and replug the device.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="001a", MODE="0660", GROUP="plugdev"

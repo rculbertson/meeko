@@ -254,3 +254,92 @@ async def test_profile_voice_overrides_default(audio_mock, tts_mock, fast_sleep)
 
     _, kwargs = tts_mock.stream.call_args
     assert kwargs["voice"] == "aura-2-andromeda-en"
+
+
+async def test_state_hooks_not_called_when_no_sentences(
+    profile, audio_mock, tts_mock, fast_sleep
+):
+    """If the text iterator yields nothing, no audio is ever played, so
+    the SPEAKING transition must not happen — state stays at PROCESSING
+    and the orchestrator handles the post-turn flow."""
+    enter, exit_, calls = _state_hooks()
+    sp = Speaker(tts_mock, audio_mock, profile, enter, exit_)
+
+    await sp.speak_stream(_aiter([]))
+
+    assert calls == []
+    audio_mock.write_speaker.assert_not_awaited()
+
+
+async def test_state_hooks_not_called_when_only_empty_sentences(
+    profile, audio_mock, tts_mock, fast_sleep
+):
+    """Empty sentences are skipped before TTS. With no chunks ever
+    written, SPEAKING must not be entered."""
+    enter, exit_, calls = _state_hooks()
+    sp = Speaker(tts_mock, audio_mock, profile, enter, exit_)
+
+    await sp.speak_stream(_aiter(["", ""]))
+
+    assert calls == []
+    audio_mock.write_speaker.assert_not_awaited()
+
+
+async def test_enter_speaking_deferred_until_first_chunk(
+    profile, audio_mock, tts_mock, fast_sleep
+):
+    """SPEAKING transition must coincide with the first audio write,
+    not with the start of speak_stream — otherwise PROCESSING LEDs
+    are hidden during Claude TTFT + TTS first-byte synthesis."""
+    events: list[str] = []
+
+    def enter():
+        events.append("enter")
+        return "PREV"
+
+    def exit_(prev):
+        events.append("exit")
+
+    audio_mock.reset_speaker_buffer = MagicMock(
+        side_effect=lambda: events.append("reset")
+    )
+    audio_mock.write_speaker = AsyncMock(
+        side_effect=lambda chunk: events.append(f"write:{chunk!r}")
+    )
+
+    sp = Speaker(tts_mock, audio_mock, profile, enter, exit_)
+    await sp.speak_stream(_aiter(["Hi."]))
+
+    # reset must come before enter (enter is deferred until first
+    # chunk), and enter must happen immediately before the first
+    # write_speaker call.
+    assert events[0] == "reset"
+    assert events[1] == "enter"
+    assert events[2].startswith("write:")
+    assert events[-1] == "exit"
+
+
+async def test_no_exit_when_tts_fails_before_first_chunk(
+    profile, audio_mock, fast_sleep
+):
+    """If TTS raises before producing any chunk, no audio plays, so
+    enter/exit must not run. State stays at PROCESSING and the
+    orchestrator handles cleanup."""
+    tts = MagicMock()
+
+    def stream(text, voice):
+        async def _gen():
+            raise RuntimeError("tts down")
+            yield  # pragma: no cover - make this an async generator
+
+        return _gen()
+
+    tts.stream.side_effect = stream
+
+    enter, exit_, calls = _state_hooks()
+    sp = Speaker(tts, audio_mock, profile, enter, exit_)
+
+    await sp.speak_stream(_aiter(["Hi."]))
+
+    assert calls == []
+    audio_mock.write_speaker.assert_not_awaited()
