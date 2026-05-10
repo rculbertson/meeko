@@ -58,7 +58,13 @@ class Speaker:
         end_marker = object()
 
         async with self._speak_lock:
-            prev = self._enter_speaking()
+            # `prev` stays None until the first PCM chunk is about to be
+            # written — that's when we transition the state machine to
+            # SPEAKING. Entering earlier (at speak_stream's top) makes
+            # the SPEAKING LEDs appear during Claude TTFT + TTS first-
+            # byte, hiding PROCESSING and causing a perceived gap
+            # between LED change and audible speech.
+            prev: Any = None
             try:
                 self._audio.reset_speaker_buffer()
                 voice = self._profile.voice or DEFAULT_VOICE
@@ -86,7 +92,7 @@ class Speaker:
                     await outer.put(end_marker)
 
                 async def consume() -> None:
-                    nonlocal t_first_play
+                    nonlocal t_first_play, prev
                     first_sentence = True
                     while True:
                         inner = await outer.get()
@@ -105,6 +111,7 @@ class Speaker:
                                     "[timing] first_audio_to_speaker=%dms",
                                     int((t_first_play - t_start) * 1000),
                                 )
+                                prev = self._enter_speaking()
                             await self._audio.write_speaker(chunk)
 
                 cancelled = False
@@ -136,7 +143,8 @@ class Speaker:
                     await asyncio.sleep(1.0)
                     self._audio.drain_mic_queue()
             finally:
-                self._exit_speaking(prev)
+                if prev is not None:
+                    self._exit_speaking(prev)
                 logger.debug("speak complete")
 
     async def speak(self, text: str) -> None:
