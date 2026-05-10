@@ -254,7 +254,9 @@ def test_animation_preempted_by_new_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A state change arriving mid-flash should abort the sleep so the
-    user's barge-in isn't stuck behind a 3s red breath."""
+    user's barge-in isn't stuck behind a 3s red breath, and the worker
+    must not re-apply the pre-flash state on the way out — that would
+    cause a one-frame flicker before the new state takes hold."""
     # Long enough that the test would hang if preemption didn't work.
     monkeypatch.setattr(leds, "_ERROR_FLASH_S", 5.0)
     fake = FakeUsbDevice()
@@ -267,24 +269,53 @@ def test_animation_preempted_by_new_state(
         # Wait until the error flash has issued its 4 setup writes:
         _wait_for_calls(fake, 6, timeout=1.0)
         # Now interrupt with a new state. The flash should abort early
-        # and the new state should be applied.
+        # and the new state should be applied directly with no
+        # restoration of the pre-flash LISTENING state in between.
         controller.set_state(LedState.PROCESSING)
-        # PROCESSING adds 4 writes, plus the auto-restore from the
-        # interrupted error (LISTENING solid = 2 writes) gets queued
-        # before PROCESSING. Eventually the last write is the PROCESSING
-        # breath effect.
-        end = time.monotonic() + 2.0
-        while time.monotonic() < end:
-            calls = fake.snapshot()
-            if len(calls) >= 8 and calls[-1] == _vendor_out_call(
-                12, bytes([EFFECT_BREATH])
-            ):
-                break
-            time.sleep(0.02)
-        else:
-            raise AssertionError(
-                f"PROCESSING state was not applied; calls={fake.snapshot()}"
-            )
+        # Expected writes: LISTENING (2) + error setup (4) + PROCESSING
+        # (4) = 10. If the worker restored LISTENING after the
+        # interrupted flash there would be 12 writes.
+        _wait_for_calls(fake, 10, timeout=2.0)
+        calls = fake.snapshot()
+        assert calls[-1] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
+        assert len(calls) == 10, (
+            f"Expected exactly 10 writes (no LISTENING restore between flash "
+            f"and PROCESSING), got {len(calls)}: {calls}"
+        )
+        # The writes after the error setup must be the PROCESSING block,
+        # not a LISTENING restore.
+        assert calls[6] == _vendor_out_call(16, struct.pack("<I", PALETTE.processing))
+    finally:
+        controller.close()
+
+
+def test_session_transition_preempted_skips_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same flicker-avoidance check as the error-flash version, but for
+    session_transition() — the rainbow sweep must not bookend back to
+    the previous state when a new state is queued mid-flash."""
+    monkeypatch.setattr(leds, "_SESSION_FLASH_S", 5.0)
+    fake = FakeUsbDevice()
+    controller = _make_controller(fake)
+    controller.start()
+    try:
+        controller.set_state(LedState.LISTENING)
+        _wait_for_calls(fake, 2)
+        controller.session_transition()
+        # Rainbow flash setup is 3 writes (brightness, speed, effect).
+        _wait_for_calls(fake, 5, timeout=1.0)
+        controller.set_state(LedState.PROCESSING)
+        # LISTENING (2) + rainbow setup (3) + PROCESSING (4) = 9. A
+        # spurious LISTENING restore would push it to 11.
+        _wait_for_calls(fake, 9, timeout=2.0)
+        calls = fake.snapshot()
+        assert calls[-1] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
+        assert len(calls) == 9, (
+            f"Expected exactly 9 writes (no LISTENING restore between rainbow "
+            f"and PROCESSING), got {len(calls)}: {calls}"
+        )
+        assert calls[5] == _vendor_out_call(16, struct.pack("<I", PALETTE.processing))
     finally:
         controller.close()
 

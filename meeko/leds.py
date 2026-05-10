@@ -280,12 +280,12 @@ class LedController:
                         self._apply_state(action.state)
                         self._current_state = action.state
                     elif action.kind == "session":
-                        self._apply_session_flash()
-                        if self._current_state is not None:
+                        interrupted = self._apply_session_flash()
+                        if not interrupted and self._current_state is not None:
                             self._apply_state(self._current_state)
                     elif action.kind == "error":
-                        self._apply_error_flash()
-                        if self._current_state is not None:
+                        interrupted = self._apply_error_flash()
+                        if not interrupted and self._current_state is not None:
                             self._apply_state(self._current_state)
                 except Exception:
                     logger.exception("LED: command failed")
@@ -325,22 +325,26 @@ class LedController:
         except Exception:
             pass
 
-    def _apply_session_flash(self) -> None:
+    def _apply_session_flash(self) -> bool:
+        """Returns True if interrupted by a queued action, False if the
+        full flash duration elapsed."""
         assert self._device is not None
         d = self._device
         d.set_brightness(PALETTE.breath_brightness)
         d.set_speed(8)  # snappy sweep
         d.set_effect(EFFECT_RAINBOW)
-        self._sleep_or_interrupt(_SESSION_FLASH_S)
+        return self._sleep_or_interrupt(_SESSION_FLASH_S)
 
-    def _apply_error_flash(self) -> None:
+    def _apply_error_flash(self) -> bool:
+        """Returns True if interrupted by a queued action, False if the
+        full flash duration elapsed."""
         assert self._device is not None
         d = self._device
         d.set_color(PALETTE.error)
         d.set_brightness(PALETTE.breath_brightness)
         d.set_speed(2)
         d.set_effect(EFFECT_BREATH)
-        self._sleep_or_interrupt(_ERROR_FLASH_S)
+        return self._sleep_or_interrupt(_ERROR_FLASH_S)
 
     def _sleep_or_interrupt(self, total_s: float) -> bool:
         """Sleep up to ``total_s``; abort early if new work arrives.
