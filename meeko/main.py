@@ -569,7 +569,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     def request_barge_in() -> None:
         """Cancel the in-flight speak task, if any. Called from
-        pull_stt_events when StartOfTurn fires during SPEAKING."""
+        pull_stt_events when StartOfTurn fires during SPEAKING (the
+        assistant is talking) or PROCESSING (the assistant's reply is
+        still being generated; user has changed their mind)."""
         nonlocal barge_in_requested
         # Flip state synchronously so any EndOfTurn arriving before the
         # cancel propagates through drive_turns isn't dropped as echo
