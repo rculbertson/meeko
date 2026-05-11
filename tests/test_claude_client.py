@@ -446,6 +446,249 @@ async def test_compaction_block_round_trips_into_next_turn(monkeypatch):
     assert prior_assistant["content"][0]["type"] == "compaction"
 
 
+def test_serialize_server_tool_use_strips_helper_fields():
+    from meeko.claude_client import _serialize_block
+
+    block = SimpleNamespace(
+        type="server_tool_use",
+        id="srvtoolu_abc",
+        name="web_search",
+        input={"query": "claude shannon"},
+        # Mimic an SDK helper field that the Messages API rejects on input.
+        parsed_output={"foo": "bar"},
+    )
+    assert _serialize_block(block) == {
+        "type": "server_tool_use",
+        "id": "srvtoolu_abc",
+        "name": "web_search",
+        "input": {"query": "claude shannon"},
+    }
+
+
+def test_serialize_web_search_tool_result_preserves_encrypted_content():
+    from meeko.claude_client import _serialize_block
+
+    result_item = SimpleNamespace(
+        type="web_search_result",
+        url="https://example.com/a",
+        title="Example",
+        encrypted_content="ENC1",
+        page_age="April 30, 2025",
+        # SDK helper that must not survive into the next request.
+        extra_helper="strip-me",
+    )
+    block = SimpleNamespace(
+        type="web_search_tool_result",
+        tool_use_id="srvtoolu_abc",
+        content=[result_item],
+    )
+    serialized = _serialize_block(block)
+    assert serialized["type"] == "web_search_tool_result"
+    assert serialized["tool_use_id"] == "srvtoolu_abc"
+    [item] = serialized["content"]
+    assert item == {
+        "type": "web_search_result",
+        "url": "https://example.com/a",
+        "title": "Example",
+        "encrypted_content": "ENC1",
+        "page_age": "April 30, 2025",
+    }
+
+
+def test_serialize_web_search_tool_result_error_shape():
+    from meeko.claude_client import _serialize_block
+
+    error_content = SimpleNamespace(
+        type="web_search_tool_result_error",
+        error_code="max_uses_exceeded",
+        model_dump=lambda: {
+            "type": "web_search_tool_result_error",
+            "error_code": "max_uses_exceeded",
+        },
+    )
+    block = SimpleNamespace(
+        type="web_search_tool_result",
+        tool_use_id="srvtoolu_err",
+        content=error_content,
+    )
+    serialized = _serialize_block(block)
+    assert serialized["content"] == {
+        "type": "web_search_tool_result_error",
+        "error_code": "max_uses_exceeded",
+    }
+
+
+def test_web_search_tool_included_by_default(fake_anthropic):
+    client = _make_client()
+    types = [t.get("type") for t in client._tools]
+    assert "web_search_20260209" in types
+
+
+def test_web_search_tool_disabled_via_env(monkeypatch):
+    """When MEEKO_WEB_SEARCH_DISABLED=1, the server tool is not appended."""
+    import importlib
+
+    monkeypatch.setenv("MEEKO_WEB_SEARCH_DISABLED", "1")
+    reloaded = importlib.reload(claude_client_module)
+    try:
+        assert reloaded.WEB_SEARCH_ENABLED is False
+        client = reloaded.ClaudeClient(
+            api_key="k",
+            system_prompt="sys",
+            dispatcher=reloaded.ToolDispatcher()
+            if hasattr(reloaded, "ToolDispatcher")
+            else ToolDispatcher(),
+        )
+        types = [t.get("type") for t in client._tools]
+        assert "web_search_20260209" not in types
+    finally:
+        monkeypatch.delenv("MEEKO_WEB_SEARCH_DISABLED", raising=False)
+        importlib.reload(claude_client_module)
+
+
+class _PauseThenEndStream(_FakeStream):
+    """First-round stream returns stop_reason=pause_turn so the loop must
+    re-enter without dispatching tools; second-round behaves normally."""
+
+    def __init__(
+        self,
+        captured: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        round_counter: dict[str, int],
+    ):
+        super().__init__(captured, kwargs)
+        self._round = round_counter
+
+    @property
+    def text_stream(self):
+        async def _iter():
+            if self._round["n"] == 0:
+                yield "Searching. "
+            else:
+                yield "Done."
+
+        return _iter()
+
+    async def get_final_message(self):
+        if self._round["n"] == 0:
+            self._round["n"] += 1
+            text_block = SimpleNamespace(type="text", text="Searching. ")
+            return SimpleNamespace(
+                content=[text_block],
+                stop_reason="pause_turn",
+                usage=SimpleNamespace(
+                    input_tokens=10,
+                    output_tokens=2,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                ),
+            )
+        text_block = SimpleNamespace(type="text", text="Done.")
+        return SimpleNamespace(
+            content=[text_block],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(
+                input_tokens=12,
+                output_tokens=2,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pause_turn_continues_loop_without_dispatch(monkeypatch):
+    captured: list[dict[str, Any]] = []
+    round_counter = {"n": 0}
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return _PauseThenEndStream(captured, kwargs, round_counter)
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+
+    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    await _drain(client.stream_turn("Search the web."))
+
+    # Two rounds: first returned pause_turn, second returned end_turn.
+    assert len(captured) == 2
+
+    # Round 2's request sent the paused assistant content as a transient
+    # trailing message so the server can resume.
+    round2_msgs = captured[1]["messages"]
+    assert round2_msgs[-1]["role"] == "assistant"
+    paused_content = round2_msgs[-1]["content"]
+    paused_texts = [b.get("text") for b in paused_content if b.get("type") == "text"]
+    assert any(t and "Searching" in t for t in paused_texts)
+
+    # In-memory history must stay user/assistant-alternating — only one
+    # assistant message per logical turn, with paused + continuation
+    # blocks merged into a single commit.
+    roles = [m["role"] for m in client._messages]
+    assert roles == ["user", "assistant"]
+    merged = client._messages[-1]["content"]
+    merged_text = "".join(b["text"] for b in merged if b.get("type") == "text")
+    assert "Searching" in merged_text and "Done" in merged_text
+
+
+class _AlwaysPauseStream(_FakeStream):
+    """Stream that always returns stop_reason=pause_turn so the round
+    loop will exhaust its budget without ever committing."""
+
+    @property
+    def text_stream(self):
+        async def _iter():
+            yield "thinking. "
+
+        return _iter()
+
+    async def get_final_message(self):
+        text_block = SimpleNamespace(type="text", text="thinking. ")
+        return SimpleNamespace(
+            content=[text_block],
+            stop_reason="pause_turn",
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=2,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pause_turn_flushed_when_round_budget_exhausted(monkeypatch):
+    """If every round returns pause_turn, the accumulated paused blocks
+    must still be committed at loop exit. Otherwise the next user turn
+    would stack on an orphan user message and 400 the API."""
+    captured: list[dict[str, Any]] = []
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return _AlwaysPauseStream(captured, kwargs)
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    await _drain(client.stream_turn("hello"))
+
+    # MAX_TOOL_ROUNDS rounds, all pause_turn.
+    assert len(captured) == claude_client_module.MAX_TOOL_ROUNDS
+    # Despite the exhaustion, history must end with the assistant turn
+    # so the next user turn stays user/assistant-alternating.
+    roles = [m["role"] for m in client._messages]
+    assert roles == ["user", "assistant"]
+
+
 def test_compaction_trigger_env_var_override(monkeypatch):
     """Reloading the module with the env var set picks up a new threshold
     and threads it into `_CONTEXT_MANAGEMENT`."""
