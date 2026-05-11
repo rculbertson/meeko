@@ -68,6 +68,8 @@ class MeekoConfig:
     wake_word_disabled: bool = False
     # claude
     compaction_trigger_tokens: int = 150000
+    web_search_enabled: bool = True
+    web_search_max_uses: int = 3
 
 
 def load_profiles(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Profile]:
@@ -230,6 +232,17 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
             claude.get("compaction_trigger_tokens", defaults.compaction_trigger_tokens)
         ),
     )
+    # Web search: prior env contract was MEEKO_WEB_SEARCH_DISABLED=1 to
+    # disable; we keep that as a one-way override on top of the TOML value.
+    web_search_enabled = bool(
+        claude.get("web_search_enabled", defaults.web_search_enabled)
+    )
+    if _env_flag("MEEKO_WEB_SEARCH_DISABLED"):
+        web_search_enabled = False
+    web_search_max_uses = _int_env(
+        "MEEKO_WEB_SEARCH_MAX_USES",
+        int(claude.get("web_search_max_uses", defaults.web_search_max_uses)),
+    )
 
     return MeekoConfig(
         log_level=log_level,
@@ -245,4 +258,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
         wake_word_threshold=wake_word_threshold,
         wake_word_disabled=wake_word_disabled,
         compaction_trigger_tokens=compaction_trigger_tokens,
+        web_search_enabled=web_search_enabled,
+        web_search_max_uses=web_search_max_uses,
     )

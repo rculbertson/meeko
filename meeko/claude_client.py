@@ -23,7 +23,7 @@ logger = logging.getLogger("meeko")
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 10
 
 # Server-side compaction (beta `compact-2026-01-12`). When the API sees
 # input tokens cross this threshold it summarizes the early portion of the
@@ -34,6 +34,14 @@ COMPACTION_BETA = "compact-2026-01-12"
 COMPACTION_STRATEGY = "compact_20260112"
 DEFAULT_COMPACTION_TRIGGER_TOKENS = 150000
 
+# Anthropic-hosted web search server tool. When enabled, Sonnet decides
+# per-turn whether to issue searches; results are inlined into the
+# assistant message as `server_tool_use` + `web_search_tool_result`
+# blocks without any client-side dispatch. `max_uses` caps worst-case
+# latency and cost per turn ($10 per 1k searches).
+DEFAULT_WEB_SEARCH_ENABLED = True
+DEFAULT_WEB_SEARCH_MAX_USES = 3
+
 
 def _context_management(trigger_tokens: int) -> dict:
     return {
@@ -43,6 +51,14 @@ def _context_management(trigger_tokens: int) -> dict:
                 "trigger": {"type": "input_tokens", "value": trigger_tokens},
             }
         ]
+    }
+
+
+def _web_search_tool(max_uses: int) -> dict:
+    return {
+        "type": "web_search_20260209",
+        "name": "web_search",
+        "max_uses": max_uses,
     }
 
 
@@ -71,9 +87,53 @@ def _serialize_block(block: Any) -> dict[str, Any]:
             "name": block.name,
             "input": block.input,
         }
+    if block.type == "server_tool_use":
+        return {
+            "type": "server_tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": block.input,
+        }
+    if block.type == "web_search_tool_result":
+        # `content` can be either a list of web_search_result blocks
+        # (success) or a single error dict (e.g. max_uses_exceeded).
+        # Preserve whichever the server sent — `encrypted_content` on
+        # each result is required for citation continuity in later
+        # turns.
+        return {
+            "type": "web_search_tool_result",
+            "tool_use_id": block.tool_use_id,
+            "content": _serialize_web_search_content(block.content),
+        }
     if block.type == "compaction":
         return {"type": "compaction", "content": block.content}
     return block.model_dump()
+
+
+def _serialize_web_search_content(content: Any) -> Any:
+    """Strip helper fields from web_search_tool_result.content so the
+    Messages API accepts it as input on the next turn."""
+    if isinstance(content, list):
+        out: list[dict[str, Any]] = []
+        for item in content:
+            item_type = getattr(item, "type", None)
+            if item_type == "web_search_result":
+                out.append(
+                    {
+                        "type": "web_search_result",
+                        "url": item.url,
+                        "title": item.title,
+                        "encrypted_content": item.encrypted_content,
+                        "page_age": getattr(item, "page_age", None),
+                    }
+                )
+            else:
+                out.append(item.model_dump() if hasattr(item, "model_dump") else item)
+        return out
+    # Error shape: {"type": "web_search_tool_result_error", "error_code": ...}
+    if hasattr(content, "model_dump"):
+        return content.model_dump()
+    return content
 
 
 def _pop_sentences(buffer: str) -> tuple[list[str], str]:
@@ -166,11 +226,15 @@ class ClaudeClient:
         store: SessionStore | None = None,
         session_id: str | None = None,
         compaction_trigger_tokens: int = DEFAULT_COMPACTION_TRIGGER_TOKENS,
+        web_search_enabled: bool = DEFAULT_WEB_SEARCH_ENABLED,
+        web_search_max_uses: int = DEFAULT_WEB_SEARCH_MAX_USES,
     ):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._profile_prompt = system_prompt
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
+        if web_search_enabled:
+            self._tools = self._tools + [_web_search_tool(web_search_max_uses)]
         self._messages: list[dict[str, Any]] = []
         self._store = store
         self._session_id = session_id
@@ -204,6 +268,19 @@ class ClaudeClient:
         self._messages.append({"role": "user", "content": user_text})
         await self._persist("user", user_text)
 
+        # When a round returns stop_reason=pause_turn (long-running
+        # server tool like web_search), we must replay the partial
+        # assistant content back to the API to resume. But the API
+        # requires user/assistant alternation across rounds, so we
+        # can't commit the partial as its own message and then commit
+        # the continuation as a second assistant message — the next
+        # user turn would produce [..., assistant, assistant, user]
+        # and 400. Carry the paused content here, send it as a
+        # transient assistant message on the next round, and merge it
+        # with the continuation's blocks into a single committed turn
+        # once the server finishes.
+        paused_blocks: list[dict[str, Any]] = []
+
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
             ttft_ms: int | None = None
@@ -214,13 +291,19 @@ class ClaudeClient:
             # rounds commit full assistant_blocks via the normal path.
             streamed_text = ""
 
+            request_messages = self._messages
+            if paused_blocks:
+                request_messages = self._messages + [
+                    {"role": "assistant", "content": paused_blocks}
+                ]
+
             try:
                 async with self._client.beta.messages.stream(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
                     system=_system_blocks(self._profile_prompt),
                     tools=self._tools,
-                    messages=_with_cache_breakpoint(self._messages),
+                    messages=_with_cache_breakpoint(request_messages),
                     betas=[COMPACTION_BETA],
                     context_management=self._context_management,
                 ) as stream:
@@ -239,10 +322,25 @@ class ClaudeClient:
                             yield s
                     final = await stream.get_final_message()
             except asyncio.CancelledError, GeneratorExit, Exception:
-                await self._commit_partial_assistant(streamed_text)
+                await self._commit_partial_assistant(streamed_text, paused_blocks)
                 raise
 
-            await self._commit_full_assistant(final)
+            new_blocks = [_serialize_block(b) for b in final.content]
+            combined_blocks = paused_blocks + new_blocks
+
+            if final.stop_reason == "pause_turn":
+                # Server-side tool still working. Carry the partial
+                # content forward; defer the commit until the resume
+                # completes so history stays user/assistant-alternating.
+                paused_blocks = combined_blocks
+                tail = buffer.strip()
+                if tail:
+                    yield tail
+                self._log_round_usage(round_idx, api_start, final)
+                continue
+
+            await self._commit_full_assistant(combined_blocks)
+            paused_blocks = []
 
             tail = buffer.strip()
             if tail:
@@ -255,9 +353,19 @@ class ClaudeClient:
 
             await self._dispatch_tool_calls(final)
 
+        # Exhausted the round budget. If we exited mid-pause (every
+        # round returned pause_turn) the paused content was never
+        # committed — flush it now so the next user turn doesn't stack
+        # on an orphan user message and 400 the API.
+        if paused_blocks:
+            await self._commit_full_assistant(paused_blocks)
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
 
-    async def _commit_partial_assistant(self, streamed_text: str) -> None:
+    async def _commit_partial_assistant(
+        self,
+        streamed_text: str,
+        paused_blocks: list[dict[str, Any]] | None = None,
+    ) -> None:
         # Anything that terminates the stream early — barge-in
         # (CancelledError), consumer-driven GeneratorExit, or a
         # network/API error (Exception) — leaves the user message
@@ -266,9 +374,12 @@ class ClaudeClient:
         # next user turn doesn't produce two consecutive user messages
         # and trip a 400 from the API. Empty stream gets a "…"
         # placeholder rather than an empty text block (which the API
-        # rejects).
+        # rejects). If we cancelled mid-resume after a pause_turn,
+        # prepend the carried blocks so the partial covers the whole
+        # paused turn.
         text = streamed_text.strip() or "…"
-        partial = [{"type": "text", "text": text}]
+        partial: list[dict[str, Any]] = list(paused_blocks or [])
+        partial.append({"type": "text", "text": text})
         self._messages.append({"role": "assistant", "content": partial})
         # Best-effort persistence: during process shutdown asyncio
         # cleans up pending async generators after the SessionStore
@@ -283,7 +394,9 @@ class ClaudeClient:
                 exc_info=True,
             )
 
-    async def _commit_full_assistant(self, final: Any) -> None:
+    async def _commit_full_assistant(
+        self, assistant_blocks: list[dict[str, Any]]
+    ) -> None:
         # Commit the full assistant turn to history *before* the caller
         # yields the trailing partial sentence. If the consumer cancels
         # while suspended at `yield tail`, GeneratorExit fires outside
@@ -294,7 +407,6 @@ class ClaudeClient:
         # transcripts never carry derived state. The block stays
         # in-memory so the next turn's `messages=` payload includes it
         # and the server doesn't re-summarize the prefix.
-        assistant_blocks = [_serialize_block(block) for block in final.content]
         self._messages.append({"role": "assistant", "content": assistant_blocks})
         persisted_blocks = [
             b for b in assistant_blocks if b.get("type") != "compaction"

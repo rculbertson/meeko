@@ -411,6 +411,8 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         store=store,
         session_id=session_id,
         compaction_trigger_tokens=config.compaction_trigger_tokens,
+        web_search_enabled=config.web_search_enabled,
+        web_search_max_uses=config.web_search_max_uses,
     )
     if history:
         claude.load_history(history)

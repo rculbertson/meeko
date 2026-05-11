@@ -36,6 +36,8 @@ def test_defaults_match_historical_env_defaults(tmp_path: Path):
     assert cfg.wake_word_threshold == 0.96
     assert cfg.wake_word_disabled is False
     assert cfg.compaction_trigger_tokens == 150000
+    assert cfg.web_search_enabled is True
+    assert cfg.web_search_max_uses == 3
 
 
 def test_loads_values_from_toml(tmp_path: Path):
@@ -129,3 +131,15 @@ def test_db_path_from_toml_expands_tilde(
 def test_missing_toml_falls_back_to_defaults(tmp_path: Path):
     cfg = load_config(tmp_path / "does-not-exist.toml")
     assert cfg == MeekoConfig()
+
+
+def test_web_search_disabled_env_overrides_toml_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """MEEKO_WEB_SEARCH_DISABLED=1 is a one-way override: it forces
+    web_search off even if the TOML opts in."""
+    toml_file = tmp_path / "meeko.toml"
+    toml_file.write_text("[claude]\nweb_search_enabled = true\n")
+    monkeypatch.setenv("MEEKO_WEB_SEARCH_DISABLED", "1")
+    cfg = load_config(toml_file)
+    assert cfg.web_search_enabled is False

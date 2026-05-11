@@ -22,6 +22,8 @@
 
 # [claude]
 # compaction_trigger_tokens = 150000  # MEEKO_COMPACTION_TRIGGER_TOKENS
+# web_search_enabled = true           # MEEKO_WEB_SEARCH_DISABLED=1 forces off
+# web_search_max_uses = 3             # MEEKO_WEB_SEARCH_MAX_USES
 
 [profiles.default]
 wake_word = "meeko"
