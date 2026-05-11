@@ -545,9 +545,23 @@ async def test_pause_turn_continues_loop_without_dispatch(monkeypatch):
 
     # Two rounds: first returned pause_turn, second returned end_turn.
     assert len(captured) == 2
-    # Loop didn't append a tool_result block between rounds — the
-    # second call's last message is still the assistant reply.
-    assert captured[1]["messages"][-1]["role"] == "assistant"
+
+    # Round 2's request sent the paused assistant content as a transient
+    # trailing message so the server can resume.
+    round2_msgs = captured[1]["messages"]
+    assert round2_msgs[-1]["role"] == "assistant"
+    paused_content = round2_msgs[-1]["content"]
+    paused_texts = [b.get("text") for b in paused_content if b.get("type") == "text"]
+    assert any(t and "Searching" in t for t in paused_texts)
+
+    # In-memory history must stay user/assistant-alternating — only one
+    # assistant message per logical turn, with paused + continuation
+    # blocks merged into a single commit.
+    roles = [m["role"] for m in client._messages]
+    assert roles == ["user", "assistant"]
+    merged = client._messages[-1]["content"]
+    merged_text = "".join(b["text"] for b in merged if b.get("type") == "text")
+    assert "Searching" in merged_text and "Done" in merged_text
 
 
 def test_compaction_trigger_env_var_override(monkeypatch):
