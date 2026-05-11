@@ -345,6 +345,12 @@ class ClaudeClient:
 
             await self._dispatch_tool_calls(final)
 
+        # Exhausted the round budget. If we exited mid-pause (every
+        # round returned pause_turn) the paused content was never
+        # committed — flush it now so the next user turn doesn't stack
+        # on an orphan user message and 400 the API.
+        if paused_blocks:
+            await self._commit_full_assistant(paused_blocks)
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
 
     async def _commit_partial_assistant(

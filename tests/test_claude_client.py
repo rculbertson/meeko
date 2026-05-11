@@ -636,6 +636,59 @@ async def test_pause_turn_continues_loop_without_dispatch(monkeypatch):
     assert "Searching" in merged_text and "Done" in merged_text
 
 
+class _AlwaysPauseStream(_FakeStream):
+    """Stream that always returns stop_reason=pause_turn so the round
+    loop will exhaust its budget without ever committing."""
+
+    @property
+    def text_stream(self):
+        async def _iter():
+            yield "thinking. "
+
+        return _iter()
+
+    async def get_final_message(self):
+        text_block = SimpleNamespace(type="text", text="thinking. ")
+        return SimpleNamespace(
+            content=[text_block],
+            stop_reason="pause_turn",
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=2,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pause_turn_flushed_when_round_budget_exhausted(monkeypatch):
+    """If every round returns pause_turn, the accumulated paused blocks
+    must still be committed at loop exit. Otherwise the next user turn
+    would stack on an orphan user message and 400 the API."""
+    captured: list[dict[str, Any]] = []
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return _AlwaysPauseStream(captured, kwargs)
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    await _drain(client.stream_turn("hello"))
+
+    # MAX_TOOL_ROUNDS rounds, all pause_turn.
+    assert len(captured) == claude_client_module.MAX_TOOL_ROUNDS
+    # Despite the exhaustion, history must end with the assistant turn
+    # so the next user turn stays user/assistant-alternating.
+    roles = [m["role"] for m in client._messages]
+    assert roles == ["user", "assistant"]
+
+
 def test_compaction_trigger_env_var_override(monkeypatch):
     """Reloading the module with the env var set picks up a new threshold
     and threads it into `_CONTEXT_MANAGEMENT`."""
