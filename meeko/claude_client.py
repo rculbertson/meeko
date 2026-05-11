@@ -24,7 +24,7 @@ logger = logging.getLogger("meeko")
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 10
 
 # Server-side compaction (beta `compact-2026-01-12`). When the API sees
 # input tokens cross this threshold it summarizes the early portion of the
@@ -83,9 +83,53 @@ def _serialize_block(block: Any) -> dict[str, Any]:
             "name": block.name,
             "input": block.input,
         }
+    if block.type == "server_tool_use":
+        return {
+            "type": "server_tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": block.input,
+        }
+    if block.type == "web_search_tool_result":
+        # `content` can be either a list of web_search_result blocks
+        # (success) or a single error dict (e.g. max_uses_exceeded).
+        # Preserve whichever the server sent — `encrypted_content` on
+        # each result is required for citation continuity in later
+        # turns.
+        return {
+            "type": "web_search_tool_result",
+            "tool_use_id": block.tool_use_id,
+            "content": _serialize_web_search_content(block.content),
+        }
     if block.type == "compaction":
         return {"type": "compaction", "content": block.content}
     return block.model_dump()
+
+
+def _serialize_web_search_content(content: Any) -> Any:
+    """Strip helper fields from web_search_tool_result.content so the
+    Messages API accepts it as input on the next turn."""
+    if isinstance(content, list):
+        out: list[dict[str, Any]] = []
+        for item in content:
+            item_type = getattr(item, "type", None)
+            if item_type == "web_search_result":
+                out.append(
+                    {
+                        "type": "web_search_result",
+                        "url": item.url,
+                        "title": item.title,
+                        "encrypted_content": item.encrypted_content,
+                        "page_age": getattr(item, "page_age", None),
+                    }
+                )
+            else:
+                out.append(item.model_dump() if hasattr(item, "model_dump") else item)
+        return out
+    # Error shape: {"type": "web_search_tool_result_error", "error_code": ...}
+    if hasattr(content, "model_dump"):
+        return content.model_dump()
+    return content
 
 
 def _pop_sentences(buffer: str) -> tuple[list[str], str]:

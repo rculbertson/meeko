@@ -446,6 +446,78 @@ async def test_compaction_block_round_trips_into_next_turn(monkeypatch):
     assert prior_assistant["content"][0]["type"] == "compaction"
 
 
+def test_serialize_server_tool_use_strips_helper_fields():
+    from meeko.claude_client import _serialize_block
+
+    block = SimpleNamespace(
+        type="server_tool_use",
+        id="srvtoolu_abc",
+        name="web_search",
+        input={"query": "claude shannon"},
+        # Mimic an SDK helper field that the Messages API rejects on input.
+        parsed_output={"foo": "bar"},
+    )
+    assert _serialize_block(block) == {
+        "type": "server_tool_use",
+        "id": "srvtoolu_abc",
+        "name": "web_search",
+        "input": {"query": "claude shannon"},
+    }
+
+
+def test_serialize_web_search_tool_result_preserves_encrypted_content():
+    from meeko.claude_client import _serialize_block
+
+    result_item = SimpleNamespace(
+        type="web_search_result",
+        url="https://example.com/a",
+        title="Example",
+        encrypted_content="ENC1",
+        page_age="April 30, 2025",
+        # SDK helper that must not survive into the next request.
+        extra_helper="strip-me",
+    )
+    block = SimpleNamespace(
+        type="web_search_tool_result",
+        tool_use_id="srvtoolu_abc",
+        content=[result_item],
+    )
+    serialized = _serialize_block(block)
+    assert serialized["type"] == "web_search_tool_result"
+    assert serialized["tool_use_id"] == "srvtoolu_abc"
+    [item] = serialized["content"]
+    assert item == {
+        "type": "web_search_result",
+        "url": "https://example.com/a",
+        "title": "Example",
+        "encrypted_content": "ENC1",
+        "page_age": "April 30, 2025",
+    }
+
+
+def test_serialize_web_search_tool_result_error_shape():
+    from meeko.claude_client import _serialize_block
+
+    error_content = SimpleNamespace(
+        type="web_search_tool_result_error",
+        error_code="max_uses_exceeded",
+        model_dump=lambda: {
+            "type": "web_search_tool_result_error",
+            "error_code": "max_uses_exceeded",
+        },
+    )
+    block = SimpleNamespace(
+        type="web_search_tool_result",
+        tool_use_id="srvtoolu_err",
+        content=error_content,
+    )
+    serialized = _serialize_block(block)
+    assert serialized["content"] == {
+        "type": "web_search_tool_result_error",
+        "error_code": "max_uses_exceeded",
+    }
+
+
 def test_web_search_tool_included_by_default(fake_anthropic):
     client = _make_client()
     types = [t.get("type") for t in client._tools]
