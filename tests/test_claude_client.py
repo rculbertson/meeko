@@ -446,6 +446,110 @@ async def test_compaction_block_round_trips_into_next_turn(monkeypatch):
     assert prior_assistant["content"][0]["type"] == "compaction"
 
 
+def test_web_search_tool_included_by_default(fake_anthropic):
+    client = _make_client()
+    types = [t.get("type") for t in client._tools]
+    assert "web_search_20260209" in types
+
+
+def test_web_search_tool_disabled_via_env(monkeypatch):
+    """When MEEKO_WEB_SEARCH_DISABLED=1, the server tool is not appended."""
+    import importlib
+
+    monkeypatch.setenv("MEEKO_WEB_SEARCH_DISABLED", "1")
+    reloaded = importlib.reload(claude_client_module)
+    try:
+        assert reloaded.WEB_SEARCH_ENABLED is False
+        client = reloaded.ClaudeClient(
+            api_key="k",
+            system_prompt="sys",
+            dispatcher=reloaded.ToolDispatcher()
+            if hasattr(reloaded, "ToolDispatcher")
+            else ToolDispatcher(),
+        )
+        types = [t.get("type") for t in client._tools]
+        assert "web_search_20260209" not in types
+    finally:
+        monkeypatch.delenv("MEEKO_WEB_SEARCH_DISABLED", raising=False)
+        importlib.reload(claude_client_module)
+
+
+class _PauseThenEndStream(_FakeStream):
+    """First-round stream returns stop_reason=pause_turn so the loop must
+    re-enter without dispatching tools; second-round behaves normally."""
+
+    def __init__(
+        self,
+        captured: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        round_counter: dict[str, int],
+    ):
+        super().__init__(captured, kwargs)
+        self._round = round_counter
+
+    @property
+    def text_stream(self):
+        async def _iter():
+            if self._round["n"] == 0:
+                yield "Searching. "
+            else:
+                yield "Done."
+
+        return _iter()
+
+    async def get_final_message(self):
+        if self._round["n"] == 0:
+            self._round["n"] += 1
+            text_block = SimpleNamespace(type="text", text="Searching. ")
+            return SimpleNamespace(
+                content=[text_block],
+                stop_reason="pause_turn",
+                usage=SimpleNamespace(
+                    input_tokens=10,
+                    output_tokens=2,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                ),
+            )
+        text_block = SimpleNamespace(type="text", text="Done.")
+        return SimpleNamespace(
+            content=[text_block],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(
+                input_tokens=12,
+                output_tokens=2,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pause_turn_continues_loop_without_dispatch(monkeypatch):
+    captured: list[dict[str, Any]] = []
+    round_counter = {"n": 0}
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return _PauseThenEndStream(captured, kwargs, round_counter)
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+
+    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    await _drain(client.stream_turn("Search the web."))
+
+    # Two rounds: first returned pause_turn, second returned end_turn.
+    assert len(captured) == 2
+    # Loop didn't append a tool_result block between rounds — the
+    # second call's last message is still the assistant reply.
+    assert captured[1]["messages"][-1]["role"] == "assistant"
+
+
 def test_compaction_trigger_env_var_override(monkeypatch):
     """Reloading the module with the env var set picks up a new threshold
     and threads it into `_CONTEXT_MANAGEMENT`."""

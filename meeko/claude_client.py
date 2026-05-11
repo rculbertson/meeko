@@ -36,6 +36,19 @@ COMPACTION_STRATEGY = "compact_20260112"
 COMPACTION_TRIGGER_TOKENS = int(
     os.environ.get("MEEKO_COMPACTION_TRIGGER_TOKENS", "150000")
 )
+
+# Anthropic-hosted web search server tool. When enabled, Sonnet decides
+# per-turn whether to issue searches; results are inlined into the
+# assistant message as `server_tool_use` + `web_search_tool_result`
+# blocks without any client-side dispatch. `max_uses` caps worst-case
+# latency and cost per turn ($10 per 1k searches).
+WEB_SEARCH_ENABLED = os.environ.get("MEEKO_WEB_SEARCH_DISABLED") != "1"
+WEB_SEARCH_MAX_USES = int(os.environ.get("MEEKO_WEB_SEARCH_MAX_USES", "3"))
+_WEB_SEARCH_TOOL = {
+    "type": "web_search_20260209",
+    "name": "web_search",
+    "max_uses": WEB_SEARCH_MAX_USES,
+}
 _CONTEXT_MANAGEMENT = {
     "edits": [
         {
@@ -169,6 +182,8 @@ class ClaudeClient:
         self._profile_prompt = system_prompt
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
+        if WEB_SEARCH_ENABLED:
+            self._tools = self._tools + [_WEB_SEARCH_TOOL]
         self._messages: list[dict[str, Any]] = []
         self._store = store
         self._session_id = session_id
@@ -247,6 +262,11 @@ class ClaudeClient:
 
             self._log_round_usage(round_idx, api_start, final)
 
+            if final.stop_reason == "pause_turn":
+                # Server-side tool (e.g. web_search) still working.
+                # Replay the assistant message back to resume — it's
+                # already been committed via _commit_full_assistant.
+                continue
             if final.stop_reason != "tool_use":
                 return
 
