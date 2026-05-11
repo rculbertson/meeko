@@ -22,14 +22,14 @@ return immediately. Useful because some Meeko callsites
 (``request_barge_in``, Speaker enter/exit callbacks) are sync and can't
 await.
 
-If the XVF3800 isn't found, or pyusb/libusb isn't available, or
-``MEEKO_LED_DISABLED=1`` is set, every public call is a no-op.
+If the XVF3800 isn't found, or pyusb/libusb isn't available, or LED
+control is disabled via config (``[system] led_disabled = true`` or
+``MEEKO_LED_DISABLED=1``), every public call is a no-op.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import queue
 import struct
 import threading
@@ -106,14 +106,6 @@ class _Palette:
 
 
 PALETTE = _Palette()
-
-
-def _env_disabled() -> bool:
-    return os.environ.get("MEEKO_LED_DISABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
 
 
 # --- USB transport -------------------------------------------------------
@@ -206,8 +198,11 @@ class LedController:
     def __init__(
         self,
         device_factory: Callable[[], XvfLedDevice | None] = _find_xvf_device,
+        *,
+        disabled: bool = False,
     ) -> None:
         self._device_factory = device_factory
+        self._disabled = disabled
         self._device: XvfLedDevice | None = None
         self._enabled = False
         self._queue: queue.Queue[_Action] = queue.Queue()
@@ -224,8 +219,8 @@ class LedController:
         Safe to call when no device is present — controller stays
         disabled and all methods become no-ops.
         """
-        if _env_disabled():
-            logger.info("LED: MEEKO_LED_DISABLED set; LED control disabled")
+        if self._disabled:
+            logger.info("LED: disabled via config; LED control off")
             return
         self._device = self._device_factory()
         if self._device is None:

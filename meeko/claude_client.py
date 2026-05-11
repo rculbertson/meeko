@@ -8,7 +8,6 @@ begin TTS before the full reply is ready.
 
 import asyncio
 import logging
-import os
 import re
 import time
 from collections.abc import AsyncIterator
@@ -33,17 +32,19 @@ MAX_TOOL_ROUNDS = 5
 # only in the in-memory message array (see `_persist`).
 COMPACTION_BETA = "compact-2026-01-12"
 COMPACTION_STRATEGY = "compact_20260112"
-COMPACTION_TRIGGER_TOKENS = int(
-    os.environ.get("MEEKO_COMPACTION_TRIGGER_TOKENS", "150000")
-)
-_CONTEXT_MANAGEMENT = {
-    "edits": [
-        {
-            "type": COMPACTION_STRATEGY,
-            "trigger": {"type": "input_tokens", "value": COMPACTION_TRIGGER_TOKENS},
-        }
-    ]
-}
+DEFAULT_COMPACTION_TRIGGER_TOKENS = 150000
+
+
+def _context_management(trigger_tokens: int) -> dict:
+    return {
+        "edits": [
+            {
+                "type": COMPACTION_STRATEGY,
+                "trigger": {"type": "input_tokens", "value": trigger_tokens},
+            }
+        ]
+    }
+
 
 # Split on terminal punctuation that looks like a real sentence break:
 #   - not preceded by a capital letter (skips "U.S.", "N.Y.", "Ph.D.")
@@ -164,6 +165,7 @@ class ClaudeClient:
         dispatcher: ToolDispatcher,
         store: SessionStore | None = None,
         session_id: str | None = None,
+        compaction_trigger_tokens: int = DEFAULT_COMPACTION_TRIGGER_TOKENS,
     ):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._profile_prompt = system_prompt
@@ -172,6 +174,7 @@ class ClaudeClient:
         self._messages: list[dict[str, Any]] = []
         self._store = store
         self._session_id = session_id
+        self._context_management = _context_management(compaction_trigger_tokens)
 
     def set_system_prompt(self, prompt: str) -> None:
         self._profile_prompt = prompt
@@ -219,7 +222,7 @@ class ClaudeClient:
                     tools=self._tools,
                     messages=_with_cache_breakpoint(self._messages),
                     betas=[COMPACTION_BETA],
-                    context_management=_CONTEXT_MANAGEMENT,
+                    context_management=self._context_management,
                 ) as stream:
                     async for delta in stream.text_stream:
                         if ttft_ms is None:

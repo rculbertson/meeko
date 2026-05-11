@@ -1,3 +1,28 @@
+# Per-host runtime config. All keys are optional — missing tables fall
+# through to defaults that match the historical env-var behavior. Any
+# MEEKO_* environment variable overrides the value set here.
+
+# [system]
+# log_level = "DEBUG"            # MEEKO_LOG_LEVEL
+# log_target = "file"            # MEEKO_LOG_TARGET — omit for stderr
+# db_path = "~/.meeko/meeko.db"  # MEEKO_DB_PATH
+# led_disabled = false           # MEEKO_LED_DISABLED
+
+# [audio]
+# input_channels = 2             # MEEKO_INPUT_CHANNELS
+# output_channels = 2            # MEEKO_OUTPUT_CHANNELS
+# input_device_index = 0         # MEEKO_INPUT_DEVICE_INDEX
+# output_device_index = 1        # MEEKO_OUTPUT_DEVICE_INDEX
+# mute_mic_while_speaking = false  # MEEKO_MUTE_MIC_WHILE_SPEAKING — set true on Mac built-in
+
+# [wake_word]
+# model = "models/hey_meeko.onnx"  # MEEKO_WAKE_WORD_MODEL
+# threshold = 0.96                 # MEEKO_WAKE_WORD_THRESHOLD
+# disabled = false                 # MEEKO_WAKE_WORD_DISABLED
+
+# [claude]
+# compaction_trigger_tokens = 150000  # MEEKO_COMPACTION_TRIGGER_TOKENS
+
 [profiles.default]
 wake_word = "meeko"
 voice = "mars"

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from meeko.profiles import Profile, load_profiles
+from meeko.config import Profile, load_profiles
 from meeko.tools.profile import ProfileManager, get_tool_definitions
 
 # ---------------------------------------------------------------------------

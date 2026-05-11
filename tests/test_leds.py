@@ -85,9 +85,8 @@ def test_disabled_when_device_missing() -> None:
     controller.close()
 
 
-def test_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MEEKO_LED_DISABLED short-circuits before the device factory runs."""
-    monkeypatch.setenv("MEEKO_LED_DISABLED", "1")
+def test_disabled_kwarg_skips_device_factory() -> None:
+    """disabled=True short-circuits before the device factory runs."""
     factory_called = False
 
     def factory() -> XvfLedDevice | None:
@@ -95,7 +94,7 @@ def test_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
         factory_called = True
         return None
 
-    controller = LedController(device_factory=factory)
+    controller = LedController(device_factory=factory, disabled=True)
     controller.start()
     assert not controller.enabled
     assert not factory_called

@@ -8,7 +8,7 @@ Claude call.
 import logging
 from typing import TYPE_CHECKING
 
-from meeko.profiles import Profile
+from meeko.config import Profile
 from meeko.tools.dispatch import ToolDefinition
 
 if TYPE_CHECKING:

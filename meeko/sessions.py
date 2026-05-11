@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import sqlite3
 import uuid
@@ -63,9 +62,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 
 
 def default_db_path() -> Path:
-    override = os.environ.get("MEEKO_DB_PATH")
-    if override:
-        return Path(override).expanduser()
     return Path.home() / ".meeko" / "meeko.db"
 
 

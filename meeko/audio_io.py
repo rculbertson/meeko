@@ -8,7 +8,6 @@ import array
 import asyncio
 import concurrent.futures
 import logging
-import os
 
 import pyaudio
 
@@ -23,26 +22,10 @@ CHUNK = 800  # 50ms at 16kHz (800 samples * 2 bytes = 1600 bytes per chunk)
 # CoreAudio's system mixer does for apps like Spotify, so we open both
 # streams at the device's native channel count and do the mono <->
 # stereo conversion in Python: take the left channel on input,
-# duplicate mono TTS to both channels on output.
-#
-# Defaults match the ReSpeaker XVF3800 (2-channel input: left =
-# AEC-processed, right = raw/reference; 2-channel output via the 3.5mm
-# jack). Override via env vars when running against a different device
-# (e.g. Mac built-in mic is 1 channel). Device indices default to
-# unset -> PyAudio uses the OS default device; set
-# MEEKO_INPUT_DEVICE_INDEX / MEEKO_OUTPUT_DEVICE_INDEX to pin a
-# specific device. Run `python -m meeko.audio_io` to list indices.
-DEVICE_IN_CHANNELS = int(os.environ.get("MEEKO_INPUT_CHANNELS", "2"))
-DEVICE_OUT_CHANNELS = int(os.environ.get("MEEKO_OUTPUT_CHANNELS", "2"))
-
-
-def _device_index(env_var: str) -> int | None:
-    val = os.environ.get(env_var, "").strip()
-    return int(val) if val else None
-
-
-INPUT_DEVICE_INDEX = _device_index("MEEKO_INPUT_DEVICE_INDEX")
-OUTPUT_DEVICE_INDEX = _device_index("MEEKO_OUTPUT_DEVICE_INDEX")
+# duplicate mono TTS to both channels on output. AudioIO is parameterized
+# on input/output channel count + device index; defaults assume the
+# ReSpeaker XVF3800 (2-ch in, 2-ch out, OS default device). Run
+# `python -m meeko.audio_io` to list device indices.
 
 
 def _left_channel(data: bytes, channels: int) -> bytes:
@@ -71,8 +54,18 @@ MIC_QUEUE_MAX = 10000
 
 
 class AudioIO:
-    def __init__(self, stop_event: asyncio.Event):
+    def __init__(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        input_channels: int = 2,
+        output_channels: int = 2,
+        input_device_index: int | None = None,
+        output_device_index: int | None = None,
+    ):
         self._stop_event = stop_event
+        self._input_channels = input_channels
+        self._output_channels = output_channels
         self._pa = pyaudio.PyAudio()
         self.mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MIC_QUEUE_MAX)
         self._loop = asyncio.get_event_loop()
@@ -80,19 +73,19 @@ class AudioIO:
 
         self._mic_stream = self._pa.open(
             format=FORMAT,
-            channels=DEVICE_IN_CHANNELS,
+            channels=input_channels,
             rate=RATE,
             input=True,
-            input_device_index=INPUT_DEVICE_INDEX,
+            input_device_index=input_device_index,
             frames_per_buffer=CHUNK,
             stream_callback=self._mic_callback,
         )
         self._speaker_stream = self._pa.open(
             format=FORMAT,
-            channels=DEVICE_OUT_CHANNELS,
+            channels=output_channels,
             rate=RATE,
             output=True,
-            output_device_index=OUTPUT_DEVICE_INDEX,
+            output_device_index=output_device_index,
             frames_per_buffer=CHUNK,
         )
         # TTS chunks arrive at arbitrary byte boundaries; an int16 sample
@@ -124,7 +117,7 @@ class AudioIO:
         )
 
     def _mic_callback(self, in_data, frame_count, time_info, status):
-        mono = _left_channel(in_data, DEVICE_IN_CHANNELS)
+        mono = _left_channel(in_data, self._input_channels)
 
         def enqueue() -> None:
             try:
@@ -176,7 +169,7 @@ class AudioIO:
             if self._spk_muted:
                 return
             piece = chunk[offset : offset + mono_slice_bytes]
-            stereo = _mono_to_stereo(piece) if DEVICE_OUT_CHANNELS == 2 else piece
+            stereo = _mono_to_stereo(piece) if self._output_channels == 2 else piece
             await self._loop.run_in_executor(
                 self._spk_executor, self._speaker_stream.write, stereo
             )

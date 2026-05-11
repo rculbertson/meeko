@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from meeko import audio_io as audio_io_mod
-from meeko.audio_io import AudioIO, _device_index, _left_channel, _mono_to_stereo
+from meeko.audio_io import AudioIO, _left_channel, _mono_to_stereo
 
 
 @pytest.fixture
@@ -314,26 +314,6 @@ async def test_close_without_active_capture_does_not_double_stop(pa_factory):
     io.close()
     mic_stream.stop_stream.assert_not_called()
     mic_stream.close.assert_called_once()
-
-
-def test_device_index_unset_returns_none(monkeypatch):
-    monkeypatch.delenv("MEEKO_TEST_INDEX", raising=False)
-    assert _device_index("MEEKO_TEST_INDEX") is None
-
-
-def test_device_index_empty_returns_none(monkeypatch):
-    monkeypatch.setenv("MEEKO_TEST_INDEX", "")
-    assert _device_index("MEEKO_TEST_INDEX") is None
-
-
-def test_device_index_whitespace_returns_none(monkeypatch):
-    monkeypatch.setenv("MEEKO_TEST_INDEX", "   ")
-    assert _device_index("MEEKO_TEST_INDEX") is None
-
-
-def test_device_index_parses_int(monkeypatch):
-    monkeypatch.setenv("MEEKO_TEST_INDEX", "3")
-    assert _device_index("MEEKO_TEST_INDEX") == 3
 
 
 def test_audio_constants_are_sane():

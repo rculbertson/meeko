@@ -309,7 +309,7 @@ async def test_stream_turn_sends_compaction_context_management(fake_anthropic):
                 "type": claude_client_module.COMPACTION_STRATEGY,
                 "trigger": {
                     "type": "input_tokens",
-                    "value": claude_client_module.COMPACTION_TRIGGER_TOKENS,
+                    "value": claude_client_module.DEFAULT_COMPACTION_TRIGGER_TOKENS,
                 },
             }
         ]
@@ -446,20 +446,16 @@ async def test_compaction_block_round_trips_into_next_turn(monkeypatch):
     assert prior_assistant["content"][0]["type"] == "compaction"
 
 
-def test_compaction_trigger_env_var_override(monkeypatch):
-    """Reloading the module with the env var set picks up a new threshold
-    and threads it into `_CONTEXT_MANAGEMENT`."""
-    import importlib
-
-    monkeypatch.setenv("MEEKO_COMPACTION_TRIGGER_TOKENS", "12345")
-    reloaded = importlib.reload(claude_client_module)
-    try:
-        assert reloaded.COMPACTION_TRIGGER_TOKENS == 12345
-        assert reloaded._CONTEXT_MANAGEMENT["edits"][0]["trigger"]["value"] == 12345
-    finally:
-        # Restore the module so later tests in the session see the default.
-        monkeypatch.delenv("MEEKO_COMPACTION_TRIGGER_TOKENS", raising=False)
-        importlib.reload(claude_client_module)
+def test_compaction_trigger_kwarg_threads_into_context_management():
+    """The `compaction_trigger_tokens` kwarg threads the value into the
+    per-instance context-management dict that gets sent with each turn."""
+    client = ClaudeClient(
+        api_key="test-key",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        compaction_trigger_tokens=12345,
+    )
+    assert client._context_management["edits"][0]["trigger"]["value"] == 12345
 
 
 # Anthropic's cache minimum for Sonnet is 1024 tokens — pad the system prompt
@@ -538,7 +534,7 @@ _COMPACTION_SYSTEM_PROMPT = (
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_server_side_compaction_fires_on_long_prefix(monkeypatch, caplog):
+async def test_server_side_compaction_fires_on_long_prefix(caplog):
     """End-to-end check that the compaction beta is wired up correctly.
 
     EXPENSIVE — disabled by default. The Anthropic API enforces a minimum
@@ -560,40 +556,33 @@ async def test_server_side_compaction_fires_on_long_prefix(monkeypatch, caplog):
 
     # 50000 is the API floor; the padded system prompt above crosses it on
     # turn 2 (system + turn-1 history + new user msg).
-    import importlib
+    client = ClaudeClient(
+        api_key=api_key,
+        system_prompt=_COMPACTION_SYSTEM_PROMPT,
+        dispatcher=ToolDispatcher(),
+        compaction_trigger_tokens=50000,
+    )
 
-    monkeypatch.setenv("MEEKO_COMPACTION_TRIGGER_TOKENS", "50000")
-    reloaded = importlib.reload(claude_client_module)
-    try:
-        client = reloaded.ClaudeClient(
-            api_key=api_key,
-            system_prompt=_COMPACTION_SYSTEM_PROMPT,
-            dispatcher=ToolDispatcher(),
-        )
+    with caplog.at_level(logging.INFO, logger="meeko"):
+        async for _ in client.stream_turn("Say 'one'."):
+            pass
+        async for _ in client.stream_turn("Say 'two'."):
+            pass
 
-        with caplog.at_level(logging.INFO, logger="meeko"):
-            async for _ in client.stream_turn("Say 'one'."):
-                pass
-            async for _ in client.stream_turn("Say 'two'."):
-                pass
+    compaction_logs = [
+        rec for rec in caplog.records if rec.getMessage().startswith("[compaction]")
+    ]
+    compaction_in_history = any(
+        isinstance(msg.get("content"), list)
+        and any(b.get("type") == "compaction" for b in msg["content"])
+        for msg in client._messages
+        if msg.get("role") == "assistant"
+    )
 
-        compaction_logs = [
-            rec for rec in caplog.records if rec.getMessage().startswith("[compaction]")
-        ]
-        compaction_in_history = any(
-            isinstance(msg.get("content"), list)
-            and any(b.get("type") == "compaction" for b in msg["content"])
-            for msg in client._messages
-            if msg.get("role") == "assistant"
-        )
-
-        assert compaction_logs or compaction_in_history, (
-            "expected server-side compaction to fire with trigger=50000 "
-            "and a ~55k-token padded system prompt"
-        )
-    finally:
-        monkeypatch.delenv("MEEKO_COMPACTION_TRIGGER_TOKENS", raising=False)
-        importlib.reload(claude_client_module)
+    assert compaction_logs or compaction_in_history, (
+        "expected server-side compaction to fire with trigger=50000 "
+        "and a ~55k-token padded system prompt"
+    )
 
 
 class _CancellableStream:
