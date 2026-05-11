@@ -34,12 +34,12 @@ from websockets.exceptions import ConnectionClosed
 
 from meeko.audio_io import AudioIO
 from meeko.claude_client import ClaudeClient
+from meeko.config import MeekoConfig, Profile, load_config, load_profiles
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
 from meeko.leds import LedController, LedState
-from meeko.profiles import Profile, load_profiles
 from meeko.session_summary import summarize_session
-from meeko.sessions import SessionStore, default_db_path
+from meeko.sessions import SessionStore
 from meeko.speaker import Speaker
 from meeko.stt_supervisor import KEEPALIVE_INTERVAL_S, STTSupervisor
 from meeko.tools.dispatch import ToolDispatcher
@@ -52,17 +52,17 @@ from meeko.tools.session import handle as session_handle
 from meeko.tools.timer import get_tool_definitions as timer_tools
 from meeko.tools.timer import handle as timer_handle
 from meeko.tools.timer import timer_manager
-from meeko.wake_word import DEFAULT_THRESHOLD, WakeWordDetector, default_model_path
+from meeko.wake_word import WakeWordDetector
 
 LOG_FILE = "meeko.log"
 
 logger = logging.getLogger("meeko")
 
 
-def setup_logging() -> None:
+def setup_logging(log_level: str = "DEBUG", log_target: str | None = None) -> None:
     formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
-    if os.environ.get("MEEKO_LOG_TARGET") == "file":
+    if log_target == "file":
         handler = logging.handlers.RotatingFileHandler(
             LOG_FILE, maxBytes=5_000_000, backupCount=3
         )
@@ -71,8 +71,7 @@ def setup_logging() -> None:
 
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    level = os.environ.get("MEEKO_LOG_LEVEL", "DEBUG").upper()
-    logger.setLevel(getattr(logging, level, logging.DEBUG))
+    logger.setLevel(getattr(logging, log_level.upper(), logging.DEBUG))
 
     # Route asyncio's own warnings through the same handler so they get
     # Meeko's timestamp format and land in the rotating log file when
@@ -217,10 +216,6 @@ async def _resolve_resume(store: SessionStore, resume: str) -> dict[str, object]
     return row
 
 
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
-
-
 async def _init_session_state(
     store: SessionStore,
     resume: str | None,
@@ -291,16 +286,15 @@ def _build_dispatcher(
 
 
 def _create_wake_detector(
-    disabled: bool,
+    config: MeekoConfig,
 ) -> tuple[WakeWordDetector | None, State]:
-    if disabled:
+    if config.wake_word_disabled:
         return None, State.LISTENING
-    wake_model_path = os.environ.get("MEEKO_WAKE_WORD_MODEL", default_model_path())
-    wake_threshold = float(
-        os.environ.get("MEEKO_WAKE_WORD_THRESHOLD", DEFAULT_THRESHOLD)
-    )
     return (
-        WakeWordDetector(threshold=wake_threshold, model_path=wake_model_path),
+        WakeWordDetector(
+            threshold=config.wake_word_threshold,
+            model_path=str(config.wake_word_model),
+        ),
         State.IDLE,
     )
 
@@ -380,25 +374,23 @@ async def _apply_post_turn_session_change(
 
 
 async def run(resume: str | None = None, list_sessions: bool = False):
-    setup_logging()
+    load_dotenv()
+    config = load_config()
+    setup_logging(log_level=config.log_level, log_target=config.log_target)
 
     if list_sessions:
-        store = SessionStore.open(default_db_path())
+        store = SessionStore.open(config.db_path)
         try:
             await _list_sessions_cmd(store)
         finally:
             await store.close()
         return
 
-    load_dotenv()
-
     deepgram_key = os.environ["DEEPGRAM_API_KEY"]
     anthropic_key = os.environ["ANTHROPIC_API_KEY"]
-    mute_mic_while_speaking = _env_flag("MEEKO_MUTE_MIC_WHILE_SPEAKING")
-    wake_word_disabled = _env_flag("MEEKO_WAKE_WORD_DISABLED")
 
     profiles = load_profiles()
-    store = SessionStore.open(default_db_path())
+    store = SessionStore.open(config.db_path)
     profile, session_id, history = await _init_session_state(store, resume, profiles)
 
     profile_manager = ProfileManager(profiles)
@@ -418,6 +410,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         dispatcher=dispatcher,
         store=store,
         session_id=session_id,
+        compaction_trigger_tokens=config.compaction_trigger_tokens,
+        web_search_enabled=config.web_search_enabled,
+        web_search_max_uses=config.web_search_max_uses,
     )
     if history:
         claude.load_history(history)
@@ -440,12 +435,18 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     tts = DeepgramTTS(deepgram_key)
 
     stop_event = asyncio.Event()
-    audio = AudioIO(stop_event)
+    audio = AudioIO(
+        stop_event,
+        input_channels=config.input_channels,
+        output_channels=config.output_channels,
+        input_device_index=config.input_device_index,
+        output_device_index=config.output_device_index,
+    )
 
-    leds = LedController()
+    leds = LedController(disabled=config.led_disabled)
     leds.start()
 
-    wake_detector, initial_state = _create_wake_detector(wake_word_disabled)
+    wake_detector, initial_state = _create_wake_detector(config)
     state_manager = StateManager(initial_state, leds)
     state_manager.set(initial_state)
 
@@ -455,7 +456,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         profile,
         state_manager.enter_speaking,
         state_manager.exit_speaking,
-        mute_mic_while_speaking=mute_mic_while_speaking,
+        mute_mic_while_speaking=config.mute_mic_while_speaking,
     )
     timer_manager.set_speak_callback(speaker.speak)
 
@@ -480,7 +481,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     state_manager.set(State.LISTENING)
                     logger.info("Wake word accepted; entering LISTENING")
                 continue
-            if mute_mic_while_speaking and state_manager.state == State.SPEAKING:
+            if config.mute_mic_while_speaking and state_manager.state == State.SPEAKING:
                 continue
             await stt_session.send_audio(data)
 

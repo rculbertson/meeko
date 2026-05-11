@@ -14,8 +14,8 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from meeko.audio_io import RATE, AudioIO
+from meeko.config import Profile
 from meeko.deepgram_tts import DEFAULT_VOICE, DeepgramTTS
-from meeko.profiles import Profile
 
 logger = logging.getLogger("meeko")
 

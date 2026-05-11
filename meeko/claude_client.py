@@ -8,7 +8,6 @@ begin TTS before the full reply is ready.
 
 import asyncio
 import logging
-import os
 import re
 import time
 from collections.abc import AsyncIterator
@@ -33,30 +32,35 @@ MAX_TOOL_ROUNDS = 10
 # only in the in-memory message array (see `_persist`).
 COMPACTION_BETA = "compact-2026-01-12"
 COMPACTION_STRATEGY = "compact_20260112"
-COMPACTION_TRIGGER_TOKENS = int(
-    os.environ.get("MEEKO_COMPACTION_TRIGGER_TOKENS", "150000")
-)
+DEFAULT_COMPACTION_TRIGGER_TOKENS = 150000
 
 # Anthropic-hosted web search server tool. When enabled, Sonnet decides
 # per-turn whether to issue searches; results are inlined into the
 # assistant message as `server_tool_use` + `web_search_tool_result`
 # blocks without any client-side dispatch. `max_uses` caps worst-case
 # latency and cost per turn ($10 per 1k searches).
-WEB_SEARCH_ENABLED = os.environ.get("MEEKO_WEB_SEARCH_DISABLED") != "1"
-WEB_SEARCH_MAX_USES = int(os.environ.get("MEEKO_WEB_SEARCH_MAX_USES", "3"))
-_WEB_SEARCH_TOOL = {
-    "type": "web_search_20260209",
-    "name": "web_search",
-    "max_uses": WEB_SEARCH_MAX_USES,
-}
-_CONTEXT_MANAGEMENT = {
-    "edits": [
-        {
-            "type": COMPACTION_STRATEGY,
-            "trigger": {"type": "input_tokens", "value": COMPACTION_TRIGGER_TOKENS},
-        }
-    ]
-}
+DEFAULT_WEB_SEARCH_ENABLED = True
+DEFAULT_WEB_SEARCH_MAX_USES = 3
+
+
+def _context_management(trigger_tokens: int) -> dict:
+    return {
+        "edits": [
+            {
+                "type": COMPACTION_STRATEGY,
+                "trigger": {"type": "input_tokens", "value": trigger_tokens},
+            }
+        ]
+    }
+
+
+def _web_search_tool(max_uses: int) -> dict:
+    return {
+        "type": "web_search_20260209",
+        "name": "web_search",
+        "max_uses": max_uses,
+    }
+
 
 # Split on terminal punctuation that looks like a real sentence break:
 #   - not preceded by a capital letter (skips "U.S.", "N.Y.", "Ph.D.")
@@ -221,16 +225,20 @@ class ClaudeClient:
         dispatcher: ToolDispatcher,
         store: SessionStore | None = None,
         session_id: str | None = None,
+        compaction_trigger_tokens: int = DEFAULT_COMPACTION_TRIGGER_TOKENS,
+        web_search_enabled: bool = DEFAULT_WEB_SEARCH_ENABLED,
+        web_search_max_uses: int = DEFAULT_WEB_SEARCH_MAX_USES,
     ):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._profile_prompt = system_prompt
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
-        if WEB_SEARCH_ENABLED:
-            self._tools = self._tools + [_WEB_SEARCH_TOOL]
+        if web_search_enabled:
+            self._tools = self._tools + [_web_search_tool(web_search_max_uses)]
         self._messages: list[dict[str, Any]] = []
         self._store = store
         self._session_id = session_id
+        self._context_management = _context_management(compaction_trigger_tokens)
 
     def set_system_prompt(self, prompt: str) -> None:
         self._profile_prompt = prompt
@@ -297,7 +305,7 @@ class ClaudeClient:
                     tools=self._tools,
                     messages=_with_cache_breakpoint(request_messages),
                     betas=[COMPACTION_BETA],
-                    context_management=_CONTEXT_MANAGEMENT,
+                    context_management=self._context_management,
                 ) as stream:
                     async for delta in stream.text_stream:
                         if ttft_ms is None:

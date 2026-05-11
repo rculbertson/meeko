@@ -464,13 +464,7 @@ async def test_search_sessions_no_args_returns_empty(store):
     assert await store.search_sessions() == []
 
 
-def test_default_db_path_honors_env_var(monkeypatch, tmp_path):
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "custom.db"))
-    assert default_db_path() == tmp_path / "custom.db"
-
-
-def test_default_db_path_defaults_to_home(monkeypatch):
-    monkeypatch.delenv("MEEKO_DB_PATH", raising=False)
+def test_default_db_path_defaults_to_home():
     path = default_db_path()
     assert path.name == "meeko.db"
     assert path.parent.name == ".meeko"

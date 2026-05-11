@@ -4,12 +4,12 @@ import asyncio
 
 import pytest
 
+from meeko.config import Profile
 from meeko.main import (
     CONVERSATION_CLOSE_TEXT,
     CONVERSATION_PROMPT_TEXT,
     _idle_monitor,
 )
-from meeko.profiles import Profile
 
 
 def _query_profile(timeout: float = 0.05) -> Profile:

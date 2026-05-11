@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from meeko import main as meeko_main
+from meeko.config import Profile
 from meeko.main import State, setup_logging
-from meeko.profiles import Profile
 
 
 @pytest.fixture
@@ -31,9 +31,7 @@ def clean_logger():
     logger.setLevel(saved_level)
 
 
-def test_setup_logging_defaults_to_stream_handler(monkeypatch, clean_logger):
-    monkeypatch.delenv("MEEKO_LOG_TARGET", raising=False)
-    monkeypatch.delenv("MEEKO_LOG_LEVEL", raising=False)
+def test_setup_logging_defaults_to_stream_handler(clean_logger):
     setup_logging()
     assert len(clean_logger.handlers) == 1
     assert isinstance(clean_logger.handlers[0], logging.StreamHandler)
@@ -42,19 +40,15 @@ def test_setup_logging_defaults_to_stream_handler(monkeypatch, clean_logger):
 
 def test_setup_logging_file_target(monkeypatch, tmp_path, clean_logger):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MEEKO_LOG_TARGET", "file")
-    monkeypatch.setenv("MEEKO_LOG_LEVEL", "INFO")
-    setup_logging()
+    setup_logging(log_level="INFO", log_target="file")
     assert isinstance(clean_logger.handlers[0], logging.handlers.RotatingFileHandler)
     assert clean_logger.level == logging.INFO
     # Close the file handler so tmp_path can be cleaned up on Windows/macOS.
     clean_logger.handlers[0].close()
 
 
-def test_setup_logging_invalid_level_falls_back_to_debug(monkeypatch, clean_logger):
-    monkeypatch.delenv("MEEKO_LOG_TARGET", raising=False)
-    monkeypatch.setenv("MEEKO_LOG_LEVEL", "NOT_A_REAL_LEVEL")
-    setup_logging()
+def test_setup_logging_invalid_level_falls_back_to_debug(clean_logger):
+    setup_logging(log_level="NOT_A_REAL_LEVEL")
     assert clean_logger.level == logging.DEBUG
 
 

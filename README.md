@@ -31,6 +31,8 @@ DEEPGRAM_API_KEY=your-deepgram-api-key
 ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
+All other settings (audio devices, wake word, logging, etc.) live in `meeko.toml`. Profiles are defined there as well. The commented-out tables at the top of the file show every available knob with its default. Any `MEEKO_*` environment variable still overrides the corresponding TOML value at runtime.
+
 ### Running
 
 ```bash
@@ -60,13 +62,13 @@ sudo udevadm control --reload
 sudo udevadm trigger --action=add --subsystem-match=usb
 ```
 
-No reboot or replug needed. To skip LED control entirely (e.g. on macOS dev runs with no XVF3800 attached), set `MEEKO_LED_DISABLED=1`. The controller also auto-disables if the device isn't found.
+No reboot or replug needed. To skip LED control entirely (e.g. on macOS dev runs with no XVF3800 attached), set `[system] led_disabled = true` in `meeko.toml` (or `MEEKO_LED_DISABLED=1` in the environment). The controller also auto-disables if the device isn't found.
 
 ### Logging
 
-Two environment variables control logging behavior.
+Configured in `[system]` of `meeko.toml` (or via env vars).
 
-**`MEEKO_LOG_LEVEL`** — verbosity (default: `DEBUG`)
+**`log_level`** / `MEEKO_LOG_LEVEL` — verbosity (default: `DEBUG`)
 
 | Value | What you see |
 |---|---|
@@ -74,20 +76,20 @@ Two environment variables control logging behavior.
 | `INFO` | Conversation text, connection events, mic mute/unmute |
 | `WARNING` / `ERROR` | Errors only |
 
-**`MEEKO_LOG_TARGET`** — destination (default: stderr)
+**`log_target`** / `MEEKO_LOG_TARGET` — destination (default: stderr)
 
 | Value | Behavior |
 |---|---|
 | _(unset)_ | Logs to stderr |
 | `file` | Logs to `meeko.log` (rotating, 5 MB × 3 files) |
 
-Example — quiet console output:
+Example — quiet console output (env-var override):
 
 ```bash
 MEEKO_LOG_LEVEL=INFO uv run python -m meeko.main
 ```
 
-Example — log to file at debug level:
+Example — log to file at debug level (env-var override):
 
 ```bash
 MEEKO_LOG_TARGET=file uv run python -m meeko.main

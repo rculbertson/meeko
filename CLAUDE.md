@@ -19,11 +19,17 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ## Key Conventions
 
+### Configuration
+- Secrets (`DEEPGRAM_API_KEY`, `ANTHROPIC_API_KEY`) live in `.env`.
+- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]` tables. See the commented examples at the top of `meeko.toml`.
+- Any `MEEKO_*` environment variable overrides the corresponding TOML value at runtime — useful for one-off testing without editing the file.
+- Loading happens once in `run()` via `meeko.config.load_config()`; components receive their values via constructor kwargs (no module-level `os.environ.get` reads).
+
 ### Claude API calls
 - Model: `claude-sonnet-4-6` for main conversation and end-of-session summarization (long transcripts + summary quality drives resume-by-voice recall)
 - Prompt caching (`cache_control` on the stable prefix) and server-side compaction are wired up in `meeko/claude_client.py` (compaction beta `compact-2026-01-12`, strategy `compact_20260112`). Both operate on the in-memory message array only
 - The on-disk SQLite transcript is the source of truth — the server-emitted `compaction` block stays in-memory and is filtered out before persistence so transcripts remain verbatim
-- `MEEKO_COMPACTION_TRIGGER_TOKENS` — input-token threshold that triggers server-side compaction (default `150000`)
+- Compaction threshold: `[claude] compaction_trigger_tokens` in `meeko.toml` (default `150000`). Env override: `MEEKO_COMPACTION_TRIGGER_TOKENS`.
 
 ### Turn persistence
 - Write every turn to SQLite immediately on completion, not buffered, not at session end (see `meeko/sessions.py` and `ClaudeClient._persist`)
@@ -40,24 +46,25 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - Read from the **left channel** of the ReSpeaker XVF3800 USB device — this is the AEC-processed output
 - Speaker must route through the XVF3800's **3.5mm jack**, not the Pi's audio output (required for hardware AEC)
 - Barge-in: `SpeechStarted` during SPEAKING state → stop TTS, cancel Claude request, transition to LISTENING
-- **Device selection** (env vars, all optional):
-  - `MEEKO_INPUT_DEVICE_INDEX` / `MEEKO_OUTPUT_DEVICE_INDEX` — pin a specific PyAudio device. Unset = OS default. Run `uv run python -m meeko.audio_io` to list indices.
-  - `MEEKO_INPUT_CHANNELS` / `MEEKO_OUTPUT_CHANNELS` — native channel counts. Default `2` / `2` (ReSpeaker).
-  - `MEEKO_MUTE_MIC_WHILE_SPEAKING=1` — for devices without hardware AEC (e.g. Mac built-in).
-  - Mac built-in mic/speaker: set `MEEKO_INPUT_CHANNELS=1`, `MEEKO_MUTE_MIC_WHILE_SPEAKING=1` (channel-count default `2` for output is fine for stereo speakers).
+- **Device selection** — `[audio]` in `meeko.toml` (env-var overrides in parens, all optional):
+  - `input_device_index` / `output_device_index` (env: `MEEKO_INPUT_DEVICE_INDEX` / `MEEKO_OUTPUT_DEVICE_INDEX`) — pin a specific PyAudio device. Unset = OS default. Run `uv run python -m meeko.audio_io` to list indices.
+  - `input_channels` / `output_channels` (env: `MEEKO_INPUT_CHANNELS` / `MEEKO_OUTPUT_CHANNELS`) — native channel counts. Default `2` / `2` (ReSpeaker).
+  - `mute_mic_while_speaking = true` (env: `MEEKO_MUTE_MIC_WHILE_SPEAKING=1`) — for devices without hardware AEC (e.g. Mac built-in).
+  - Mac built-in mic/speaker: `input_channels = 1`, `mute_mic_while_speaking = true` (output channels default `2` is fine for stereo speakers).
 
 ### Wake word
 - On startup Meeko sits in `IDLE` — mic is open but audio is fed to an openWakeWord detector, not Deepgram STT. Saying "Hey Meeko" transitions the session to `LISTENING` (one-shot per session).
-- `MEEKO_WAKE_WORD_MODEL` — path to the ONNX model. Default `models/hey_meeko.onnx`.
-- `MEEKO_WAKE_WORD_THRESHOLD` — confidence threshold (0–1). Default `0.96`.
-- `MEEKO_WAKE_WORD_DISABLED=1` — skip the wake-word gate; start directly in `LISTENING`.
+- Configured in `[wake_word]` (env-var overrides in parens):
+  - `model` (env: `MEEKO_WAKE_WORD_MODEL`) — path to the ONNX model. Default `models/hey_meeko.onnx`.
+  - `threshold` (env: `MEEKO_WAKE_WORD_THRESHOLD`) — confidence (0–1). Default `0.96`.
+  - `disabled = true` (env: `MEEKO_WAKE_WORD_DISABLED=1`) — skip the gate; start directly in `LISTENING`.
 - First run downloads openWakeWord's preprocessor ONNX files (~3 MB). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
 ### LEDs
 - The XVF3800's WS2812 ring is driven by `meeko/leds.py` to mirror the state machine: IDLE off, LISTENING solid cyan, LISTENING_ACTIVE DoA (cyan indicator on darker cyan) while the user is speaking, PROCESSING blue breath, SPEAKING solid green. Errors get a ~3s red breath.
 - We talk to the chip directly over libusb (pyusb vendor control transfers on resid 20) — not via ReSpeaker's `xvf_host.py`.
 - Linux defaults the USB control interface to root-only. Install `scripts/99-meeko-xvf3800.rules` once (see README) so the `plugdev` group can drive it.
-- `MEEKO_LED_DISABLED=1` — skip LED control entirely. Also auto-disabled if the XVF3800 isn't found or pyusb/libusb is unavailable, so Mac dev runs need no special handling.
+- `[system] led_disabled = true` (env: `MEEKO_LED_DISABLED=1`) — skip LED control entirely. Also auto-disabled if the XVF3800 isn't found or pyusb/libusb is unavailable, so Mac dev runs need no special handling.
 
 ### State machine
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.

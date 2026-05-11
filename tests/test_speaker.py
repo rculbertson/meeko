@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from meeko.profiles import Profile
+from meeko.config import Profile
 from meeko.speaker import INTER_SENTENCE_SILENCE, Speaker
 
 
