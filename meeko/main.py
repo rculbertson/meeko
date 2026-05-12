@@ -455,9 +455,21 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     # Backfill: any session with turns but no title is a prior run that
     # was killed before summarization completed. Fire summary now so
     # `list_sessions` doesn't keep reporting them as "(no title)".
-    for untitled_sid in await store.list_untitled_sessions_with_turns():
-        logger.info("Backfilling summary for untitled session %s", untitled_sid[:8])
-        fire_summary(untitled_sid)
+    # Cap concurrency at 3 to avoid hammering the Anthropic rate limit
+    # when many sessions need backfilling at once.
+    untitled = await store.list_untitled_sessions_with_turns()
+    if untitled:
+        logger.info("Backfilling %d untitled session(s)", len(untitled))
+    sem = asyncio.Semaphore(3)
+
+    async def _rate_limited_summary(sid: str) -> None:
+        async with sem:
+            await summarize_session(store, sid, summary_client)
+
+    for untitled_sid in untitled:
+        task = asyncio.create_task(_rate_limited_summary(untitled_sid))
+        summary_tasks.add(task)
+        task.add_done_callback(summary_tasks.discard)
 
     stt = DeepgramSTT(deepgram_key)
     tts = DeepgramTTS(deepgram_key)

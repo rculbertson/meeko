@@ -240,6 +240,7 @@ class ClaudeClient:
         self._store = store
         self._session_id = session_id
         self._create_session_fn = create_session_fn
+        self._session_create_lock = asyncio.Lock()
         self._context_management = _context_management(compaction_trigger_tokens)
 
     @property
@@ -464,5 +465,7 @@ class ClaudeClient:
         if self._session_id is None:
             if self._create_session_fn is None:
                 return
-            self._session_id = await self._create_session_fn()
+            async with self._session_create_lock:
+                if self._session_id is None:
+                    self._session_id = await self._create_session_fn()
         await self._store.persist_turn(self._session_id, role, content)
