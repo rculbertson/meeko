@@ -459,7 +459,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     # when many sessions need backfilling at once.
     untitled = await store.list_untitled_sessions_with_turns()
     if untitled:
-        logger.info("Backfilling %d untitled session(s)", len(untitled))
+        if len(untitled) > 10:
+            logger.warning(
+                "Backfilling %d untitled session(s); startup may be slower than usual",
+                len(untitled),
+            )
+        else:
+            logger.info("Backfilling %d untitled session(s)", len(untitled))
     sem = asyncio.Semaphore(3)
 
     async def _rate_limited_summary(sid: str) -> None:

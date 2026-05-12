@@ -284,6 +284,35 @@ async def test_persist_skips_when_create_fn_returns_empty(fake_anthropic, caplog
 
 
 @pytest.mark.asyncio
+async def test_persist_logs_error_when_create_fn_raises(fake_anthropic, caplog):
+    """If create_session_fn raises, _persist logs an error and skips writing
+    the turn rather than propagating the exception."""
+    persisted: list = []
+
+    class _FakeStore:
+        async def persist_turn(self, sid, role, content):
+            persisted.append((sid, role, content))
+
+    async def failing_create_fn() -> str:
+        raise RuntimeError("DB connection lost")
+
+    client = ClaudeClient(
+        api_key="test-key",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        store=_FakeStore(),
+        create_session_fn=failing_create_fn,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="meeko"):
+        await _drain(client.stream_turn("hello"))
+
+    assert persisted == []
+    assert any("raised" in r.getMessage() for r in caplog.records)
+    assert client.session_id is None
+
+
+@pytest.mark.asyncio
 async def test_stream_turn_sets_cache_breakpoint_on_last_message(fake_anthropic):
     client = _make_client()
     await _drain(client.stream_turn("Hello!"))

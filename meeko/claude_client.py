@@ -467,7 +467,14 @@ class ClaudeClient:
                 return
             async with self._session_create_lock:
                 if self._session_id is None:
-                    sid = await self._create_session_fn()
+                    try:
+                        sid = await self._create_session_fn()
+                    except Exception:
+                        logger.error(
+                            "create_session_fn raised; skipping persist",
+                            exc_info=True,
+                        )
+                        return
                     if not sid:
                         logger.error(
                             "create_session_fn returned empty id; skipping persist"
