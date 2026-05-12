@@ -2953,15 +2953,23 @@ async def test_load_session_when_current_session_has_turns_fires_summary(
             # Wait for claude to be rebound to the target session.
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if original_sid is None and c.session_id not in (None, target_id):
-                        original_sid = c.session_id
-                    if c.session_id == target_id:
-                        break
+                if c is not None and c.session_id == target_id:
+                    break
                 await real_sleep(0.01)
 
+            # The original session is the only row in the DB that isn't
+            # target_id — lazy creation wrote it, then load_session swapped
+            # the binding to target_id.
+            rows_check = SessionStore.open(db_path)
+            try:
+                all_rows = await rows_check.list_sessions()
+            finally:
+                await rows_check.close()
+            non_target = [r["id"] for r in all_rows if r["id"] != target_id]
+            assert non_target, "lazy creation never fired — no non-target session row"
+            original_sid = non_target[0]
+
             # Give the background summary task time to write.
-            assert original_sid is not None, "lazy creation never fired"
             for _ in range(200):
                 store_check = SessionStore.open(db_path)
                 try:
