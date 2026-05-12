@@ -248,10 +248,16 @@ class LedController:
             # we don't have to set them on each state change.
             # Brightness and speed apply only to breath effect, and
             # are ignored by other effects, so we can leave them set.
-            self._device.set_brightness(PALETTE.breath_brightness)
-            self._device.set_speed(PALETTE.breath_speed)
-            # We want gammify always on.
-            self._device.set_gammify(True)
+            # Wrapped in try/except like each action below: a
+            # transient USB error here shouldn't kill the worker and
+            # silently disable LEDs for the rest of the session.
+            try:
+                self._device.set_brightness(PALETTE.breath_brightness)
+                self._device.set_speed(PALETTE.breath_speed)
+                # We want gammify always on.
+                self._device.set_gammify(True)
+            except Exception:
+                logger.exception("LED: startup configuration failed")
             while True:
                 action = self._queue.get()
                 try:
