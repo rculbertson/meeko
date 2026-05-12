@@ -220,8 +220,11 @@ async def _init_session_state(
     store: SessionStore,
     resume: str | None,
     profiles: dict[str, Profile],
-) -> tuple[Profile, str, list[dict] | None]:
-    """Resolve the active profile, session id, and prior history (if any)."""
+) -> tuple[Profile, str | None, list[dict] | None]:
+    """Resolve the active profile, session id, and prior history (if any).
+
+    For fresh starts (no resume), session_id is None — the row is
+    created lazily on the first persisted turn (see ClaudeClient)."""
     resumed_row: dict[str, object] | None = None
     if resume is not None:
         try:
@@ -253,9 +256,11 @@ async def _init_session_state(
         return profile, session_id, history
 
     profile = profiles["default"]
-    session_id = await store.create_session(profile.name)
-    logger.info("Started session %s (profile=%s)", session_id, profile.name)
-    return profile, session_id, None
+    logger.info(
+        "Started new session (profile=%s, row deferred until first turn)",
+        profile.name,
+    )
+    return profile, None, None
 
 
 def _build_dispatcher(
@@ -263,7 +268,7 @@ def _build_dispatcher(
     profile_manager: ProfileManager,
     session_manager: SessionManager,
     store: SessionStore,
-    get_session_id: Callable[[], str],
+    get_session_id: Callable[[], str | None],
 ) -> ToolDispatcher:
     dispatcher = ToolDispatcher()
     dispatcher.register(timer_tools(), timer_handle)
@@ -306,26 +311,28 @@ async def _apply_post_turn_session_change(
     claude: ClaudeClient,
     store: SessionStore,
     wake_detector: WakeWordDetector | None,
-    session_id: str,
-    fire_summary: Callable[[str], None],
-) -> tuple[str, State]:
+    session_id: str | None,
+    fire_summary: Callable[[str | None], None],
+) -> State:
     """Apply pending session-management actions queued during the last turn.
 
-    Returns the (possibly updated) session id and the next State to enter.
-    `should_load` can coexist with `should_end` (chain: finalize current
-    then load a prior one in one turn). Always summarize the abandoned
-    session so it stays in the recall index — `summarize_session` no-ops
-    on empty sessions, so this is safe even when the user loads after
-    only a turn or two.
+    Returns the next State to enter. `claude.session_id` tracks the live
+    bound row internally (cleared by `reset_session`, rebound by
+    `rebind_session`), so the caller never needs to thread the id back
+    out. `should_load` can coexist with `should_end` (chain: finalize
+    current then load a prior one in one turn). When the current session
+    has no turns yet (session_id is None — lazy creation hasn't fired),
+    there's nothing to summarize; `fire_summary` no-ops on None.
     """
     if session_manager.should_load():
         target_id = session_manager.get_load_target()
         assert target_id is not None  # guaranteed by should_load()
         fire_summary(session_id)
-        logger.info(
-            "load_session: fired summary for abandoned %s",
-            session_id[:8],
-        )
+        if session_id is not None:
+            logger.info(
+                "load_session: fired summary for abandoned %s",
+                session_id[:8],
+            )
         turns = await store.load_turns(target_id)
         claude.load_history(turns)
         claude.rebind_session(target_id)
@@ -336,13 +343,12 @@ async def _apply_post_turn_session_change(
             target_id[:8],
             len(turns),
         )
-        return target_id, State.LISTENING
+        return State.LISTENING
 
     if session_manager.should_end():
         active = profile_manager.active_profile
         finalized_sid = session_id
-        new_sid = await store.create_session(active.name)
-        claude.reset_session(new_sid)
+        claude.reset_session()
         session_manager.clear()
         fire_summary(finalized_sid)
         if wake_detector is not None:
@@ -352,25 +358,23 @@ async def _apply_post_turn_session_change(
                 "(say '%s' to start a new conversation)",
                 active.wake_word,
             )
-            return new_sid, State.IDLE
+            return State.IDLE
         logger.info("Session ended; wake word disabled, returning to LISTENING")
-        return new_sid, State.LISTENING
+        return State.LISTENING
 
     if session_manager.should_start_new():
         active = profile_manager.active_profile
         finalized_sid = session_id
-        new_sid = await store.create_session(active.name)
-        claude.reset_session(new_sid)
+        claude.reset_session()
         session_manager.clear()
         fire_summary(finalized_sid)
         logger.info(
-            "new_session: rotated to %s (profile=%s), continuing in LISTENING",
-            new_sid[:8],
+            "new_session: rotated (profile=%s, row deferred), continuing in LISTENING",
             active.name,
         )
-        return new_sid, State.LISTENING
+        return State.LISTENING
 
-    return session_id, State.LISTENING
+    return State.LISTENING
 
 
 async def run(resume: str | None = None, list_sessions: bool = False):
@@ -396,12 +400,24 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     profile_manager = ProfileManager(profiles)
     session_manager = SessionManager()
 
+    # Lazy session creation: the row is INSERTed on the first persisted
+    # turn so killing the process before any conversation doesn't litter
+    # the DB with empty, forever-untitled sessions.
+    async def create_session_for_active_profile() -> str:
+        sid = await store.create_session(profile_manager.active_profile.name)
+        logger.info(
+            "Created session %s (profile=%s)",
+            sid[:8],
+            profile_manager.active_profile.name,
+        )
+        return sid
+
     dispatcher = _build_dispatcher(
         profiles,
         profile_manager,
         session_manager,
         store,
-        lambda: session_id,
+        lambda: claude.session_id,
     )
 
     claude = ClaudeClient(
@@ -410,6 +426,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         dispatcher=dispatcher,
         store=store,
         session_id=session_id,
+        create_session_fn=create_session_for_active_profile,
         compaction_trigger_tokens=config.compaction_trigger_tokens,
         web_search_enabled=config.web_search_enabled,
         web_search_max_uses=config.web_search_max_uses,
@@ -424,10 +441,43 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     summary_client = anthropic.AsyncAnthropic(api_key=anthropic_key)
     summary_tasks: set[asyncio.Task] = set()
 
-    def fire_summary(finalized_sid: str) -> None:
+    def fire_summary(finalized_sid: str | None) -> None:
+        # No-op when there's no row to finalize (e.g. end_session called
+        # before any user turn — lazy creation never fired).
+        if finalized_sid is None:
+            return
         task = asyncio.create_task(
             summarize_session(store, finalized_sid, summary_client)
         )
+        summary_tasks.add(task)
+        task.add_done_callback(summary_tasks.discard)
+
+    # Backfill: any session with turns but no title is a prior run that
+    # was killed before summarization completed. Fire summary now so
+    # `list_sessions` doesn't keep reporting them as "(no title)".
+    # Cap concurrency at 3 to avoid hammering the Anthropic rate limit
+    # when many sessions need backfilling at once.
+    untitled = await store.list_untitled_sessions_with_turns()
+    if untitled:
+        if len(untitled) > 10:
+            logger.warning(
+                "Backfilling %d untitled session(s); startup may be slower than usual",
+                len(untitled),
+            )
+        else:
+            logger.info("Backfilling %d untitled session(s)", len(untitled))
+    sem = asyncio.Semaphore(3)
+
+    async def _rate_limited_summary(sid: str) -> None:
+        async with sem:
+            await summarize_session(store, sid, summary_client)
+
+    for untitled_sid in untitled:
+        if untitled_sid == session_id:
+            # Resumed session is still active — skip backfill to avoid
+            # summarizing a row the user is actively adding turns to.
+            continue
+        task = asyncio.create_task(_rate_limited_summary(untitled_sid))
         summary_tasks.add(task)
         task.add_done_callback(summary_tasks.discard)
 
@@ -659,7 +709,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     async def drive_turns():
         """Drive Claude + TTS for queued user turns, one at a time."""
-        nonlocal session_id, current_speak_task, barge_in_requested
+        nonlocal current_speak_task, barge_in_requested
         while not stop_event.is_set():
             item = await turn_queue.get()
             cancel_idle_monitor()
@@ -669,13 +719,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # post-turn block to finalize and (with wake word) return
                 # to IDLE. No Claude/TTS round-trip on this path, so we
                 # do not start a fresh idle window after.
-                session_id, new_state = await _apply_post_turn_session_change(
+                new_state = await _apply_post_turn_session_change(
                     session_manager=session_manager,
                     profile_manager=profile_manager,
                     claude=claude,
                     store=store,
                     wake_detector=wake_detector,
-                    session_id=session_id,
+                    session_id=claude.session_id,
                     fire_summary=fire_summary,
                 )
                 state_manager.set(new_state)
@@ -722,13 +772,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),
             )
-            session_id, new_state = await _apply_post_turn_session_change(
+            new_state = await _apply_post_turn_session_change(
                 session_manager=session_manager,
                 profile_manager=profile_manager,
                 claude=claude,
                 store=store,
                 wake_detector=wake_detector,
-                session_id=session_id,
+                session_id=claude.session_id,
                 fire_summary=fire_summary,
             )
             # Start the post-turn idle window. Only when state is

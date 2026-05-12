@@ -140,23 +140,29 @@ class _FakeClaudeClient:
         self.dispatcher = dispatcher
         self.store = kwargs.get("store")
         self.session_id = kwargs.get("session_id")
+        self._create_session_fn = kwargs.get("create_session_fn")
         self.turns: list[str] = []
         self.loaded_history: list[dict] | None = None
+        self.reset_count = 0  # incremented each time reset_session() is called
 
     def stream_turn(self, text):
         self.turns.append(text)
         store = self.store
-        sid = self.session_id
+        create_fn = self._create_session_fn
 
         async def _gen():
-            # Mirror the real ClaudeClient's persistence so downstream
-            # consumers (end-of-session summarization) see a turn log.
-            if store is not None and sid is not None:
-                await store.persist_turn(sid, "user", text)
+            # Mirror the real ClaudeClient's lazy session creation + persistence
+            # so downstream consumers (end-of-session summarization) see a
+            # turn log and tests cover the lazy-create path.
+            if store is not None:
+                if self.session_id is None and create_fn is not None:
+                    self.session_id = await create_fn()
+                if self.session_id is not None:
+                    await store.persist_turn(self.session_id, "user", text)
             yield "Hi."
-            if store is not None and sid is not None:
+            if store is not None and self.session_id is not None:
                 await store.persist_turn(
-                    sid, "assistant", [{"type": "text", "text": "Hi."}]
+                    self.session_id, "assistant", [{"type": "text", "text": "Hi."}]
                 )
 
         return _gen()
@@ -164,9 +170,10 @@ class _FakeClaudeClient:
     def load_history(self, messages):
         self.loaded_history = list(messages)
 
-    def reset_session(self, session_id):
-        self.session_id = session_id
+    def reset_session(self):
+        self.session_id = None
         self.loaded_history = None
+        self.reset_count += 1
 
     def rebind_session(self, session_id):
         self.session_id = session_id
@@ -800,6 +807,98 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
     assert "default" in out
 
 
+async def test_run_backfills_untitled_sessions_on_startup(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """A session left untitled-but-non-empty by a prior killed run should
+    be summarized at the next startup, so `list_sessions` stops reading
+    it back as '(no title)'."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    seed = SessionStore.open(db_path)
+    try:
+        untitled_sid = await seed.create_session("default")
+        await seed.persist_turn(untitled_sid, "user", "leftover question")
+        await seed.persist_turn(
+            untitled_sid,
+            "assistant",
+            [{"type": "text", "text": "leftover answer"}],
+        )
+    finally:
+        await seed.close()
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+
+    session_entered = asyncio.Event()
+
+    class _SignalingSTTClient(_FakeSTTClient):
+        @contextlib.asynccontextmanager
+        async def session(self):
+            async with super().session() as s:
+                session_entered.set()
+                yield s
+
+    fake_stt = _SignalingSTTClient("dg-test")
+    fake_stt.events = []
+    fake_tts = _FakeTTSClient("dg-test")
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            await asyncio.wait_for(session_entered.wait(), timeout=5)
+            # Backfill is fire-and-forget — poll the DB until the title
+            # appears or we give up.
+            for _ in range(200):
+                check = SessionStore.open(db_path)
+                try:
+                    row = await check.get_session(untitled_sid)
+                finally:
+                    await check.close()
+                if row is not None and row.get("title") is not None:
+                    break
+                await real_sleep(0.01)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    store = SessionStore.open(db_path)
+    try:
+        row = await store.get_session(untitled_sid)
+    finally:
+        await store.close()
+    assert row is not None
+    # _StubAsyncAnthropic returns "stub title" for any summary call.
+    assert row["title"] == "stub title"
+
+
 async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
     """With wake word enabled the orchestrator starts in IDLE and holds
     audio back from STT until the detector fires. After the detector
@@ -953,15 +1052,18 @@ class _SessionToolClaudeClient(_FakeClaudeClient):
         tool_name = self.TOOL_NAME
         ack = self.ACK
         store = self.store
-        sid = self.session_id
+        create_fn = self._create_session_fn
 
         async def _gen():
-            if store is not None and sid is not None:
-                await store.persist_turn(sid, "user", text)
+            if store is not None:
+                if self.session_id is None and create_fn is not None:
+                    self.session_id = await create_fn()
+                if self.session_id is not None:
+                    await store.persist_turn(self.session_id, "user", text)
             yield ack
-            if store is not None and sid is not None:
+            if store is not None and self.session_id is not None:
                 await store.persist_turn(
-                    sid, "assistant", [{"type": "text", "text": ack}]
+                    self.session_id, "assistant", [{"type": "text", "text": ack}]
                 )
             await dispatcher.dispatch(tool_name, {})
 
@@ -989,8 +1091,14 @@ class _SwitchThenNewSessionClaudeClient(_FakeClaudeClient):
         self.turns.append(text)
         dispatcher = self.dispatcher
         switch_to = self.SWITCH_TO
+        store = self.store
+        create_fn = self._create_session_fn
 
         async def _gen():
+            if store is not None and self.session_id is None and create_fn is not None:
+                self.session_id = await create_fn()
+            if store is not None and self.session_id is not None:
+                await store.persist_turn(self.session_id, "user", text)
             yield "Okay, switching and starting fresh."
             await dispatcher.dispatch("switch_profile", {"profile_name": switch_to})
             await dispatcher.dispatch("new_session", {})
@@ -1164,21 +1272,22 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
                 await task
 
     # Claude fake got the user's stop message and its session_id was
-    # swapped out for a fresh one by reset_session.
+    # cleared by reset_session (lazy creation: the next user turn would
+    # create a fresh row; none happens in this test).
     claude = fake_claude_holder["client"]
     assert claude.turns == ["Meeko stop"]
+    assert claude.session_id is None
 
-    # A second SQLite session row exists (original + fresh one created
-    # after end_session).
+    # Only the original session row exists — the one the user spoke into.
+    # No empty stub for the "fresh" post-rotation session under lazy
+    # creation.
     store = SessionStore.open(db_path)
     try:
         rows = await store.list_sessions()
     finally:
         await store.close()
-    assert len(rows) == 2
-    new_row = rows[0]  # ordered by last_active DESC
-    # Claude client was pointed at the new session by reset_session.
-    assert claude.session_id == new_row["id"]
+    assert len(rows) == 1
+    assert rows[0]["turn_count"] >= 1
 
 
 async def test_end_session_without_wake_word_transitions_to_listening(
@@ -1237,20 +1346,16 @@ async def test_end_session_without_wake_word_transitions_to_listening(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Wait for the fresh session to be created (signal that the
-            # end_session hook ran to completion).
+            # Wait for end_session to run: stable signal is reset_count
+            # incrementing, which happens after the turn completes.
             claude = None
-            original_session_id = None
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if original_session_id is None:
-                        original_session_id = c.session_id
-                    if c.session_id is not None and c.session_id != original_session_id:
-                        claude = c
-                        break
+                if c is not None and c.reset_count >= 1:
+                    claude = c
+                    break
                 await real_sleep(0.01)
-            assert claude is not None, "session_id was never swapped"
+            assert claude is not None, "end_session never called reset_session"
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1261,7 +1366,9 @@ async def test_end_session_without_wake_word_transitions_to_listening(
         rows = await store.list_sessions()
     finally:
         await store.close()
-    assert len(rows) == 2
+    # Only the original (user-spoken) session row exists. Lazy creation
+    # means the post-rotation session has no row until the next user turn.
+    assert len(rows) == 1
 
 
 async def test_new_session_tool_rotates_session_and_stays_listening(
@@ -1364,20 +1471,16 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Wait until claude session_id changes (signal that the
-            # new_session rotation ran).
+            # Wait for new_session to run: stable signal is reset_count
+            # incrementing after the turn completes.
             claude = None
-            original_sid = None
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if original_sid is None:
-                        original_sid = c.session_id
-                    if c.session_id is not None and c.session_id != original_sid:
-                        claude = c
-                        break
+                if c is not None and c.reset_count >= 1:
+                    claude = c
+                    break
                 await real_sleep(0.01)
-            assert claude is not None, "session_id was never swapped"
+            assert claude is not None, "new_session never called reset_session"
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1387,15 +1490,15 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
     # LISTENING, not IDLE.
     assert detector_holder["d"].resets == 0
 
-    # Two session rows exist: the original + the fresh one.
+    # Only the original (user-spoken) session row exists. Lazy creation
+    # means the rotated session has no row until the next user turn.
     store = SessionStore.open(db_path)
     try:
         rows = await store.list_sessions()
     finally:
         await store.close()
-    assert len(rows) == 2
-    new_row = rows[0]  # ordered by last_active DESC
-    assert claude.session_id == new_row["id"]
+    assert len(rows) == 1
+    assert claude.session_id is None
 
 
 async def test_end_session_fires_background_summary_for_finalized_session(
@@ -1453,18 +1556,24 @@ async def test_end_session_fires_background_summary_for_finalized_session(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Wait for the claude client to be rebound to a new session
-            # (signal that end_session fired).
-            original_sid = None
+            # Wait for end_session to run via the stable reset_count signal,
+            # then read the finalized session id from the DB (lazy creation
+            # means it's the only row that was written).
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if original_sid is None:
-                        original_sid = c.session_id
-                    if c.session_id is not None and c.session_id != original_sid:
-                        break
+                if c is not None and c.reset_count >= 1:
+                    break
                 await real_sleep(0.01)
-            assert original_sid is not None
+            assert c.reset_count >= 1, "end_session never called reset_session"
+
+            # The finalized row is the only session in the DB at this point.
+            check = SessionStore.open(db_path)
+            try:
+                rows = await check.list_sessions()
+            finally:
+                await check.close()
+            assert len(rows) == 1, "expected exactly one finalized session row"
+            original_sid = rows[0]["id"]
 
             # Give the detached summary task a chance to complete.
             # The background summarize_session call awaits the stubbed
@@ -1577,18 +1686,21 @@ async def test_new_session_after_profile_switch_records_active_profile(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
+            # Wait for new_session to run via the stable reset_count signal.
             claude = None
-            original_sid = None
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if original_sid is None:
-                        original_sid = c.session_id
-                    if c.session_id is not None and c.session_id != original_sid:
-                        claude = c
-                        break
+                if c is not None and c.reset_count >= 1:
+                    claude = c
+                    break
                 await real_sleep(0.01)
-            assert claude is not None, "session_id was never swapped"
+            assert claude is not None, "new_session never called reset_session"
+
+            # Drive a second lazy creation by invoking the create_session_fn
+            # the orchestrator wired up. After switch_profile + new_session,
+            # the next user-turn's lazy create must use the *switched*
+            # profile.
+            new_sid = await claude._create_session_fn()
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1596,17 +1708,66 @@ async def test_new_session_after_profile_switch_records_active_profile(
 
     store = SessionStore.open(db_path)
     try:
-        rows = await store.list_sessions()
+        row = await store.get_session(new_sid)
     finally:
         await store.close()
-    # Two rows: the original (default profile) and the post-switch one
-    # (pirate profile). Latest is the fresh one.
-    assert len(rows) == 2
-    fresh = rows[0]  # ordered by last_active DESC
-    assert fresh["profile_name"] == "pirate", (
-        f"fresh session recorded stale profile {fresh['profile_name']!r}; "
+    assert row is not None
+    assert row["profile_name"] == "pirate", (
+        f"fresh session recorded stale profile {row['profile_name']!r}; "
         "expected 'pirate' after switch_profile"
     )
+
+
+class _EndSessionNoTurnClaudeClient(_FakeClaudeClient):
+    """Dispatches end_session without creating a session row first.
+
+    Simulates Sonnet ending the session before any user turn is persisted
+    (lazy creation never fires). Used to verify fire_summary no-ops on None."""
+
+    def stream_turn(self, text):
+        self.turns.append(text)
+        dispatcher = self.dispatcher
+
+        async def _gen():
+            yield "Goodbye."
+            await dispatcher.dispatch("end_session", {})
+
+        return _gen()
+
+
+class _LoadSessionWithTurnClaudeClient(_FakeClaudeClient):
+    """Lazily creates a session, persists a turn, then dispatches load_session.
+
+    Ensures session_id is non-None when the post-turn hook runs so the
+    `if session_id is not None: logger.info(...)` branch in
+    _apply_post_turn_session_change is exercised."""
+
+    def __init__(self, *args, target_session_id="", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.target_session_id = target_session_id
+
+    def stream_turn(self, text):
+        self.turns.append(text)
+        dispatcher = self.dispatcher
+        target_id = self.target_session_id
+        store = self.store
+        create_fn = self._create_session_fn
+
+        async def _gen():
+            if store is not None and self.session_id is None and create_fn is not None:
+                self.session_id = await create_fn()
+            if store is not None and self.session_id is not None:
+                await store.persist_turn(self.session_id, "user", text)
+            yield "Let me pull that up."
+            if store is not None and self.session_id is not None:
+                await store.persist_turn(
+                    self.session_id,
+                    "assistant",
+                    [{"type": "text", "text": "Let me pull that up."}],
+                )
+            await dispatcher.dispatch("load_session", {"id": target_id})
+
+        return _gen()
 
 
 class _LoadSessionClaudeClient(_SessionToolClaudeClient):
@@ -2636,3 +2797,203 @@ async def test_run_missing_api_key_raises(monkeypatch):
     ):
         with pytest.raises(KeyError):
             await meeko_main.run()
+
+
+async def test_end_session_before_any_turn_fire_summary_is_noop(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """If end_session fires before any user turn is persisted, session_id
+    is None and fire_summary must no-op (lazy creation never ran).
+    Covers the `if finalized_sid is None: return` branch in fire_summary."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "stop"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _EndSessionNoTurnClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            claude = None
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None and c.reset_count >= 1:
+                    claude = c
+                    break
+                await real_sleep(0.01)
+            assert claude is not None, "end_session never called reset_session"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    # No session row was created — lazy creation never fired and
+    # fire_summary(None) was a no-op rather than crashing.
+    store = SessionStore.open(db_path)
+    try:
+        rows = await store.list_sessions()
+    finally:
+        await store.close()
+    assert len(rows) == 0
+
+
+async def test_load_session_when_current_session_has_turns_fires_summary(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """load_session fires after the current session already has turns.
+    session_id is non-None so the summary log branch (line 332 in
+    _apply_post_turn_session_change) and fire_summary are both exercised."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    seed = SessionStore.open(db_path)
+    target_id = None
+    try:
+        target_id = await seed.create_session("default")
+        await seed.persist_turn(target_id, "user", "prior question")
+        await seed.persist_turn(
+            target_id, "assistant", [{"type": "text", "text": "prior answer"}]
+        )
+        await seed.update_session_metadata(
+            target_id,
+            title="Prior session",
+            summary="We discussed things.",
+            transcript="USER: prior question\nASSISTANT: prior answer",
+        )
+    finally:
+        await seed.close()
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "go back to the prior session"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _LoadSessionWithTurnClaudeClient(
+            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
+        )
+        fake_claude_holder["client"] = c
+        return c
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        original_sid = None
+        try:
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            # Wait for claude to be rebound to the target session.
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None and c.session_id == target_id:
+                    break
+                await real_sleep(0.01)
+
+            # The original session is the only row in the DB that isn't
+            # target_id — lazy creation wrote it, then load_session swapped
+            # the binding to target_id.
+            rows_check = SessionStore.open(db_path)
+            try:
+                all_rows = await rows_check.list_sessions()
+            finally:
+                await rows_check.close()
+            non_target = [r["id"] for r in all_rows if r["id"] != target_id]
+            assert non_target, "lazy creation never fired — no non-target session row"
+            original_sid = non_target[0]
+
+            # Give the background summary task time to write.
+            for _ in range(200):
+                store_check = SessionStore.open(db_path)
+                try:
+                    row = store_check._conn.execute(
+                        "SELECT title FROM sessions WHERE id = ?",
+                        (original_sid,),
+                    ).fetchone()
+                finally:
+                    await store_check.close()
+                if row is not None and row[0] is not None:
+                    break
+                await real_sleep(0.01)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    # The original (non-target) session was summarized by fire_summary.
+    store = SessionStore.open(db_path)
+    try:
+        row = store._conn.execute(
+            "SELECT title FROM sessions WHERE id = ?", (original_sid,)
+        ).fetchone()
+    finally:
+        await store.close()
+    assert row is not None and row[0] == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
+    assert fake_claude_holder["client"].session_id == target_id
