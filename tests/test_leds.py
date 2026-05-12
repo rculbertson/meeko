@@ -18,7 +18,6 @@ from meeko import leds
 from meeko.leds import (
     _RESID_GPO,
     EFFECT_BREATH,
-    EFFECT_DOA,
     EFFECT_OFF,
     EFFECT_SOLID,
     PALETTE,
@@ -26,6 +25,11 @@ from meeko.leds import (
     LedState,
     XvfLedDevice,
 )
+
+# Writes the worker issues once at startup before its action loop:
+# brightness, speed, gammify. Brightness and speed only affect the
+# breath effect (ignored by others) so they're set once and left alone.
+_STARTUP_WRITES = 3
 
 
 class FakeUsbDevice:
@@ -70,6 +74,14 @@ def _make_controller(fake: FakeUsbDevice) -> LedController:
     return LedController(device_factory=lambda: XvfLedDevice(fake))
 
 
+def _start_and_wait(fake: FakeUsbDevice, controller: LedController) -> None:
+    """Start the controller and wait until the worker's startup writes
+    are flushed. Tests then assert against ``snapshot()[_STARTUP_WRITES:]``
+    for a clean view of post-startup behavior."""
+    controller.start()
+    _wait_for_calls(fake, _STARTUP_WRITES)
+
+
 # --- enable / disable paths ----------------------------------------------
 
 
@@ -100,21 +112,42 @@ def test_disabled_kwarg_skips_device_factory() -> None:
     assert not factory_called
 
 
-# --- per-state command sequences -----------------------------------------
+# --- worker startup ------------------------------------------------------
 
 
 def _vendor_out_call(cmdid: int, payload: bytes) -> tuple[int, int, int, int, bytes]:
     return (0x40, 0, cmdid, _RESID_GPO, payload)
 
 
-def test_set_state_idle_writes_effect_off() -> None:
+def test_worker_issues_startup_writes() -> None:
+    """Brightness, speed, and gammify are applied once at worker
+    startup so per-state code doesn't have to repeat them."""
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
     controller.start()
     try:
+        _wait_for_calls(fake, _STARTUP_WRITES)
+        startup = fake.snapshot()[:_STARTUP_WRITES]
+        assert startup[0] == _vendor_out_call(13, bytes([PALETTE.breath_brightness]))
+        assert startup[1] == _vendor_out_call(15, bytes([PALETTE.breath_speed]))
+        assert startup[2] == _vendor_out_call(14, bytes([1]))
+    finally:
+        controller.close()
+
+
+# --- per-state command sequences -----------------------------------------
+
+
+def test_set_state_idle_writes_effect_off() -> None:
+    fake = FakeUsbDevice()
+    controller = _make_controller(fake)
+    _start_and_wait(fake, controller)
+    try:
         controller.set_state(LedState.IDLE)
-        _wait_for_calls(fake, 1)
-        assert fake.snapshot() == [_vendor_out_call(12, bytes([EFFECT_OFF]))]
+        _wait_for_calls(fake, _STARTUP_WRITES + 1)
+        assert fake.snapshot()[_STARTUP_WRITES:] == [
+            _vendor_out_call(12, bytes([EFFECT_OFF]))
+        ]
     finally:
         controller.close()
 
@@ -122,34 +155,29 @@ def test_set_state_idle_writes_effect_off() -> None:
 def test_set_state_listening_configures_solid() -> None:
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     try:
         controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 2)
-        calls = fake.snapshot()[:2]
+        _wait_for_calls(fake, _STARTUP_WRITES + 2)
+        calls = fake.snapshot()[_STARTUP_WRITES : _STARTUP_WRITES + 2]
         assert calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.listening))
         assert calls[1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
         controller.close()
 
 
-def test_set_state_listening_active_configures_doa() -> None:
+def test_set_state_listening_active_configures_solid() -> None:
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     try:
         controller.set_state(LedState.LISTENING_ACTIVE)
-        _wait_for_calls(fake, 2)
-        calls = fake.snapshot()[:2]
+        _wait_for_calls(fake, _STARTUP_WRITES + 2)
+        calls = fake.snapshot()[_STARTUP_WRITES : _STARTUP_WRITES + 2]
         assert calls[0] == _vendor_out_call(
-            17,
-            struct.pack(
-                "<II",
-                PALETTE.listening_active_base,
-                PALETTE.listening_active_indicator,
-            ),
+            16, struct.pack("<I", PALETTE.listening_active)
         )
-        assert calls[1] == _vendor_out_call(12, bytes([EFFECT_DOA]))
+        assert calls[1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
         controller.close()
 
@@ -157,15 +185,13 @@ def test_set_state_listening_active_configures_doa() -> None:
 def test_set_state_processing_configures_breath() -> None:
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     try:
         controller.set_state(LedState.PROCESSING)
-        _wait_for_calls(fake, 4)
-        calls = fake.snapshot()[:4]
+        _wait_for_calls(fake, _STARTUP_WRITES + 2)
+        calls = fake.snapshot()[_STARTUP_WRITES : _STARTUP_WRITES + 2]
         assert calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.processing))
-        assert calls[1] == _vendor_out_call(13, bytes([PALETTE.breath_brightness]))
-        assert calls[2] == _vendor_out_call(15, bytes([PALETTE.breath_speed]))
-        assert calls[3] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
+        assert calls[1] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
     finally:
         controller.close()
 
@@ -173,11 +199,11 @@ def test_set_state_processing_configures_breath() -> None:
 def test_set_state_speaking_configures_solid() -> None:
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     try:
         controller.set_state(LedState.SPEAKING)
-        _wait_for_calls(fake, 2)
-        calls = fake.snapshot()[:2]
+        _wait_for_calls(fake, _STARTUP_WRITES + 2)
+        calls = fake.snapshot()[_STARTUP_WRITES : _STARTUP_WRITES + 2]
         assert calls[0] == _vendor_out_call(16, struct.pack("<I", PALETTE.speaking))
         assert calls[1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
     finally:
@@ -193,10 +219,10 @@ def test_error_plays_red_breath_then_restores_state(
     monkeypatch.setattr(leds, "_ERROR_FLASH_S", 0.05)
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     try:
         controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 2)
+        _wait_for_calls(fake, _STARTUP_WRITES + 2)
         baseline = len(fake.snapshot())
 
         controller.error()
@@ -230,7 +256,7 @@ def test_error_plays_full_duration_when_state_set_first(
     monkeypatch.setattr(leds, "_ERROR_FLASH_S", 0.1)
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     try:
         # Mimic what main.py's exception path does: set new state, then
         # request the error animation.
@@ -238,9 +264,9 @@ def test_error_plays_full_duration_when_state_set_first(
         controller.error()
 
         start = time.monotonic()
-        # Expected writes: LISTENING (2) + error setup (4) + LISTENING
-        # restore (2) = 8.
-        _wait_for_calls(fake, 8, timeout=2.0)
+        # Expected writes after startup: LISTENING (2) + error setup (4)
+        # + LISTENING restore (2) = 8.
+        _wait_for_calls(fake, _STARTUP_WRITES + 8, timeout=2.0)
         elapsed = time.monotonic() - start
         # The breath must have actually slept; otherwise this would
         # finish in a few ms.
@@ -269,30 +295,33 @@ def test_animation_preempted_by_new_state(
     monkeypatch.setattr(leds, "_ERROR_FLASH_S", 5.0)
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     try:
         controller.set_state(LedState.LISTENING)
-        _wait_for_calls(fake, 2)
+        _wait_for_calls(fake, _STARTUP_WRITES + 2)
         controller.error()
         # Wait until the error flash has issued its 4 setup writes:
-        _wait_for_calls(fake, 6, timeout=1.0)
+        _wait_for_calls(fake, _STARTUP_WRITES + 6, timeout=1.0)
         # Now interrupt with a new state. The flash should abort early
         # and the new state should be applied directly with no
         # restoration of the pre-flash LISTENING state in between.
         controller.set_state(LedState.PROCESSING)
-        # Expected writes: LISTENING (2) + error setup (4) + PROCESSING
-        # (4) = 10. If the worker restored LISTENING after the
-        # interrupted flash there would be 12 writes.
-        _wait_for_calls(fake, 10, timeout=2.0)
+        # Expected writes after startup: LISTENING (2) + error setup (4)
+        # + PROCESSING (2) = 8. If the worker restored LISTENING after
+        # the interrupted flash there would be 10.
+        expected = _STARTUP_WRITES + 8
+        _wait_for_calls(fake, expected, timeout=2.0)
         calls = fake.snapshot()
         assert calls[-1] == _vendor_out_call(12, bytes([EFFECT_BREATH]))
-        assert len(calls) == 10, (
-            f"Expected exactly 10 writes (no LISTENING restore between flash "
-            f"and PROCESSING), got {len(calls)}: {calls}"
+        assert len(calls) == expected, (
+            f"Expected exactly {expected} writes (no LISTENING restore between "
+            f"flash and PROCESSING), got {len(calls)}: {calls}"
         )
-        # The writes after the error setup must be the PROCESSING block,
-        # not a LISTENING restore.
-        assert calls[6] == _vendor_out_call(16, struct.pack("<I", PALETTE.processing))
+        # The write right after the error setup must be the PROCESSING
+        # color, not a LISTENING restore.
+        assert calls[_STARTUP_WRITES + 6] == _vendor_out_call(
+            16, struct.pack("<I", PALETTE.processing)
+        )
     finally:
         controller.close()
 
@@ -303,9 +332,9 @@ def test_animation_preempted_by_new_state(
 def test_close_turns_leds_off() -> None:
     fake = FakeUsbDevice()
     controller = _make_controller(fake)
-    controller.start()
+    _start_and_wait(fake, controller)
     controller.set_state(LedState.LISTENING)
-    _wait_for_calls(fake, 2)
+    _wait_for_calls(fake, _STARTUP_WRITES + 2)
     controller.close()
     # Last call should be EFFECT_OFF from the close action.
     last = fake.snapshot()[-1]

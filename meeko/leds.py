@@ -6,8 +6,8 @@ error cues.
 
 We talk to the XVF3800 directly via pyusb vendor control transfers
 rather than vendoring ReSpeaker's xvf_host.py — only five commands are
-needed (LED_EFFECT, LED_BRIGHTNESS, LED_SPEED, LED_COLOR,
-LED_DOA_COLOR), all on the GPO servicer resid (20). Wire format:
+needed (LED_EFFECT, LED_BRIGHTNESS, LED_GAMMIFY, LED_SPEED, LED_COLOR),
+all on the GPO servicer resid (20). Wire format:
 
     bmRequestType = OUT|VENDOR|DEVICE   (write)
     bRequest      = 0
@@ -48,15 +48,14 @@ _RESID_GPO = 20
 
 _CMD_LED_EFFECT = 12
 _CMD_LED_BRIGHTNESS = 13
+_CMD_LED_GAMMIFY = 14
 _CMD_LED_SPEED = 15
 _CMD_LED_COLOR = 16
-_CMD_LED_DOA_COLOR = 17
 
 # LED_EFFECT modes per XVF3800 firmware.
 EFFECT_OFF = 0
 EFFECT_BREATH = 1
 EFFECT_SOLID = 3
-EFFECT_DOA = 4
 
 _USB_TIMEOUT_MS = 1000
 
@@ -71,12 +70,11 @@ class LedState(StrEnum):
     the orchestrator. The caller maps ``State`` → ``LedState``.
 
     ``LISTENING`` and ``LISTENING_ACTIVE`` are both sub-states of the
-    orchestrator's ``LISTENING``: the former is solid (post-wake-word,
-    confirming Meeko is listening), the latter is DoA mode (engaged on
-    Deepgram ``StartOfTurn``, providing direction-tracking feedback
-    while the user is speaking). DoA mode only lights the ring while
-    speech is detected, so it can't double as the wake-word
-    confirmation — hence the split.
+    orchestrator's ``LISTENING``: the former is a steady cyan
+    (post-wake-word, confirming Meeko is ready), the latter is a
+    brighter cyan (engaged on Deepgram ``StartOfTurn``, confirming
+    Meeko is hearing speech). Both are solid effects; the brightness
+    bump is the only visual difference.
     """
 
     IDLE = "idle"
@@ -90,14 +88,8 @@ class LedState(StrEnum):
 class _Palette:
     """Defaults — tweak in one place."""
 
-    # We use solid (not DoA) for LISTENING because DoA only lights the
-    # ring while speech is being detected — meaning the wake-word
-    # confirmation, which is the whole point, would be invisible until
-    # the user starts talking. The DoA sub-state takes over on
-    # Deepgram's StartOfTurn.
-    listening: int = 0x00C8C8  # cyan — "I heard you"
-    listening_active_base: int = 0x008888  # darker cyan underlay during DoA
-    listening_active_indicator: int = 0x00FFFF  # brighter cyan direction marker
+    listening: int = 0x00C8C8  # cyan — "I heard the wake word"
+    listening_active: int = 0x00FFFF  # brighter cyan — "I'm hearing you speak"
     processing: int = 0x0055FF  # blue (breath)
     speaking: int = 0x00A020  # soft green (solid)
     error: int = 0xFF0000  # red
@@ -133,17 +125,14 @@ class XvfLedDevice:
     def set_brightness(self, value: int) -> None:
         self._write(_CMD_LED_BRIGHTNESS, bytes([value & 0xFF]))
 
+    def set_gammify(self, enabled: bool) -> None:
+        self._write(_CMD_LED_GAMMIFY, bytes([1 if enabled else 0]))
+
     def set_speed(self, value: int) -> None:
         self._write(_CMD_LED_SPEED, bytes([value & 0xFF]))
 
     def set_color(self, rgb: int) -> None:
         self._write(_CMD_LED_COLOR, struct.pack("<I", rgb & 0xFFFFFFFF))
-
-    def set_doa_color(self, base: int, doa: int) -> None:
-        self._write(
-            _CMD_LED_DOA_COLOR,
-            struct.pack("<II", base & 0xFFFFFFFF, doa & 0xFFFFFFFF),
-        )
 
     def close(self) -> None:
         try:
@@ -255,6 +244,20 @@ class LedController:
     def _worker(self) -> None:
         assert self._device is not None
         try:
+            # Some settings can be applied once at startup, so
+            # we don't have to set them on each state change.
+            # Brightness and speed apply only to breath effect, and
+            # are ignored by other effects, so we can leave them set.
+            # Wrapped in try/except like each action below: a
+            # transient USB error here shouldn't kill the worker and
+            # silently disable LEDs for the rest of the session.
+            try:
+                self._device.set_brightness(PALETTE.breath_brightness)
+                self._device.set_speed(PALETTE.breath_speed)
+                # We want gammify always on.
+                self._device.set_gammify(True)
+            except Exception:
+                logger.exception("LED: startup configuration failed")
             while True:
                 action = self._queue.get()
                 try:
@@ -286,15 +289,10 @@ class LedController:
             d.set_color(PALETTE.listening)
             d.set_effect(EFFECT_SOLID)
         elif state == LedState.LISTENING_ACTIVE:
-            d.set_doa_color(
-                PALETTE.listening_active_base,
-                PALETTE.listening_active_indicator,
-            )
-            d.set_effect(EFFECT_DOA)
+            d.set_color(PALETTE.listening_active)
+            d.set_effect(EFFECT_SOLID)
         elif state == LedState.PROCESSING:
             d.set_color(PALETTE.processing)
-            d.set_brightness(PALETTE.breath_brightness)
-            d.set_speed(PALETTE.breath_speed)
             d.set_effect(EFFECT_BREATH)
         elif state == LedState.SPEAKING:
             d.set_color(PALETTE.speaking)
