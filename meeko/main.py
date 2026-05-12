@@ -473,6 +473,10 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             await summarize_session(store, sid, summary_client)
 
     for untitled_sid in untitled:
+        if untitled_sid == session_id:
+            # Resumed session is still active — skip backfill to avoid
+            # summarizing a row the user is actively adding turns to.
+            continue
         task = asyncio.create_task(_rate_limited_summary(untitled_sid))
         summary_tasks.add(task)
         task.add_done_callback(summary_tasks.discard)
