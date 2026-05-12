@@ -37,7 +37,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ### Session management (Claude tool-use)
 - Session-management intents are exposed to Sonnet as Claude-native tools, not detected by a separate classifier (see `meeko/tools/session.py`). Sonnet decides when to call them based on full conversation context.
-- Tools: `end_session`, `new_session`, `list_sessions(query)`, `load_session(id)`. Per-profile system prompts instruct Sonnet to acknowledge verbally before calling them.
+- Tools: `end_session`, `new_session`, `list_sessions(query)`, `load_session(id)`. Per-profile system prompts instruct Sonnet to acknowledge verbally before `new_session` / `load_session`; `end_session` is called silently so Meeko turns off without speaking.
 - Handlers only set flags on `SessionManager`; the orchestrator drains TTS first, then performs the actual session transition after SPEAKING ends (see the post-turn block in `meeko/main.py`).
 - `load_session` semantics: orchestrator finalizes (summarizes) the abandoned session in the background, then swaps the in-memory message array to the loaded transcript and rebinds `ClaudeClient` to the loaded session's SQLite row.
 - End-of-session summarization runs on Sonnet via `meeko/session_summary.py`, fire-and-forget. The summary + transcript are written to the standalone FTS5 `sessions_fts` table for keyword recall.
