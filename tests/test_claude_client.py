@@ -159,6 +159,80 @@ def test_with_cache_breakpoint_annotates_block_list_tail():
 
 
 @pytest.mark.asyncio
+async def test_persist_lazily_creates_session_on_first_turn(fake_anthropic):
+    """No session row is created up-front. The first persisted turn
+    triggers create_session_fn; subsequent turns reuse the id."""
+    persisted: list[tuple[str, str, Any]] = []
+    creates: list[int] = []
+
+    class _FakeStore:
+        async def persist_turn(self, sid, role, content):
+            persisted.append((sid, role, content))
+
+    async def create_fn() -> str:
+        creates.append(1)
+        return f"sess-{len(creates)}"
+
+    client = ClaudeClient(
+        api_key="test-key",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        store=_FakeStore(),
+        create_session_fn=create_fn,
+    )
+
+    assert client.session_id is None
+    assert len(creates) == 0
+    assert persisted == []
+
+    await _drain(client.stream_turn("first"))
+    assert client.session_id == "sess-1"
+    assert len(creates) == 1
+    # User + assistant turns both went to sess-1.
+    assert {sid for sid, _, _ in persisted} == {"sess-1"}
+
+    await _drain(client.stream_turn("second"))
+    # No second create — id reused.
+    assert len(creates) == 1
+    assert client.session_id == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_reset_session_clears_id_and_next_turn_lazily_creates(fake_anthropic):
+    """reset_session() clears the bound id so the next persisted turn
+    invokes create_session_fn for a fresh row."""
+
+    class _FakeStore:
+        async def persist_turn(self, sid, role, content):
+            pass
+
+    creates: list[str] = []
+
+    async def create_fn() -> str:
+        creates.append("x")
+        return f"sess-{len(creates)}"
+
+    client = ClaudeClient(
+        api_key="test-key",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        store=_FakeStore(),
+        create_session_fn=create_fn,
+    )
+
+    await _drain(client.stream_turn("first"))
+    assert client.session_id == "sess-1"
+
+    client.reset_session()
+    assert client.session_id is None
+    assert client._messages == []
+
+    await _drain(client.stream_turn("after reset"))
+    assert client.session_id == "sess-2"
+    assert len(creates) == 2
+
+
+@pytest.mark.asyncio
 async def test_stream_turn_sets_cache_breakpoint_on_last_message(fake_anthropic):
     client = _make_client()
     await _drain(client.stream_turn("Hello!"))

@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -225,6 +225,7 @@ class ClaudeClient:
         dispatcher: ToolDispatcher,
         store: SessionStore | None = None,
         session_id: str | None = None,
+        create_session_fn: Callable[[], Awaitable[str]] | None = None,
         compaction_trigger_tokens: int = DEFAULT_COMPACTION_TRIGGER_TOKENS,
         web_search_enabled: bool = DEFAULT_WEB_SEARCH_ENABLED,
         web_search_max_uses: int = DEFAULT_WEB_SEARCH_MAX_USES,
@@ -238,7 +239,12 @@ class ClaudeClient:
         self._messages: list[dict[str, Any]] = []
         self._store = store
         self._session_id = session_id
+        self._create_session_fn = create_session_fn
         self._context_management = _context_management(compaction_trigger_tokens)
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
 
     def set_system_prompt(self, prompt: str) -> None:
         self._profile_prompt = prompt
@@ -246,14 +252,15 @@ class ClaudeClient:
     def load_history(self, messages: list[dict[str, Any]]) -> None:
         self._messages = list(messages)
 
-    def reset_session(self, session_id: str) -> None:
-        """Drop in-memory history and rebind to a new SQLite session_id.
+    def reset_session(self) -> None:
+        """Drop in-memory history and clear the bound SQLite session_id.
 
-        Called by the orchestrator after `end_session` so subsequent turns
-        persist to a fresh row and don't carry the prior conversation
-        into a new wake cycle."""
+        Called by the orchestrator after `end_session` / `new_session` so
+        subsequent turns persist to a fresh row (lazily created on first
+        persist) and don't carry the prior conversation into a new wake
+        cycle."""
         self._messages = []
-        self._session_id = session_id
+        self._session_id = None
 
     def rebind_session(self, session_id: str) -> None:
         """Rebind to a different SQLite session_id without touching history.
@@ -452,6 +459,10 @@ class ClaudeClient:
         await self._persist("user", tool_results)
 
     async def _persist(self, role: str, content: str | list[dict[str, Any]]) -> None:
-        if self._store is None or self._session_id is None:
+        if self._store is None:
             return
+        if self._session_id is None:
+            if self._create_session_fn is None:
+                return
+            self._session_id = await self._create_session_fn()
         await self._store.persist_turn(self._session_id, role, content)

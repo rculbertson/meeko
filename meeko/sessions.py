@@ -220,6 +220,18 @@ class SessionStore:
                 (session_id, title, summary, transcript),
             )
 
+    def _list_untitled_sessions_with_turns_sync(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT s.id FROM sessions s "
+            "WHERE s.title IS NULL "
+            "AND EXISTS (SELECT 1 FROM turns t WHERE t.session_id = s.id) "
+            "ORDER BY s.last_active"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    async def list_untitled_sessions_with_turns(self) -> list[str]:
+        return await self._run(self._list_untitled_sessions_with_turns_sync)
+
     async def update_session_metadata(
         self,
         session_id: str,

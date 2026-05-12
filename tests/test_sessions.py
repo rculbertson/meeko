@@ -262,6 +262,26 @@ async def test_update_session_metadata_is_idempotent(tmp_path, store):
     assert latest == ("second", "new", "new text")
 
 
+async def test_list_untitled_sessions_with_turns_skips_empty_and_titled(store):
+    """Backfill candidates: sessions that have turns but no title yet.
+    Empty sessions and already-titled sessions must be excluded."""
+    empty_sid = await store.create_session("default")  # no turns, no title
+
+    untitled_sid = await store.create_session("default")
+    await store.persist_turn(untitled_sid, "user", "hello")
+
+    titled_sid = await store.create_session("default")
+    await store.persist_turn(titled_sid, "user", "hi")
+    await store.update_session_metadata(
+        titled_sid, title="Done", summary="s", transcript="hi"
+    )
+
+    candidates = await store.list_untitled_sessions_with_turns()
+    assert candidates == [untitled_sid]
+    assert empty_sid not in candidates
+    assert titled_sid not in candidates
+
+
 async def test_fts_match_finds_by_summary_and_transcript(tmp_path, store):
     sid_a = await store.create_session("default")
     sid_b = await store.create_session("default")
