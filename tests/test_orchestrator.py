@@ -143,6 +143,7 @@ class _FakeClaudeClient:
         self._create_session_fn = kwargs.get("create_session_fn")
         self.turns: list[str] = []
         self.loaded_history: list[dict] | None = None
+        self.reset_count = 0  # incremented each time reset_session() is called
 
     def stream_turn(self, text):
         self.turns.append(text)
@@ -172,6 +173,7 @@ class _FakeClaudeClient:
     def reset_session(self):
         self.session_id = None
         self.loaded_history = None
+        self.reset_count += 1
 
     def rebind_session(self, session_id):
         self.session_id = session_id
@@ -1344,21 +1346,16 @@ async def test_end_session_without_wake_word_transitions_to_listening(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Wait for end_session to run: session_id is lazily created
-            # during the user turn (None → id), then reset to None after
-            # the post-turn handler fires.
+            # Wait for end_session to run: stable signal is reset_count
+            # incrementing, which happens after the turn completes.
             claude = None
-            saw_id = False
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if c.session_id is not None:
-                        saw_id = True
-                    if saw_id and c.session_id is None:
-                        claude = c
-                        break
+                if c is not None and c.reset_count >= 1:
+                    claude = c
+                    break
                 await real_sleep(0.01)
-            assert claude is not None, "end_session never reset session_id"
+            assert claude is not None, "end_session never called reset_session"
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1474,21 +1471,16 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Wait until claude session_id is reset to None (signal that
-            # the new_session rotation ran; lazy creation means it goes
-            # None → id during the user turn, then back to None).
+            # Wait for new_session to run: stable signal is reset_count
+            # incrementing after the turn completes.
             claude = None
-            saw_id = False
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if c.session_id is not None:
-                        saw_id = True
-                    if saw_id and c.session_id is None:
-                        claude = c
-                        break
+                if c is not None and c.reset_count >= 1:
+                    claude = c
+                    break
                 await real_sleep(0.01)
-            assert claude is not None, "new_session never reset session_id"
+            assert claude is not None, "new_session never called reset_session"
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1564,22 +1556,24 @@ async def test_end_session_fires_background_summary_for_finalized_session(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Wait for the user-turn lazy-created session to be rotated
-            # away by end_session (None → id → None). Capture the id
-            # before reset so we can verify the summary writes to it.
-            original_sid = None
-            saw_reset = False
+            # Wait for end_session to run via the stable reset_count signal,
+            # then read the finalized session id from the DB (lazy creation
+            # means it's the only row that was written).
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if c.session_id is not None and original_sid is None:
-                        original_sid = c.session_id
-                    if original_sid is not None and c.session_id is None:
-                        saw_reset = True
-                        break
+                if c is not None and c.reset_count >= 1:
+                    break
                 await real_sleep(0.01)
-            assert original_sid is not None
-            assert saw_reset, "end_session never reset session_id"
+            assert c.reset_count >= 1, "end_session never called reset_session"
+
+            # The finalized row is the only session in the DB at this point.
+            check = SessionStore.open(db_path)
+            try:
+                rows = await check.list_sessions()
+            finally:
+                await check.close()
+            assert len(rows) == 1, "expected exactly one finalized session row"
+            original_sid = rows[0]["id"]
 
             # Give the detached summary task a chance to complete.
             # The background summarize_session call awaits the stubbed
@@ -1692,20 +1686,15 @@ async def test_new_session_after_profile_switch_records_active_profile(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Wait for new_session to reset session_id back to None
-            # after lazy creation lit it up during the turn.
+            # Wait for new_session to run via the stable reset_count signal.
             claude = None
-            saw_id = False
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if c.session_id is not None:
-                        saw_id = True
-                    if saw_id and c.session_id is None:
-                        claude = c
-                        break
+                if c is not None and c.reset_count >= 1:
+                    claude = c
+                    break
                 await real_sleep(0.01)
-            assert claude is not None, "new_session never reset session_id"
+            assert claude is not None, "new_session never called reset_session"
 
             # Drive a second lazy creation by invoking the create_session_fn
             # the orchestrator wired up. After switch_profile + new_session,
