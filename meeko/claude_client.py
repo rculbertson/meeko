@@ -154,10 +154,11 @@ _CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 
 
 def _today_block() -> dict[str, Any]:
-    """A small, uncached system block carrying the user's local date.
+    """A small, uncached system block carrying the user's local date and time.
 
     Sonnet uses this to interpret relative time references like "yesterday"
-    in `list_sessions` calls. Recomputed per turn so long-running sessions
+    in `list_sessions` calls and to answer "what time is it?" directly.
+    Recomputed per turn so the clock stays fresh and long-running sessions
     that span midnight don't see a stale date.
     """
     now = datetime.now().astimezone()
@@ -165,8 +166,10 @@ def _today_block() -> dict[str, Any]:
     return {
         "type": "text",
         "text": (
-            f"Today is {now.strftime('%Y-%m-%d (%A)')} in {tz}. "
-            "Use this when interpreting relative time references."
+            f"Today is {now.strftime('%Y-%m-%d (%A)')} and the current "
+            f"local time is {now.strftime('%-I:%M %p')} {tz}. "
+            "Use this when interpreting relative time references "
+            "or when asked about the current date or time."
         ),
     }
 
