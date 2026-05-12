@@ -233,6 +233,57 @@ async def test_reset_session_clears_id_and_next_turn_lazily_creates(fake_anthrop
 
 
 @pytest.mark.asyncio
+async def test_persist_skips_when_no_session_id_and_no_create_fn(fake_anthropic):
+    """Store provided but no create_session_fn and no session_id — _persist
+    should silently skip rather than crash."""
+    persisted: list = []
+
+    class _FakeStore:
+        async def persist_turn(self, sid, role, content):
+            persisted.append((sid, role, content))
+
+    client = ClaudeClient(
+        api_key="test-key",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        store=_FakeStore(),
+        # no session_id, no create_session_fn
+    )
+
+    await _drain(client.stream_turn("hello"))
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_persist_skips_when_create_fn_returns_empty(fake_anthropic, caplog):
+    """If create_session_fn returns an empty string, _persist logs an error
+    and skips writing the turn rather than persisting under a blank id."""
+    persisted: list = []
+
+    class _FakeStore:
+        async def persist_turn(self, sid, role, content):
+            persisted.append((sid, role, content))
+
+    async def bad_create_fn() -> str:
+        return ""
+
+    client = ClaudeClient(
+        api_key="test-key",
+        system_prompt="sys",
+        dispatcher=ToolDispatcher(),
+        store=_FakeStore(),
+        create_session_fn=bad_create_fn,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="meeko"):
+        await _drain(client.stream_turn("hello"))
+
+    assert persisted == []
+    assert any("empty id" in r.getMessage() for r in caplog.records)
+    assert client.session_id is None
+
+
+@pytest.mark.asyncio
 async def test_stream_turn_sets_cache_breakpoint_on_last_message(fake_anthropic):
     client = _make_client()
     await _drain(client.stream_turn("Hello!"))

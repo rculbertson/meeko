@@ -467,5 +467,11 @@ class ClaudeClient:
                 return
             async with self._session_create_lock:
                 if self._session_id is None:
-                    self._session_id = await self._create_session_fn()
+                    sid = await self._create_session_fn()
+                    if not sid:
+                        logger.error(
+                            "create_session_fn returned empty id; skipping persist"
+                        )
+                        return
+                    self._session_id = sid
         await self._store.persist_turn(self._session_id, role, content)
