@@ -40,7 +40,7 @@ DEFAULT_COMPACTION_TRIGGER_TOKENS = 150000
 # blocks without any client-side dispatch. `max_uses` caps worst-case
 # latency and cost per turn ($10 per 1k searches).
 DEFAULT_WEB_SEARCH_ENABLED = True
-DEFAULT_WEB_SEARCH_MAX_USES = 3
+DEFAULT_WEB_SEARCH_MAX_USES = 2
 
 
 def _context_management(trigger_tokens: int) -> dict:
