@@ -2017,6 +2017,58 @@ async def test_apply_post_turn_session_change_rebinds_profile_on_load(tmp_path):
         await store.close()
 
 
+async def test_apply_post_turn_session_change_aborts_load_on_missing_row(
+    tmp_path, caplog
+):
+    """If Sonnet hands us a bogus session id (or the row was deleted),
+    abort the load rather than binding Claude to a nonexistent session."""
+    from meeko.main import _apply_post_turn_session_change
+    from meeko.sessions import SessionStore
+    from meeko.tools.profile import ProfileManager
+    from meeko.tools.session import SessionManager
+
+    profiles = {
+        "query": Profile(
+            name="query", wake_word="meeko", prompt="QUERY-PROMPT", voice=None
+        ),
+    }
+
+    db_path = tmp_path / "meeko.db"
+    store = SessionStore.open(db_path)
+    try:
+        claude = MagicMock()
+        claude.session_id = None
+        speaker = MagicMock()
+        profile_manager = ProfileManager(
+            profiles, claude_client=claude, active_name="query"
+        )
+        profile_manager.set_speaker(speaker)
+
+        session_manager = SessionManager()
+        bogus_id = "00000000-0000-0000-0000-000000000000"
+        session_manager.request_load(bogus_id)
+
+        with caplog.at_level("ERROR", logger="meeko"):
+            new_state = await _apply_post_turn_session_change(
+                session_manager=session_manager,
+                profile_manager=profile_manager,
+                claude=claude,
+                store=store,
+                wake_detector=None,
+                session_id=None,
+                fire_summary=lambda _sid: None,
+            )
+
+        assert new_state == State.LISTENING
+        claude.load_history.assert_not_called()
+        claude.rebind_session.assert_not_called()
+        # Pending load flag cleared so we don't loop on the bogus id.
+        assert not session_manager.should_load()
+        assert any("not found" in r.getMessage() for r in caplog.records)
+    finally:
+        await store.close()
+
+
 async def test_end_then_load_session_fires_summary_for_current_session(
     monkeypatch, fake_profiles, tmp_path
 ):

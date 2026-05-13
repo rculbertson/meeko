@@ -329,10 +329,19 @@ async def _apply_post_turn_session_change(
         # Rebind the runtime profile (system prompt + voice) to match
         # the loaded session's persisted profile_name before swapping
         # history, so subsequent turns persist back into a row whose
-        # profile_name matches what is actually driving the model.
+        # profile_name matches what is actually driving the model. A
+        # missing row would mean Sonnet handed us a bogus id (or the
+        # session got deleted between list_sessions and load_session) —
+        # abort rather than binding Claude to a nonexistent session.
         target_row = await store.get_session(target_id)
-        if target_row is not None:
-            profile_manager.rebind_profile(str(target_row["profile_name"]))
+        if target_row is None:
+            logger.error(
+                "load_session: target session %s not found; aborting load",
+                target_id[:8],
+            )
+            session_manager.clear()
+            return State.LISTENING
+        profile_manager.rebind_profile(str(target_row["profile_name"]))
         turns = await store.load_turns(target_id)
         claude.load_history(turns)
         claude.rebind_session(target_id)
