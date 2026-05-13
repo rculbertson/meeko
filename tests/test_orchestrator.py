@@ -1938,13 +1938,19 @@ async def test_load_session_tool_swaps_history_and_stays_listening(
     ]
 
 
-async def test_load_session_rebinds_profile_for_loaded_session(monkeypatch, tmp_path):
-    """Loading a session created under a different profile must rebind
-    the runtime profile (system prompt + voice) to that profile so
-    subsequent turns persist back into a row whose profile_name still
-    matches what is actually driving the model. Regression test for #50.
+async def test_apply_post_turn_session_change_rebinds_profile_on_load(tmp_path):
+    """Direct test of the should_load branch in _apply_post_turn_session_change.
+
+    When the loaded session was created under a different profile than
+    the one currently active, the runtime profile (system prompt + voice
+    via ProfileManager) must be rebound before history is swapped, so
+    subsequent turns persist into a row whose profile_name still matches
+    what is driving the model. Regression test for #50.
     """
+    from meeko.main import _apply_post_turn_session_change
     from meeko.sessions import SessionStore
+    from meeko.tools.profile import ProfileManager
+    from meeko.tools.session import SessionManager
 
     profiles = {
         "query": Profile(
@@ -1952,95 +1958,63 @@ async def test_load_session_rebinds_profile_for_loaded_session(monkeypatch, tmp_
             wake_word="meeko",
             prompt="QUERY-PROMPT",
             voice="thalia",
-            idle_timeout_seconds=0,
         ),
         "conversation": Profile(
             name="conversation",
             wake_word="meeko",
             prompt="CONVERSATION-PROMPT",
             voice="orion",
-            idle_timeout_seconds=0,
         ),
     }
 
     db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    seed = SessionStore.open(db_path)
-    target_id = None
+    store = SessionStore.open(db_path)
     try:
         # Target session was created under the *conversation* profile —
-        # different from the default ("query") that run() will start in.
-        target_id = await seed.create_session("conversation")
-        await seed.persist_turn(target_id, "user", "let's keep chatting")
-        await seed.persist_turn(
+        # different from the "query" profile we'll have active.
+        target_id = await store.create_session("conversation")
+        await store.persist_turn(target_id, "user", "let's keep chatting")
+        await store.persist_turn(
             target_id, "assistant", [{"type": "text", "text": "Sure!"}]
         )
-    finally:
-        await seed.close()
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
+        claude = MagicMock()
+        claude.session_id = None
+        speaker = MagicMock()
 
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "go back to the chat session"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _LoadSessionClaudeClient(
-            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
+        profile_manager = ProfileManager(
+            profiles, claude_client=claude, active_name="query"
         )
-        fake_claude_holder["client"] = c
-        return c
+        profile_manager.set_speaker(speaker)
 
-    real_sleep = asyncio.sleep
+        session_manager = SessionManager()
+        session_manager.request_load(target_id)
 
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
+        summary_calls: list[str | None] = []
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            for _ in range(1500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
+        def fire_summary(sid: str | None) -> None:
+            summary_calls.append(sid)
 
-            for _ in range(1500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.session_id == target_id:
-                    break
-                await real_sleep(0.01)
-            assert fake_claude_holder.get("client") is not None
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        new_state = await _apply_post_turn_session_change(
+            session_manager=session_manager,
+            profile_manager=profile_manager,
+            claude=claude,
+            store=store,
+            wake_detector=None,
+            session_id=None,
+            fire_summary=fire_summary,
+        )
 
-    claude = fake_claude_holder["client"]
-    assert claude.session_id == target_id
-    # System prompt was rebound to the loaded session's profile. The
-    # paired Speaker voice rebind is covered by the ProfileManager
-    # unit test for rebind_profile in tests/test_profiles.py.
-    assert claude.system_prompt == "CONVERSATION-PROMPT"
+        assert new_state == State.LISTENING
+        # Profile was rebound to the loaded session's profile.
+        assert profile_manager.active_profile.name == "conversation"
+        claude.set_system_prompt.assert_called_once_with("CONVERSATION-PROMPT")
+        speaker.set_profile.assert_called_once_with(profiles["conversation"])
+        # History was loaded and the session id rebound to the target.
+        claude.load_history.assert_called_once()
+        claude.rebind_session.assert_called_once_with(target_id)
+    finally:
+        await store.close()
 
 
 async def test_end_then_load_session_fires_summary_for_current_session(
