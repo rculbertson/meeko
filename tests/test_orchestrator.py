@@ -230,8 +230,8 @@ def _stub_summary_anthropic_client():
 @pytest.fixture
 def fake_profiles():
     return {
-        "default": Profile(
-            name="default",
+        "query": Profile(
+            name="query",
             wake_word="meeko",
             prompt="system",
             voice=None,
@@ -281,7 +281,7 @@ async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles, tmp_pa
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -366,7 +366,7 @@ async def test_mute_mic_while_speaking_drops_chunks_during_speaking(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -461,7 +461,7 @@ async def test_run_reconnects_stt_after_connection_closed(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -514,7 +514,7 @@ async def test_run_backs_off_on_repeated_stt_failures(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
@@ -587,7 +587,7 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
@@ -648,7 +648,7 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
@@ -695,7 +695,7 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
     # Seed a session with two prior turns.
     seed = SessionStore.open(db_path)
     try:
-        session_id = await seed.create_session("default")
+        session_id = await seed.create_session("query")
         await seed.persist_turn(session_id, "user", "prior question")
         await seed.persist_turn(
             session_id, "assistant", [{"type": "text", "text": "prior reply"}]
@@ -728,8 +728,8 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
         return c
 
     resume_profiles = {
-        "default": Profile(
-            name="default",
+        "query": Profile(
+            name="query",
             wake_word="meeko",
             prompt="system",
             voice=None,
@@ -746,7 +746,7 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=resume_profiles),
+        patch("meeko.main.load_profiles", return_value=(resume_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -778,7 +778,7 @@ async def test_run_resume_unknown_id_exits(monkeypatch, fake_profiles, tmp_path)
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
 
     with (
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.setup_logging"),
     ):
@@ -794,7 +794,7 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
 
     seed = SessionStore.open(db_path)
     try:
-        sid = await seed.create_session("default")
+        sid = await seed.create_session("query")
         await seed.persist_turn(sid, "user", "hi")
     finally:
         await seed.close()
@@ -804,7 +804,7 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
 
     out = capsys.readouterr().out
     assert sid in out
-    assert "default" in out
+    assert "query" in out
 
 
 async def test_run_backfills_untitled_sessions_on_startup(
@@ -822,7 +822,7 @@ async def test_run_backfills_untitled_sessions_on_startup(
 
     seed = SessionStore.open(db_path)
     try:
-        untitled_sid = await seed.create_session("default")
+        untitled_sid = await seed.create_session("query")
         await seed.persist_turn(untitled_sid, "user", "leftover question")
         await seed.persist_turn(
             untitled_sid,
@@ -862,7 +862,7 @@ async def test_run_backfills_untitled_sessions_on_startup(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -924,8 +924,8 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
     speaker_stream.write.side_effect = lambda data: None
 
     wake_profiles = {
-        "default": Profile(
-            name="default",
+        "query": Profile(
+            name="query",
             wake_word="meeko",
             prompt="system",
             voice=None,
@@ -980,7 +980,7 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=wake_profiles),
+        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -1179,8 +1179,8 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
     speaker_stream.write.side_effect = lambda data: None
 
     wake_profiles = {
-        "default": Profile(
-            name="default",
+        "query": Profile(
+            name="query",
             wake_word="meeko",
             prompt="system",
             voice=None,
@@ -1229,7 +1229,7 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=wake_profiles),
+        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -1328,7 +1328,7 @@ async def test_end_session_without_wake_word_transitions_to_listening(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -1401,8 +1401,8 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
     speaker_stream.write.side_effect = lambda data: None
 
     wake_profiles = {
-        "default": Profile(
-            name="default",
+        "query": Profile(
+            name="query",
             wake_word="meeko",
             prompt="system",
             voice=None,
@@ -1448,7 +1448,7 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=wake_profiles),
+        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -1540,7 +1540,7 @@ async def test_end_session_fires_background_summary_for_finalized_session(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -1633,8 +1633,8 @@ async def test_new_session_after_profile_switch_records_active_profile(
     speaker_stream.write.side_effect = lambda data: None
 
     two_profiles = {
-        "default": Profile(
-            name="default",
+        "query": Profile(
+            name="query",
             wake_word="meeko",
             prompt="default system",
             voice=None,
@@ -1670,7 +1670,7 @@ async def test_new_session_after_profile_switch_records_active_profile(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=two_profiles),
+        patch("meeko.main.load_profiles", return_value=(two_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -1854,7 +1854,7 @@ async def test_load_session_tool_swaps_history_and_stays_listening(
     seed = SessionStore.open(db_path)
     target_id = None
     try:
-        target_id = await seed.create_session("default")
+        target_id = await seed.create_session("query")
         await seed.persist_turn(target_id, "user", "let's plan a todo app")
         await seed.persist_turn(
             target_id, "assistant", [{"type": "text", "text": "Sure, let's start!"}]
@@ -1895,7 +1895,7 @@ async def test_load_session_tool_swaps_history_and_stays_listening(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -1957,7 +1957,7 @@ async def test_end_then_load_session_fires_summary_for_current_session(
     seed = SessionStore.open(db_path)
     target_id = None
     try:
-        target_id = await seed.create_session("default")
+        target_id = await seed.create_session("query")
         await seed.persist_turn(target_id, "user", "prior question")
         await seed.persist_turn(
             target_id, "assistant", [{"type": "text", "text": "prior answer"}]
@@ -1992,7 +1992,7 @@ async def test_end_then_load_session_fires_summary_for_current_session(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2159,7 +2159,7 @@ async def test_puller_keeps_draining_events_while_worker_is_in_tts(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2263,7 +2263,7 @@ async def test_endofturn_during_speaking_is_logged_as_echo(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2321,8 +2321,8 @@ async def test_endofturn_while_idle_does_not_drive_a_turn(
     pa_instance.open.side_effect = [mic_stream, speaker_stream]
 
     wake_profiles = {
-        "default": Profile(
-            name="default",
+        "query": Profile(
+            name="query",
             wake_word="meeko",
             prompt="system",
             voice=None,
@@ -2358,7 +2358,7 @@ async def test_endofturn_while_idle_does_not_drive_a_turn(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=wake_profiles),
+        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2442,7 +2442,7 @@ async def test_start_of_turn_during_speaking_triggers_barge_in(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2557,7 +2557,7 @@ async def test_start_of_turn_during_processing_triggers_barge_in(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2666,7 +2666,7 @@ async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2753,7 +2753,7 @@ async def test_start_of_turn_while_listening_does_not_cancel(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2837,7 +2837,7 @@ async def test_end_session_before_any_turn_fire_summary_is_noop(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
@@ -2892,7 +2892,7 @@ async def test_load_session_when_current_session_has_turns_fires_summary(
     seed = SessionStore.open(db_path)
     target_id = None
     try:
-        target_id = await seed.create_session("default")
+        target_id = await seed.create_session("query")
         await seed.persist_turn(target_id, "user", "prior question")
         await seed.persist_turn(
             target_id, "assistant", [{"type": "text", "text": "prior answer"}]
@@ -2933,7 +2933,7 @@ async def test_load_session_when_current_session_has_turns_fires_summary(
 
     with (
         patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=fake_profiles),
+        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),

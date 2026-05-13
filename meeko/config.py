@@ -36,14 +36,18 @@ class Profile:
     wake_word: str
     prompt: str
     voice: str | None = None
-    # Mode controls post-turn idle behavior (see meeko/main.py _idle_monitor).
-    # "query" auto-closes silently after `idle_timeout_seconds` of silence.
-    # "conversation" prompts after `conversation_idle_seconds` then closes
-    # after `conversation_close_seconds` more silence (Stage 2).
-    mode: str = "query"
     idle_timeout_seconds: float = 5.0
     conversation_idle_seconds: float = 60.0
     conversation_close_seconds: float = 20.0
+
+    # The profile name is the mode. "query" auto-closes silently after
+    # `idle_timeout_seconds` of silence; "conversation" prompts after
+    # `conversation_idle_seconds` then closes after
+    # `conversation_close_seconds` more silence (see meeko/main.py
+    # _idle_monitor).
+    @property
+    def mode(self) -> str:
+        return self.name
 
 
 @dataclass(frozen=True)
@@ -72,11 +76,14 @@ class MeekoConfig:
     web_search_max_uses: int = 3
 
 
-def load_profiles(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Profile]:
+def load_profiles(
+    path: str | Path = DEFAULT_CONFIG_PATH,
+) -> tuple[dict[str, Profile], str]:
     """Load conversation profiles from `meeko.toml`.
 
-    Returns a dict keyed by profile name. Raises ValueError if no 'default'
-    profile is defined or if any profile has an invalid `mode`.
+    Returns `(profiles, default_profile_name)`. The profile name is the
+    mode, so each profile name must be one of `VALID_MODES`. The top-level
+    `default_profile` key selects which profile a fresh session starts in.
     """
     with open(path, "rb") as f:
         data = tomllib.load(f)
@@ -87,10 +94,9 @@ def load_profiles(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Profile]:
 
     profiles = {}
     for name, fields in raw_profiles.items():
-        mode = fields.get("mode", "query")
-        if mode not in VALID_MODES:
+        if name not in VALID_MODES:
             raise ValueError(
-                f"Profile {name!r} has invalid mode={mode!r}; "
+                f"Profile name {name!r} is not a valid mode; "
                 f"must be one of {sorted(VALID_MODES)}"
             )
         profiles[name] = Profile(
@@ -98,7 +104,6 @@ def load_profiles(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Profile]:
             wake_word=fields["wake_word"],
             prompt=fields["prompt"],
             voice=fields.get("voice"),
-            mode=mode,
             idle_timeout_seconds=float(
                 fields.get("idle_timeout_seconds", Profile.idle_timeout_seconds)
             ),
@@ -114,12 +119,19 @@ def load_profiles(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Profile]:
             ),
         )
 
-    if "default" not in profiles:
+    default_profile = data.get("default_profile")
+    if default_profile is None:
         raise ValueError(
-            f"No 'default' profile in {path}. Available: {', '.join(profiles)}"
+            f"Missing top-level 'default_profile' in {path}. "
+            f"Available profiles: {', '.join(sorted(profiles))}"
+        )
+    if default_profile not in profiles:
+        raise ValueError(
+            f"default_profile={default_profile!r} in {path} is not a defined "
+            f"profile. Available: {', '.join(sorted(profiles))}"
         )
 
-    return profiles
+    return profiles, default_profile
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:

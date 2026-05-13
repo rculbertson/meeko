@@ -42,7 +42,7 @@ uv run python -m meeko.main
 
 Say "Hey Meeko" to wake it. Press `Ctrl+C` to quit.
 
-The shipped `meeko.toml` provides two profiles: `default` (query mode — short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
+The shipped `meeko.toml` provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). The profile name *is* the mode. You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
 
 ## How it works
 
@@ -54,7 +54,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — state machine, se
 
 All non-secret settings live in `meeko.toml` at the repo root. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file.
 
-Settings are grouped into four tables: `[system]`, `[audio]`, `[wake_word]`, and `[claude]`. Profiles (personas) are defined under `[profiles.<name>]`.
+Settings are grouped into four tables: `[system]`, `[audio]`, `[wake_word]`, and `[claude]`. Profiles (personas) are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
 
 ### `[system]`
 
@@ -93,19 +93,18 @@ Settings are grouped into four tables: `[system]`, `[audio]`, `[wake_word]`, and
 
 ### Profiles
 
-`[profiles.<name>]` blocks define personas. A `default` profile is required. Each profile has:
+`[profiles.<name>]` blocks define personas. The profile name *is* the conversation mode, so it must be either `query` (auto-closes after a short silence) or `conversation` (stays open through pauses, asks before closing). A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required. Each profile has:
 
 | Key                           | Description                                                                        |
 |-------------------------------|------------------------------------------------------------------------------------|
 | `wake_word`                   | Wake-phrase label (advisory; the ONNX model determines the actual phrase).         |
 | `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`.                                          |
-| `mode`                        | Either `query` (auto-closes after a short silence) or `conversation` (stays open through pauses, asks before closing). |
 | `prompt`                      | The system prompt that defines the persona.                                        |
-| `idle_timeout_seconds`        | (query mode) silence window before silent close. Default `5.0`.                    |
-| `conversation_idle_seconds`   | (conversation mode) silence before the verbal check-in. Default `60.0`.            |
-| `conversation_close_seconds`  | (conversation mode) silence after the check-in before closing. Default `20.0`.     |
+| `idle_timeout_seconds`        | (query profile) silence window before silent close. Default `5.0`.                 |
+| `conversation_idle_seconds`   | (conversation profile) silence before the verbal check-in. Default `60.0`.         |
+| `conversation_close_seconds`  | (conversation profile) silence after the check-in before closing. Default `20.0`.  |
 
-See the shipped `meeko.toml` for working examples of both modes.
+See the shipped `meeko.toml` for working examples of both profiles.
 
 ## Notes for the ReSpeaker XVF3800
 

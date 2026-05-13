@@ -89,7 +89,7 @@ def test_build_transcript_skips_tool_use_and_tool_result_blocks():
 
 
 async def test_summarize_session_writes_title_summary_transcript(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "let's build a todo app")
     await store.persist_turn(
         sid,
@@ -140,7 +140,7 @@ async def test_summarize_session_writes_title_summary_transcript(store):
 
 
 async def test_summarize_session_skips_when_no_turns(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     client = _fake_anthropic_client(_text_response("{}"))
     await summarize_session(store, sid, client)
     client.messages.create.assert_not_awaited()
@@ -153,7 +153,7 @@ async def test_summarize_session_skips_when_no_turns(store):
 async def test_summarize_session_handles_markdown_fenced_json(store):
     """Sonnet sometimes wraps the JSON in a ```json fence despite the
     prompt asking for plain JSON. Extract the object instead of failing."""
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hi")
     fenced = (
         "```json\n"
@@ -171,7 +171,7 @@ async def test_summarize_session_handles_markdown_fenced_json(store):
 
 async def test_summarize_session_handles_prose_wrapped_json(store):
     """Also tolerant of 'Sure, here's the summary:' prefixes."""
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hi")
     prose = (
         "Sure, here's the JSON summary:\n"
@@ -187,7 +187,7 @@ async def test_summarize_session_handles_prose_wrapped_json(store):
 
 
 async def test_summarize_session_survives_invalid_json(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hi")
     client = _fake_anthropic_client(
         _text_response("sure, here's a summary: not-valid-json")
@@ -201,7 +201,7 @@ async def test_summarize_session_survives_invalid_json(store):
 
 
 async def test_summarize_session_survives_missing_keys(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hi")
     # Valid JSON but missing the required keys.
     client = _fake_anthropic_client(_text_response('{"title": "x"}'))
@@ -213,7 +213,7 @@ async def test_summarize_session_survives_missing_keys(store):
 
 
 async def test_summarize_session_survives_anthropic_error(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hi")
     client = MagicMock()
     client.messages = MagicMock()
@@ -229,7 +229,7 @@ async def test_summarize_session_survives_anthropic_error(store):
 async def test_summarize_session_survives_non_text_first_block(store):
     """If the first content block is not a text block, walk the list —
     never index or attribute-access blindly."""
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hi")
     response = SimpleNamespace(
         content=[

@@ -208,7 +208,7 @@ async def test_handle_list_sessions_date_only_finds_unfinalized(tmp_path):
 
     store = SessionStore.open(tmp_path / "meeko.db")
     try:
-        sid = await store.create_session("default")
+        sid = await store.create_session("query")
         await store.persist_turn(sid, "user", "hi")
         today = date.today().isoformat()
         tomorrow = (date.today() + timedelta(days=1)).isoformat()
@@ -255,7 +255,7 @@ async def test_handle_list_sessions_no_results(tmp_path):
 async def test_handle_list_sessions_returns_formatted_results(tmp_path):
     store = SessionStore.open(tmp_path / "meeko.db")
     try:
-        sid = await store.create_session("default")
+        sid = await store.create_session("query")
         await store.update_session_metadata(
             sid,
             title="Supabase planning",
@@ -294,7 +294,7 @@ async def test_handle_load_session_unknown_id_returns_error(tmp_path):
 async def test_handle_load_session_sets_flag(tmp_path):
     store = SessionStore.open(tmp_path / "meeko.db")
     try:
-        sid = await store.create_session("default")
+        sid = await store.create_session("query")
         await store.update_session_metadata(
             sid, title="Todo app", summary="s", transcript="t"
         )
@@ -319,7 +319,7 @@ async def test_handle_load_session_rejects_current_session(tmp_path):
     """Loading the already-active session is a no-op with a friendly reply."""
     store = SessionStore.open(tmp_path / "meeko.db")
     try:
-        sid = await store.create_session("default")
+        sid = await store.create_session("query")
         manager = SessionManager()
         result = await handle(
             "load_session",
@@ -338,7 +338,7 @@ async def test_handle_load_session_untitled_session_uses_placeholder(tmp_path):
     """Sessions without a title (never summarized) still get a readable result."""
     store = SessionStore.open(tmp_path / "meeko.db")
     try:
-        sid = await store.create_session("default")
+        sid = await store.create_session("query")
         manager = SessionManager()
         result = await handle(
             "load_session",

@@ -14,20 +14,18 @@ from meeko.main import (
 
 def _query_profile(timeout: float = 0.05) -> Profile:
     return Profile(
-        name="test",
+        name="query",
         wake_word="meeko",
         prompt="...",
-        mode="query",
         idle_timeout_seconds=timeout,
     )
 
 
 def _conversation_profile(idle: float = 0.02, close: float = 0.02) -> Profile:
     return Profile(
-        name="test",
+        name="conversation",
         wake_word="meeko",
         prompt="...",
-        mode="conversation",
         conversation_idle_seconds=idle,
         conversation_close_seconds=close,
     )
