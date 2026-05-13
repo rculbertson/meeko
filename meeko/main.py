@@ -647,6 +647,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         whether each EndOfTurn should drive a turn, and queue the ones
         that should."""
         nonlocal post_barge_in_pending
+        post_barge_in_pending = False  # clear any flag left over from prior session
         # If we want to make it faster, we can also use EagerEndOfTurn and
         # TurnResumed events which allows us to send text to the LLM eagerly.
         # If they're done talking, great, we already sent the text to the LLM.
@@ -704,11 +705,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             # window before drive_turns picks up the turn and
             # transitions to PROCESSING.)
             state_manager.set_listening_active(False)
-            if not text:
-                continue
             if post_barge_in_pending:
                 post_barge_in_pending = False
-                logger.info("[barge-in utterance dropped] %s", text)
+                if text:
+                    logger.info("[barge-in utterance dropped] %s", text)
+                continue
+            if not text:
                 continue
             await turn_queue.put(text)
 
