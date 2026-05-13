@@ -5,19 +5,19 @@ Meeko is a personal voice assistant backed by Claude. It handles the usual quick
 
 ## Features
 
-- **Named, resumable sessions** — every conversation is saved and searchable by voice ("let's go back to the todo app discussion")
+- **Named, resumable sessions** — every conversation is saved and searchable by voice.
+- **Natural session management** — start, end, and resume sessions by voice with no rigid command syntax; Claude decides when to call session tools from full conversation context
+- **Transcripts stay on your device** — every conversation is saved to SQLite on your own Raspberry Pi or Mac.
+- **Bring your own API keys** — talks to Deepgram and Anthropic directly, billed at provider rates with no assistant-vendor markup or middleman account.
 - **Stays cheap on long conversations** — prompt caching keeps token costs low even as sessions grow to 50k–150k tokens
 - **Never fills the context window** — long sessions are summarized automatically in-flight, without losing the full transcript on disk
-- **Natural session management** — start, end, and resume sessions by voice with no rigid command syntax; Claude decides when to call session tools from full conversation context
-- **Transcripts stay on your device** — every conversation is saved to SQLite on your own Raspberry Pi or Mac, not in a third-party cloud.
-- **Bring your own API keys** — talks to Deepgram and Anthropic directly, billed at provider rates with no assistant-vendor markup or middleman account.
 
 ## Prerequisites
 
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
 - PortAudio — `brew install portaudio` on macOS, `sudo apt install portaudio19-dev` on Debian/Ubuntu/Raspberry Pi OS
-- A microphone and speakers — anything PyAudio can see. The maintainer runs a Raspberry Pi 5 with a [ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html) USB mic array (see "Notes for the ReSpeaker XVF3800" below). A laptop's built-in mic and speakers work fine for development with `mute_mic_while_speaking = true`.
+- A microphone and speakers — anything PyAudio can see. Meeko was built using a Raspberry Pi 5 with a [ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html) USB mic array (see "Notes for the ReSpeaker XVF3800" below). But using any device's built-in mic and speakers works fine with `mute_mic_while_speaking = true`.
 - A [Deepgram](https://deepgram.com/) API key (the free tier includes ~$200 of credit)
 - An [Anthropic](https://www.anthropic.com/) API key
 
@@ -42,7 +42,7 @@ uv run python -m meeko.main
 
 Say "Hey Meeko" to wake it. Press `Ctrl+C` to quit.
 
-The shipped `meeko.toml` provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). The profile name *is* the mode. You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
+The shipped `meeko.toml` provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
 
 ## How it works
 
