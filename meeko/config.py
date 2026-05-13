@@ -17,9 +17,8 @@ VALID_MODES = {"query", "conversation"}
 DEFAULT_CONFIG_PATH = "meeko.toml"
 
 
-def _env_flag(name: str) -> bool:
-    """Parse a MEEKO_* bool env var. True for 1/true/yes (case-insensitive)."""
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+_BOOL_TRUE = {"1", "true", "yes"}
+_BOOL_FALSE = {"0", "false", "no", "off"}
 
 
 def _default_db_path() -> Path:
@@ -180,9 +179,14 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
         return float(v) if v else fallback
 
     def _bool_env(name: str, fallback: bool) -> bool:
-        if name in os.environ:
-            return _env_flag(name)
-        return fallback
+        v = os.environ.get(name, "").strip().lower()
+        if not v:
+            return fallback
+        if v in _BOOL_TRUE:
+            return True
+        if v in _BOOL_FALSE:
+            return False
+        raise ValueError(f"{name} must be one of 1/true/yes/0/false/no/off, got {v!r}")
 
     # system
     log_level = _str_env(

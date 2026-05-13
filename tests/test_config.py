@@ -104,11 +104,30 @@ def test_bool_env_truthy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, val: s
     assert cfg.led_disabled is True
 
 
-@pytest.mark.parametrize("val", ["", "0", "no", "false", "off"])
+@pytest.mark.parametrize("val", ["0", "no", "false", "off"])
 def test_bool_env_falsy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, val: str):
     monkeypatch.setenv("MEEKO_LED_DISABLED", val)
     cfg = load_config(tmp_path / "missing.toml")
     assert cfg.led_disabled is False
+
+
+def test_bool_env_empty_falls_back_to_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Empty (or whitespace-only) env vars are treated as unset, so the
+    TOML/default value wins. Matters for default-True flags like
+    web_search_enabled where empty=False would silently flip the feature."""
+    toml_file = tmp_path / "meeko.toml"
+    toml_file.write_text("[claude]\nweb_search_enabled = true\n")
+    monkeypatch.setenv("MEEKO_WEB_SEARCH_ENABLED", "")
+    cfg = load_config(toml_file)
+    assert cfg.web_search_enabled is True
+
+
+def test_bool_env_invalid_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MEEKO_LED_DISABLED", "maybe")
+    with pytest.raises(ValueError, match="MEEKO_LED_DISABLED"):
+        load_config(tmp_path / "missing.toml")
 
 
 def test_db_path_expansion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
