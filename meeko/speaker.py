@@ -53,6 +53,10 @@ class Speaker:
         self._mute_mic_while_speaking = mute_mic_while_speaking
         self._speak_lock = asyncio.Lock()
 
+    def set_profile(self, profile: Profile) -> None:
+        """Swap the active profile so subsequent speaks use its voice."""
+        self._profile = profile
+
     async def speak_stream(self, texts: AsyncIterator[str]) -> None:
         pipeline_depth = 2
         end_marker = object()

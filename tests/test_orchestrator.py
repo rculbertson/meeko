@@ -1938,6 +1938,122 @@ async def test_load_session_tool_swaps_history_and_stays_listening(
     ]
 
 
+async def test_load_session_rebinds_profile_for_loaded_session(monkeypatch, tmp_path):
+    """Loading a session created under a different profile must rebind
+    the runtime profile (system prompt + voice) to that profile so
+    subsequent turns persist back into a row whose profile_name still
+    matches what is actually driving the model. Regression test for #50.
+    """
+    from meeko.sessions import SessionStore
+
+    profiles = {
+        "query": Profile(
+            name="query",
+            wake_word="meeko",
+            prompt="QUERY-PROMPT",
+            voice="thalia",
+            idle_timeout_seconds=0,
+        ),
+        "conversation": Profile(
+            name="conversation",
+            wake_word="meeko",
+            prompt="CONVERSATION-PROMPT",
+            voice="orion",
+            idle_timeout_seconds=0,
+        ),
+    }
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    seed = SessionStore.open(db_path)
+    target_id = None
+    try:
+        # Target session was created under the *conversation* profile —
+        # different from the default ("query") that run() will start in.
+        target_id = await seed.create_session("conversation")
+        await seed.persist_turn(target_id, "user", "let's keep chatting")
+        await seed.persist_turn(
+            target_id, "assistant", [{"type": "text", "text": "Sure!"}]
+        )
+    finally:
+        await seed.close()
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    speaker_stream.write.side_effect = lambda data: None
+
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_stt.transcript = "go back to the chat session"
+    fake_tts = _FakeTTSClient("dg-test")
+    fake_claude_holder: dict = {}
+    speaker_holder: dict = {}
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        c = _LoadSessionClaudeClient(
+            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
+        )
+        fake_claude_holder["client"] = c
+        return c
+
+    real_speaker_cls = meeko_main.Speaker
+
+    def capturing_speaker(*args, **kwargs):
+        s = real_speaker_cls(*args, **kwargs)
+        speaker_holder["speaker"] = s
+        return s
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=(profiles, "query")),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.Speaker", side_effect=capturing_speaker),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            for _ in range(500):
+                if fake_stt.session_obj is not None:
+                    break
+                await real_sleep(0.01)
+            fake_stt.ready.set()
+
+            for _ in range(500):
+                c = fake_claude_holder.get("client")
+                if c is not None and c.session_id == target_id:
+                    break
+                await real_sleep(0.01)
+            assert fake_claude_holder.get("client") is not None
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    claude = fake_claude_holder["client"]
+    speaker = speaker_holder["speaker"]
+    assert claude.session_id == target_id
+    # System prompt was rebound to the loaded session's profile.
+    assert claude.system_prompt == "CONVERSATION-PROMPT"
+    # Speaker's voice was rebound too.
+    assert speaker._profile.name == "conversation"
+    assert speaker._profile.voice == "orion"
+
+
 async def test_end_then_load_session_fires_summary_for_current_session(
     monkeypatch, fake_profiles, tmp_path
 ):

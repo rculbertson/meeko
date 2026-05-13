@@ -13,6 +13,7 @@ from meeko.tools.dispatch import ToolDefinition
 
 if TYPE_CHECKING:
     from meeko.claude_client import ClaudeClient
+    from meeko.speaker import Speaker
 
 logger = logging.getLogger("meeko")
 
@@ -39,13 +40,48 @@ class ProfileManager:
         self._profiles = profiles
         self._active: str = active_name
         self._claude = claude_client
+        self._speaker: Speaker | None = None
 
     def set_claude_client(self, claude_client: ClaudeClient) -> None:
         self._claude = claude_client
 
+    def set_speaker(self, speaker: Speaker) -> None:
+        self._speaker = speaker
+
     @property
     def active_profile(self) -> Profile:
         return self._profiles[self._active]
+
+    def rebind_profile(self, profile_name: str) -> Profile:
+        """Rebind the active profile (silently — no tool-style reply).
+
+        Used when a loaded session was created under a different profile
+        than the one currently active: updates the system prompt held by
+        ClaudeClient and the voice held by Speaker so subsequent turns
+        match the loaded session's persisted ``profile_name``.
+
+        If ``profile_name`` is no longer defined, keep the current active
+        profile and log a warning (mirrors how stale profiles surface on
+        startup resume).
+        """
+        if profile_name not in self._profiles:
+            logger.warning(
+                "Loaded session references unknown profile %r; "
+                "keeping active profile %r",
+                profile_name,
+                self._active,
+            )
+            return self._profiles[self._active]
+        if profile_name == self._active:
+            return self._profiles[self._active]
+        profile = self._profiles[profile_name]
+        if self._claude is not None:
+            self._claude.set_system_prompt(profile.prompt)
+        if self._speaker is not None:
+            self._speaker.set_profile(profile)
+        self._active = profile_name
+        logger.info("Rebound to profile for loaded session: %s", profile_name)
+        return profile
 
     async def switch_profile(self, profile_name: str) -> str:
         if profile_name not in self._profiles:
@@ -58,6 +94,8 @@ class ProfileManager:
         profile = self._profiles[profile_name]
         if self._claude is not None:
             self._claude.set_system_prompt(profile.prompt)
+        if self._speaker is not None:
+            self._speaker.set_profile(profile)
         self._active = profile_name
         logger.info("Switched to profile: %s", profile_name)
         return f"Switched to {profile_name} mode."

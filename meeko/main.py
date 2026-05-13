@@ -326,6 +326,13 @@ async def _apply_post_turn_session_change(
                 "load_session: fired summary for abandoned %s",
                 session_id[:8],
             )
+        # Rebind the runtime profile (system prompt + voice) to match
+        # the loaded session's persisted profile_name before swapping
+        # history, so subsequent turns persist back into a row whose
+        # profile_name matches what is actually driving the model.
+        target_row = await store.get_session(target_id)
+        if target_row is not None:
+            profile_manager.rebind_profile(str(target_row["profile_name"]))
         turns = await store.load_turns(target_id)
         claude.load_history(turns)
         claude.rebind_session(target_id)
@@ -503,6 +510,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         state_manager.exit_speaking,
         mute_mic_while_speaking=config.mute_mic_while_speaking,
     )
+    profile_manager.set_speaker(speaker)
     timer_manager.set_speak_callback(speaker.speak)
 
     async def pump_mic(stt_session):
