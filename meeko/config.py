@@ -17,9 +17,8 @@ VALID_MODES = {"query", "conversation"}
 DEFAULT_CONFIG_PATH = "meeko.toml"
 
 
-def _env_flag(name: str) -> bool:
-    """Parse a MEEKO_* bool env var. True for 1/true/yes (case-insensitive)."""
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+_BOOL_TRUE = {"1", "true", "yes"}
+_BOOL_FALSE = {"0", "false", "no", "off"}
 
 
 def _default_db_path() -> Path:
@@ -180,9 +179,14 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
         return float(v) if v else fallback
 
     def _bool_env(name: str, fallback: bool) -> bool:
-        if name in os.environ:
-            return _env_flag(name)
-        return fallback
+        v = os.environ.get(name, "").strip().lower()
+        if not v:
+            return fallback
+        if v in _BOOL_TRUE:
+            return True
+        if v in _BOOL_FALSE:
+            return False
+        raise ValueError(f"{name} must be one of 1/true/yes/0/false/no/off, got {v!r}")
 
     # system
     log_level = _str_env(
@@ -244,13 +248,10 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
             claude.get("compaction_trigger_tokens", defaults.compaction_trigger_tokens)
         ),
     )
-    # Web search: prior env contract was MEEKO_WEB_SEARCH_DISABLED=1 to
-    # disable; we keep that as a one-way override on top of the TOML value.
-    web_search_enabled = bool(
-        claude.get("web_search_enabled", defaults.web_search_enabled)
+    web_search_enabled = _bool_env(
+        "MEEKO_WEB_SEARCH_ENABLED",
+        bool(claude.get("web_search_enabled", defaults.web_search_enabled)),
     )
-    if _env_flag("MEEKO_WEB_SEARCH_DISABLED"):
-        web_search_enabled = False
     web_search_max_uses = _int_env(
         "MEEKO_WEB_SEARCH_MAX_USES",
         int(claude.get("web_search_max_uses", defaults.web_search_max_uses)),

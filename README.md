@@ -88,7 +88,7 @@ Settings are grouped into four tables: `[system]`, `[audio]`, `[wake_word]`, and
 | TOML key                    | Env var                            | Default  | Description                                                                |
 |-----------------------------|------------------------------------|----------|----------------------------------------------------------------------------|
 | `compaction_trigger_tokens` | `MEEKO_COMPACTION_TRIGGER_TOKENS`  | `150000` | Input-token threshold that triggers server-side compaction.                |
-| `web_search_enabled`        | `MEEKO_WEB_SEARCH_DISABLED=1` to disable | `true` | Expose Anthropic's server-side web search tool to the model.            |
+| `web_search_enabled`        | `MEEKO_WEB_SEARCH_ENABLED`         | `true`   | Expose Anthropic's server-side web search tool to the model.               |
 | `web_search_max_uses`       | `MEEKO_WEB_SEARCH_MAX_USES`        | `2`      | Max web-search calls per turn.                                             |
 
 ### Profiles
