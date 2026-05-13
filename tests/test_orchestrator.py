@@ -2484,15 +2484,28 @@ async def test_start_of_turn_during_speaking_triggers_barge_in(
             assert not speaker_stream.stop_stream.called
             assert not speaker_stream.start_stream.called
 
-            # Now the user finishes their interruption. The EndOfTurn
-            # arrives in LISTENING (not SPEAKING) and drives a fresh turn.
+            # The barge-in utterance ("wait, actually") is dropped so that
+            # Meeko silently returns to LISTENING without sending the stop
+            # word to Claude. The user then speaks their real question.
             release_tts.set()  # unblock any residual TTS so new turn can run
             await session.event_queue.put(
                 SimpleNamespace(event="EndOfTurn", transcript="wait, actually")
             )
             await _wait_until(
+                lambda: any(
+                    "[barge-in utterance dropped]" in rec.getMessage()
+                    for rec in caplog.records
+                ),
+                real_sleep=real_sleep,
+            )
+
+            # Now the user asks their real question — this one reaches Claude.
+            await session.event_queue.put(
+                SimpleNamespace(event="EndOfTurn", transcript="what time is it")
+            )
+            await _wait_until(
                 lambda: (
-                    fake_claude_holder["client"].turns == ["hello", "wait, actually"]
+                    fake_claude_holder["client"].turns == ["hello", "what time is it"]
                 ),
                 real_sleep=real_sleep,
             )
@@ -2594,16 +2607,26 @@ async def test_start_of_turn_during_processing_triggers_barge_in(
             # Release Claude in case any partial cleanup is awaiting it.
             release_claude.set()
 
-            # The user finishes their interruption. The EndOfTurn
-            # arrives in LISTENING (not PROCESSING/SPEAKING) and drives
-            # a fresh turn — meaning the user's change-of-mind was
-            # captured, not silently dropped.
+            # The barge-in utterance ("wait, actually") is dropped so
+            # Meeko silently returns to LISTENING without sending it to
+            # Claude. A subsequent EndOfTurn drives the fresh turn.
             await session.event_queue.put(
                 SimpleNamespace(event="EndOfTurn", transcript="wait, actually")
             )
             await _wait_until(
+                lambda: any(
+                    "[barge-in utterance dropped]" in rec.getMessage()
+                    for rec in caplog.records
+                ),
+                real_sleep=real_sleep,
+            )
+
+            await session.event_queue.put(
+                SimpleNamespace(event="EndOfTurn", transcript="what time is it")
+            )
+            await _wait_until(
                 lambda: (
-                    fake_claude_holder["client"].turns == ["hello", "wait, actually"]
+                    fake_claude_holder["client"].turns == ["hello", "what time is it"]
                 ),
                 real_sleep=real_sleep,
             )
@@ -2618,10 +2641,10 @@ async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
     monkeypatch, fake_profiles, tmp_path, caplog
 ):
     """An EndOfTurn arriving before the barge-in cancel has propagated
-    through drive_turns must still be processed as a real turn, not
-    dropped as `[echo?]`. request_barge_in() flips state to LISTENING
-    synchronously so pull_stt_events sees the right state when it
-    drains the EndOfTurn that follows StartOfTurn."""
+    through drive_turns must be recognised as the barge-in utterance and
+    dropped silently, NOT logged as `[echo?]`. request_barge_in() flips
+    state to LISTENING synchronously and sets post_barge_in_pending so
+    pull_stt_events can distinguish the two cases."""
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
@@ -2701,9 +2724,15 @@ async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
             release_tts.set()  # let the cancelled speak unwind
 
             await _wait_until(
-                lambda: fake_claude_holder["client"].turns == ["hello", "stop"],
+                lambda: any(
+                    "[barge-in utterance dropped] stop" in rec.getMessage()
+                    for rec in caplog.records
+                ),
                 real_sleep=real_sleep,
             )
+
+            # The barge-in utterance must NOT have reached Claude.
+            assert fake_claude_holder["client"].turns == ["hello"]
 
             # Defensive: ensure the interruption was not logged as echo.
             assert not any(
