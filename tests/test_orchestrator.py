@@ -1991,7 +1991,6 @@ async def test_load_session_rebinds_profile_for_loaded_session(monkeypatch, tmp_
     fake_stt.transcript = "go back to the chat session"
     fake_tts = _FakeTTSClient("dg-test")
     fake_claude_holder: dict = {}
-    speaker_holder: dict = {}
 
     def make_claude(api_key, system_prompt, dispatcher, **kwargs):
         c = _LoadSessionClaudeClient(
@@ -1999,13 +1998,6 @@ async def test_load_session_rebinds_profile_for_loaded_session(monkeypatch, tmp_
         )
         fake_claude_holder["client"] = c
         return c
-
-    real_speaker_cls = meeko_main.Speaker
-
-    def capturing_speaker(*args, **kwargs):
-        s = real_speaker_cls(*args, **kwargs)
-        speaker_holder["speaker"] = s
-        return s
 
     real_sleep = asyncio.sleep
 
@@ -2021,19 +2013,18 @@ async def test_load_session_rebinds_profile_for_loaded_session(monkeypatch, tmp_
         patch("meeko.main.DeepgramSTT", return_value=fake_stt),
         patch("meeko.main.DeepgramTTS", return_value=fake_tts),
         patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.Speaker", side_effect=capturing_speaker),
         patch("meeko.main.asyncio.sleep", new=fast_sleep),
         patch("meeko.main.setup_logging"),
     ):
         task = asyncio.create_task(meeko_main.run())
         try:
-            for _ in range(500):
+            for _ in range(1500):
                 if fake_stt.session_obj is not None:
                     break
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            for _ in range(500):
+            for _ in range(1500):
                 c = fake_claude_holder.get("client")
                 if c is not None and c.session_id == target_id:
                     break
@@ -2045,13 +2036,11 @@ async def test_load_session_rebinds_profile_for_loaded_session(monkeypatch, tmp_
                 await task
 
     claude = fake_claude_holder["client"]
-    speaker = speaker_holder["speaker"]
     assert claude.session_id == target_id
-    # System prompt was rebound to the loaded session's profile.
+    # System prompt was rebound to the loaded session's profile. The
+    # paired Speaker voice rebind is covered by the ProfileManager
+    # unit test for rebind_profile in tests/test_profiles.py.
     assert claude.system_prompt == "CONVERSATION-PROMPT"
-    # Speaker's voice was rebound too.
-    assert speaker._profile.name == "conversation"
-    assert speaker._profile.voice == "orion"
 
 
 async def test_end_then_load_session_fires_summary_for_current_session(

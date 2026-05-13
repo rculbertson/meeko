@@ -190,6 +190,71 @@ def test_profile_manager_rejects_unknown_active_name():
         ProfileManager(profiles, active_name="nope")
 
 
+async def test_switch_profile_updates_speaker_voice():
+    """switch_profile must also update the Speaker so the next TTS call
+    uses the new profile's voice (sibling latent bug to #50 — fixed in
+    the same change because both rely on the same rebind plumbing)."""
+    profiles = _make_profiles()
+    claude = MagicMock()
+    speaker = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
+    mgr.set_speaker(speaker)
+
+    await mgr.switch_profile("conversation")
+
+    speaker.set_profile.assert_called_once_with(profiles["conversation"])
+
+
+def test_rebind_profile_updates_claude_and_speaker():
+    """Rebinding to a different profile updates Claude's system prompt
+    and Speaker's profile so subsequent turns match the loaded session."""
+    profiles = _make_profiles()
+    claude = MagicMock()
+    speaker = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
+    mgr.set_speaker(speaker)
+
+    returned = mgr.rebind_profile("conversation")
+
+    assert returned.name == "conversation"
+    assert mgr.active_profile.name == "conversation"
+    claude.set_system_prompt.assert_called_once_with("You are a thinking partner.")
+    speaker.set_profile.assert_called_once_with(profiles["conversation"])
+
+
+def test_rebind_profile_no_op_when_already_active():
+    profiles = _make_profiles()
+    claude = MagicMock()
+    speaker = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
+    mgr.set_speaker(speaker)
+
+    returned = mgr.rebind_profile("query")
+
+    assert returned.name == "query"
+    claude.set_system_prompt.assert_not_called()
+    speaker.set_profile.assert_not_called()
+
+
+def test_rebind_profile_unknown_falls_back_to_active(caplog):
+    """A loaded session may reference a profile that's since been
+    removed from meeko.toml; keep the current active profile and log."""
+    profiles = _make_profiles()
+    claude = MagicMock()
+    speaker = MagicMock()
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
+    mgr.set_speaker(speaker)
+
+    with caplog.at_level("WARNING", logger="meeko"):
+        returned = mgr.rebind_profile("retired-profile")
+
+    assert returned.name == "query"
+    assert mgr.active_profile.name == "query"
+    claude.set_system_prompt.assert_not_called()
+    speaker.set_profile.assert_not_called()
+    assert any("retired-profile" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions tests
 # ---------------------------------------------------------------------------
