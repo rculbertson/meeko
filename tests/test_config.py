@@ -133,13 +133,23 @@ def test_missing_toml_falls_back_to_defaults(tmp_path: Path):
     assert cfg == MeekoConfig()
 
 
-def test_web_search_disabled_env_overrides_toml_true(
+def test_web_search_enabled_env_overrides_toml_true(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """MEEKO_WEB_SEARCH_DISABLED=1 is a one-way override: it forces
-    web_search off even if the TOML opts in."""
+    """MEEKO_WEB_SEARCH_ENABLED=0 overrides a TOML opt-in."""
     toml_file = tmp_path / "meeko.toml"
     toml_file.write_text("[claude]\nweb_search_enabled = true\n")
-    monkeypatch.setenv("MEEKO_WEB_SEARCH_DISABLED", "1")
+    monkeypatch.setenv("MEEKO_WEB_SEARCH_ENABLED", "0")
     cfg = load_config(toml_file)
     assert cfg.web_search_enabled is False
+
+
+def test_web_search_enabled_env_overrides_toml_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """MEEKO_WEB_SEARCH_ENABLED=1 overrides a TOML opt-out."""
+    toml_file = tmp_path / "meeko.toml"
+    toml_file.write_text("[claude]\nweb_search_enabled = false\n")
+    monkeypatch.setenv("MEEKO_WEB_SEARCH_ENABLED", "1")
+    cfg = load_config(toml_file)
+    assert cfg.web_search_enabled is True

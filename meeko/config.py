@@ -244,13 +244,10 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
             claude.get("compaction_trigger_tokens", defaults.compaction_trigger_tokens)
         ),
     )
-    # Web search: prior env contract was MEEKO_WEB_SEARCH_DISABLED=1 to
-    # disable; we keep that as a one-way override on top of the TOML value.
-    web_search_enabled = bool(
-        claude.get("web_search_enabled", defaults.web_search_enabled)
+    web_search_enabled = _bool_env(
+        "MEEKO_WEB_SEARCH_ENABLED",
+        bool(claude.get("web_search_enabled", defaults.web_search_enabled)),
     )
-    if _env_flag("MEEKO_WEB_SEARCH_DISABLED"):
-        web_search_enabled = False
     web_search_max_uses = _int_env(
         "MEEKO_WEB_SEARCH_MAX_USES",
         int(claude.get("web_search_max_uses", defaults.web_search_max_uses)),
