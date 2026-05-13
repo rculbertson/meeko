@@ -1,0 +1,366 @@
+# Meeko Architecture
+
+How Meeko works under the hood — the components, the data flow, and the design decisions behind them. If you just want to install and run Meeko, see [README.md](README.md) instead.
+
+## 1. Overview
+
+Meeko is a personal voice assistant designed to serve as a long-running brainstorming partner. The core use case is extended, deep conversations — the kind where the user might pause for minutes at a time to think, then resume, or return days later to pick up a prior thread. This is fundamentally different from a command-and-control voice assistant or a customer service bot. Meeko needs to:
+
+- Support conversations that grow to 50k–150k tokens over time
+- Allow the user to pause and resume naturally, including across sessions
+- Resume prior conversations by voice ("let's go back to the todo app conversation")
+- Remain cost-efficient despite large conversation histories
+- Feel natural — no rigid command syntax, no jarring interruptions
+
+It also handles quick everyday tasks (one-shot questions, timers, persona switching), but the system is shaped around the long-conversation case; the quick-question case falls out naturally as the short tail.
+
+---
+
+## 2. Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        User                                  │
+└────────────────────────┬────────────────────────────────────┘
+                         │ voice
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Microphone + speaker hardware                   │
+│   (e.g. ReSpeaker XVF3800: 4-mic array, hardware AEC,        │
+│    beamforming, VAD; speaker via 3.5mm jack for AEC ref)     │
+└────────────┬────────────────────────────┬───────────────────┘
+             │ mic audio                   │ audio out
+             ▼                             ▼
+┌────────────────────┐         ┌──────────────────────┐
+│   Deepgram STT     │         │    Deepgram TTS       │
+│   Flux model       │         │    Aura-2             │
+│   EndOfTurn events │         │    streamed playback  │
+│   SpeechStarted    │         └──────────────────────┘
+└────────────┬───────┘                    ▲
+             │ transcript                 │ text
+             ▼                            │
+┌─────────────────────────────────────────────────────────────┐
+│                  Meeko Orchestrator                          │
+│                                                              │
+│  ┌──────────────────┐   ┌────────────────┐                  │
+│  │  Tool dispatcher │   │ Session Manager│                  │
+│  │  timer / profile │   │ SQLite storage │                  │
+│  │  session tools   │   │ resume logic   │                  │
+│  └────────┬─────────┘   └───────┬────────┘                  │
+│           │                     │                            │
+│           └──────────┬──────────┘                           │
+│                      ▼                                       │
+│            ┌──────────────────┐                             │
+│            │  Claude API      │                             │
+│            │  Direct calls    │                             │
+│            │  Prompt caching  │                             │
+│            │  Tool use        │                             │
+│            │  Web search      │                             │
+│            │  Auto compaction │                             │
+│            └──────────────────┘                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Hardware (tested configurations)
+
+Meeko is hardware-agnostic in principle — anything PyAudio can see for a mic and a speaker will work. The two configurations the maintainer has tested are:
+
+| Configuration | Notes |
+|---|---|
+| Raspberry Pi 5 (8 GB) + ReSpeaker XVF3800 + powered speaker | The production target. NVMe SSD via HAT recommended (SD cards are too slow for model loading) and active cooling is required under sustained load. |
+| macOS laptop with built-in mic and speakers | The development target. Set `mute_mic_while_speaking = true` to compensate for the lack of hardware AEC. |
+
+Other USB mic arrays and Linux hosts should work; you may need to tune `[audio]` device indices and channel counts.
+
+The ReSpeaker XVF3800 deserves a dedicated subsection because of its tight AEC requirements — see §4.1.
+
+---
+
+## 4. Component Details
+
+### 4.1 Mic / speaker layer (and the XVF3800)
+
+Audio I/O is implemented with PyAudio (not `sounddevice`) — PortAudio gives direct control over native channel counts, which we need because PortAudio does not silently rate/channel-convert the way macOS CoreAudio does for system apps. Both streams open at the device's native channel count and mono ↔ stereo conversion happens in Python.
+
+**ReSpeaker XVF3800 specifics.** The XVF3800 is a 4-mic USB array powered by the XMOS XVF3800 chip. It performs acoustic echo cancellation (AEC), beamforming, noise suppression, and voice activity detection entirely in hardware. Two configuration details matter:
+
+1. **Speaker must be plugged into the XVF3800's 3.5mm jack**, not the host's audio output. The chip needs the "far end" reference signal to subtract speaker audio from the mic input. Without it, AEC does not work and barge-in becomes impossible.
+2. **Take the left channel on input** (channel 0 = AEC-processed output on the XVF3800); duplicate mono TTS to both output channels.
+
+The maintainer also raised `PP_DTSENSITIVE` to `12` and persisted it to flash — see the README's "XVF3800 setup" section for the exact commands. Without it, the chip's default AEC tuning suppresses near-end speech too aggressively during far-end playback and barge-in stops working.
+
+For other hardware (Mac built-in mic, generic USB mics with no hardware AEC), set `mute_mic_while_speaking = true` so Meeko software-mutes the mic during TTS playback.
+
+### 4.2 Deepgram STT (Flux)
+
+Used for real-time transcription and end-of-turn detection. The Flux model is specifically designed for conversational voice agents — it detects end-of-turn semantically, not just by silence threshold.
+
+**Key events:**
+- `SpeechStarted` — user has begun speaking; used to trigger barge-in if TTS is playing
+- `EndOfTurn` — user has finished their turn; triggers the Claude API call
+
+### 4.3 Claude API (direct)
+
+Meeko calls the Claude API directly — not via Deepgram's managed LLM. This is the central architectural decision that enables prompt caching, server-side compaction, and full session control.
+
+**Model:** `claude-sonnet-4-6`
+
+**Prompt caching.** `cache_control` is stamped on the system prompt block and on the tail block of the latest message at send time. The breakpoint moves forward each turn, so the previous turn's tail becomes the longest cached prefix on the next call.
+
+**Server-side compaction.** Enabled via `client.beta.messages.stream(...)` with `betas=["compact-2026-01-12"]` and `context_management={"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": compaction_trigger_tokens}}]}`. The threshold is configured via `[claude] compaction_trigger_tokens` in `meeko.toml` (default `150000`). When the API summarizes a prefix, it returns a `compaction` content block in the assistant message. The client round-trips that block in the in-memory message array (so the server doesn't re-summarize the same prefix on the next turn) and filters it out before SQLite persistence (so on-disk transcripts stay verbatim).
+
+**Web search.** `ClaudeClient` exposes Anthropic's `web_search_20260209` server tool to Sonnet, gated by `[claude] web_search_enabled` (default `true`) and capped at `[claude] web_search_max_uses` calls per turn (default `3`). Web search is a server-side tool: the model invokes it inside the same streaming turn, emits `server_tool_use` and `web_search_tool_result` blocks, and we round-trip those blocks in the in-memory message array so the cached prefix stays valid. Result blocks are normalized before SQLite persistence so the on-disk transcript stays compact.
+
+### 4.4 Deepgram TTS (Aura-2)
+
+Used for speech synthesis. Text is streamed to the TTS WebSocket as Claude generates tokens, and audio is played back in real time with sub-200ms latency to first audio byte. The Aura-2 voice id is per-profile (`voice = "mars"`, `"andromeda"`, etc.) — see §4.7.
+
+### 4.5 Session Management via Claude Tools
+
+Session-management intents — end, new, list, and load (resume) — are exposed to Sonnet as Claude-native tools, not detected by a separate classifier. This mirrors the pattern already used for timers ([meeko/tools/timer.py](meeko/tools/timer.py)) and profile switching ([meeko/tools/profile.py](meeko/tools/profile.py)): tools are registered via `ToolDispatcher`, Sonnet decides when to call them based on the conversation, and the orchestrator executes the side effect when Sonnet emits a `tool_use` block.
+
+**Tools exposed to Sonnet:**
+
+| Tool | Behavior |
+|---|---|
+| `end_session` | Orchestrator finalizes the current SQLite session, returns state to `IDLE`, and re-arms the wake-word detector. |
+| `new_session` | Finalize current session, reset in-memory message array, create a fresh SQLite session row, continue in `LISTENING`. |
+| `list_sessions(query)` | FTS search across `title + summary + transcript` (BM25-weighted so title/summary matches rank above transcript). Returns top N matches as the tool result. |
+| `load_session(id)` | Special dispatch semantics — see below. |
+
+**Confirmation UX.** Profiles' system prompts instruct Sonnet to acknowledge verbally before destructive actions. *"I found the todo app session from Tuesday — want to pick that up?"* The confirmation flow is expressed as prompt guidance + the natural turn loop, not as a hard-coded state machine in the orchestrator.
+
+**Cache behavior.** Tool definitions are stable across turns and sit inside the cached prefix. Tool-result blocks are appended to the message array and are themselves cached on subsequent turns. No additional caching hooks required.
+
+**The `load_session` hook.** `load_session` is the one tool whose side effect rewrites Sonnet's own context. When dispatched, the orchestrator:
+
+1. Runs the normal tool handler, which sets a `request_load(target_id)` flag and returns the stored transcript metadata.
+2. After Sonnet's verbal confirmation/wrap-up is fully spoken (SPEAKING ends), fires the abandoned session's summary in the background, calls `store.load_turns(target_id)`, swaps the in-memory message array via `claude.load_history`, and `claude.rebind_session(target_id)`.
+3. Subsequent turns hit the cache with the injected history (one-time cache-write cost on the first post-load turn).
+
+See the post-turn block in [meeko/main.py](meeko/main.py).
+
+### 4.6 Wake-word gating
+
+On startup Meeko sits in `IDLE` with the mic open, but audio is fed to an [openWakeWord](https://github.com/dscripka/openWakeWord) detector running on-device (ONNX) instead of Deepgram STT. Saying "Hey Meeko" transitions the session to `LISTENING`, after which mic audio flows to Deepgram normally — the gate is **one-shot per session**, follow-up turns do not require re-waking. After `end_session`, the detector is reset and the session returns to `IDLE`.
+
+Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/hey_meeko.onnx`, threshold `0.96`. First run downloads openWakeWord's preprocessor ONNX files (~3 MB); for offline deploys, run `uv run python -m meeko.wake_word` on a network-connected host first to pre-populate the cache.
+
+### 4.7 Profiles and idle behavior
+
+Meeko runs under one of several **profiles** defined in `[profiles.<name>]` tables in `meeko.toml`. A profile is a (persona, mode, voice, idle-timing) bundle:
+
+- `prompt` — the system prompt that defines the persona
+- `voice` — Aura-2 voice id
+- `mode` — either `query` or `conversation`
+- `idle_timeout_seconds`, `conversation_idle_seconds`, `conversation_close_seconds`
+
+A `default` profile is required. The shipped config provides two profiles: `default` (query mode, terse one- to two-sentence replies) and `conversation` (conversation mode, substantive thinking-partner persona).
+
+**Modes** drive post-turn idle behavior in `_idle_monitor` ([meeko/main.py](meeko/main.py)):
+
+| Mode | Behavior |
+|---|---|
+| `query` | After `idle_timeout_seconds` of silence in LISTENING, close the session silently. Optimized for one-shot questions. |
+| `conversation` | After `conversation_idle_seconds`, speak a verbal check-in ("Would you like to continue, or should we end the session now?"). If no response within `conversation_close_seconds` after that, speak a closing line and end the session. Pauses are first-class. |
+
+**Voice-driven mode switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. When the user says "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on", Sonnet calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new mode's idle timings take effect on the next turn. The active profile persists for the rest of the session.
+
+### 4.8 Session Manager
+
+Responsible for storing and retrieving sessions. See §6 for the full data model.
+
+**Responsibilities:**
+- Write every turn to SQLite immediately on completion
+- Generate end-of-session summary via a separate Claude API call
+- Match resume requests to stored sessions
+- Inject full transcript on resume
+
+---
+
+## 5. Conversation Flow
+
+### 5.1 State Machine
+
+```
+┌─────────────┐
+│   IDLE      │ ◄─── app start, end_session tool call,
+└──────┬──────┘       idle-timeout close
+       │ wake word detected ("Hey Meeko")
+       ▼
+┌─────────────┐
+│  LISTENING  │ ◄── idle monitor running here (query or conversation mode)
+└──────┬──────┘
+       │ EndOfTurn fires
+       ▼
+┌─────────────┐
+│  PROCESSING │ Claude API call with tool use
+└──────┬──────┘
+       │ response ready (possibly with tool_use blocks)
+       ▼
+┌─────────────┐
+│  SPEAKING   │ streaming TTS playback
+└──────┬──────┘
+       │ audio finishes  ──────► back to LISTENING
+       │                    OR ─► IDLE if end_session was tool-called
+       │
+       │ SpeechStarted fires during SPEAKING
+       ▼
+   BARGE-IN: stop playback, cancel Claude request → LISTENING
+```
+
+### 5.2 Normal Turn Lifecycle
+
+1. `EndOfTurn` fires with finalized transcript.
+2. Call Claude API with current message array and registered tool definitions.
+3. If Sonnet emits one or more `tool_use` blocks, dispatch each through `ToolDispatcher` and append `tool_result` blocks to the message array; re-call Claude until no more tool calls.
+4. Append user message and final Claude response to:
+   - In-memory message array (for Claude context)
+   - On-disk SQLite transcript (persistent source of truth)
+5. Stream Claude response text to Deepgram TTS.
+6. Play audio through the speaker.
+7. If `end_session` was called during this turn, transition to IDLE and re-arm the wake detector; otherwise return to LISTENING and start the idle monitor for the active profile.
+
+### 5.3 Barge-In
+
+1. `SpeechStarted` fires while state is SPEAKING.
+2. Immediately stop TTS audio playback.
+3. Cancel in-flight Claude API request if possible.
+4. Discard any partially generated response.
+5. Transition to LISTENING.
+6. Process user's barge-in as a new turn.
+
+Hardware AEC (on the XVF3800) ensures Deepgram STT does not hear speaker audio as user speech. `SpeechStarted` events during TTS playback are therefore genuine barge-ins, not echo artifacts. On hardware without AEC, software mic-muting (`mute_mic_while_speaking = true`) provides the equivalent guarantee at the cost of disallowing barge-in.
+
+---
+
+## 6. Session Management
+
+### 6.1 Data Model (SQLite)
+
+```sql
+CREATE TABLE sessions (
+    id            TEXT PRIMARY KEY,     -- UUID
+    profile_name  TEXT NOT NULL,        -- which profile owned the session
+    title         TEXT,                 -- generated at session end
+    summary       TEXT,                 -- generated at session end
+    created_at    TEXT NOT NULL,        -- ISO 8601
+    last_active   TEXT NOT NULL         -- ISO 8601
+);
+
+CREATE TABLE turns (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    role        TEXT NOT NULL,          -- 'user' or 'assistant'
+    content     TEXT NOT NULL,          -- JSON-encoded: str for user speech,
+                                         -- list[block] for assistant / tool_result rounds
+    timestamp   TEXT NOT NULL           -- ISO 8601
+);
+
+CREATE INDEX idx_turns_session ON turns(session_id, id);
+
+-- Standalone FTS5 table (not content=sessions — external content FTS5
+-- uses INTEGER rowid linkage, but sessions.id is a TEXT UUID).
+-- Populated once per session by end-of-session summarization.
+-- Transcript column stores the flattened turn log for fallback recall
+-- when the summarizer didn't highlight a specific keyword.
+CREATE VIRTUAL TABLE sessions_fts USING fts5(
+    session_id UNINDEXED,
+    title,
+    summary,
+    transcript
+);
+```
+
+### 6.2 Turn Persistence
+
+Turns are written to SQLite immediately on completion — not buffered and not dependent on session end. This ensures:
+
+- No data loss if Meeko crashes or the host loses power.
+- The on-disk transcript is always the source of truth.
+- Server-side compaction can freely modify the in-memory message array without data loss.
+
+### 6.3 End-of-Session Summary
+
+When a session ends, a separate Claude API call generates a `{title, summary}` pair from the full on-disk transcript. This is independent of whatever state compaction has left the in-memory message array in. The transcript is written to `sessions_fts.transcript` alongside `title` and `summary` so FTS search has a fallback match surface when the summarizer misses a specific keyword the user later recalls.
+
+**Model choice.** Summarization runs on `claude-sonnet-4-6`, not Haiku. Sessions routinely grow to 50k–150k tokens, and summary quality directly drives voice-resume recall — a weak title means the user says *"go back to the todo app"* and FTS misses. The call is once per session and runs in the background, so Haiku's cost/latency advantages don't apply.
+
+For very long transcripts (over ~150k tokens), the summarizer splits into chunks, summarizes each chunk, then summarizes the summaries.
+
+### 6.4 Session Resume Flow
+
+Resume is driven by Sonnet calling the `list_sessions` and `load_session` tools — the same flow works whether the request comes on the first utterance after wake or mid-conversation.
+
+1. User expresses resume intent ("let's go back to the todo app", at session start or mid-conversation).
+2. Sonnet calls `list_sessions(query="todo app")`. The orchestrator runs SQLite FTS5 against title + summary + transcript (BM25-weighted so title/summary outrank transcript matches), returns top N matches as the tool result.
+3. Sonnet asks for confirmation verbally: *"I found the todo app session from Tuesday — shall I load it?"* (one clear match) or reads top 2-3 titles (multiple matches).
+4. On user confirmation, Sonnet calls `load_session(id=...)`. The orchestrator automatically fires end-of-session summarization for the abandoned session in the background, so Sonnet does not need to chain `end_session` first.
+5. The orchestrator's `load_session` dispatch hook (§4.5) loads the full transcript, replaces the in-memory message array, and rebinds `ClaudeClient` to the loaded session's SQLite row before the next user turn triggers a Claude call.
+6. Conversation continues in the loaded session's context.
+
+**Cost note.** Injecting a large transcript on resume incurs a one-time cache write cost on the first turn (~1.25× normal input price). Subsequent turns in that session hit the cache at 10% of normal input price.
+
+---
+
+## 7. Prompt Guidance for Session Tools
+
+Each profile's system prompt includes guidance directing Sonnet to:
+
+- Call `end_session` when the user clearly indicates they want to stop ("stop", "goodnight", "that's enough for today", "let's pick this up later"). `end_session` is called silently — Meeko turns off without a verbal goodbye. Do not call it when the user is ambiguous or immediately walks back the signal.
+- Call `list_sessions` when the user asks about prior conversations or wants to resume one.
+- Confirm verbally before destructive actions — especially `load_session` (which abandons the current context) and `new_session` (which discards the current thread).
+
+**Example phrases Sonnet should treat as end-session signals:** "I think that's enough for today", "let's stop here", "save this", "goodnight", "Meeko stop".
+
+**Example phrases that should NOT trigger `end_session`:** "stop interrupting me", "that's enough about X, let's talk about Y", "I was going to stop but…".
+
+The fine-grained call/don't-call judgment is Sonnet's — the system prompt gives the policy, and Sonnet has full conversation context to apply it.
+
+---
+
+## 8. Key Decisions
+
+### Why call Claude directly instead of using Deepgram's managed Claude?
+
+Deepgram's Voice Agent API manages the Claude API calls internally, which means there is no way to add `cache_control` headers, enable auto compaction, or control what gets injected on session resume. For Meeko's use case — long conversations with persistent sessions — these features are essential. The cost of forgoing them (ever-growing token costs, no compaction, shallow resume) outweighs the convenience of the managed integration.
+
+### Why use Deepgram for STT at all, rather than Whisper or similar?
+
+Deepgram's Flux model provides end-of-turn detection that is semantically aware — it distinguishes a mid-thought pause from an actual turn completion. This is a genuinely hard problem to solve well. Building equivalent quality turn detection from scratch would be a significant project. Flux gives it for free as part of the STT API.
+
+### Why store turns immediately rather than at session end?
+
+Server-side compaction modifies the in-memory message array during long sessions — early turns get replaced by a summary. If turns were only persisted at session end, those early turns would be lost. Writing to SQLite on every turn ensures the on-disk transcript always contains the full verbatim history regardless of what compaction has done in memory.
+
+### Why keep both full transcript and summary per session?
+
+The summary is used for resume matching — it's fast to search and compact enough to pass to Claude for disambiguation. The full transcript is used for the actual resume — injecting the summary alone would lose the nuance that makes brainstorming sessions valuable. They serve different purposes.
+
+### Why Claude tool-use for session management rather than a two-stage intent classifier?
+
+An earlier draft proposed a keyword filter + Haiku classifier running on every turn to detect session-management intents. We chose tool-use instead:
+
+- **Context awareness:** Sonnet sees the full conversation; a per-turn classifier sees one turn in isolation. Ambiguous phrasings ("that's enough about X, let's talk about Y", "I was going to stop but…") are exactly where an isolated classifier breaks. Sonnet gets the nuance right.
+- **Cost:** Session commands are rare (≈once per session). With prompt caching at ~90% input discount on cached prefixes, the cost of routing session intents through Sonnet is negligible.
+- **Latency:** Session commands aren't time-critical — an extra ~1s on "goodnight" doesn't meaningfully affect UX.
+- **Reliability:** One code path, one failure mode. Two-stage has two (keyword miss, Haiku miss).
+- **Mid-conversation resume** falls out naturally when `list_sessions` / `load_session` are tools — Sonnet chains them inside a single turn. The two-stage framework would need a dedicated out-of-loop flow.
+
+The one operational wrinkle — `load_session` replaces Sonnet's own message array — is handled as a single post-dispatch hook (§4.5).
+
+### Why the ReSpeaker XVF3800's 3.5mm jack for the speaker?
+
+The XVF3800 performs acoustic echo cancellation using a reference signal — the audio being played through the speaker. For hardware AEC to work, the speaker audio must reach the chip as a reference. Plugging the speaker into the 3.5mm jack on the XVF3800 provides this reference automatically. Without it, the microphones pick up speaker audio as user speech, causing false `SpeechStarted` events and hallucinated transcriptions.
+
+### Why not use Deepgram's built-in echo cancellation?
+
+Deepgram's documentation defers echo cancellation to the browser's WebRTC stack or telephone hardware. In a Python process on a Pi or laptop, neither is available. Hardware AEC (XVF3800) or software mic-muting (`mute_mic_while_speaking`) handle this instead.
+
+---
+
+## 9. Deliberate Scope
+
+Meeko is intentionally a voice-only, single-user, single-device assistant. Features explicitly out of scope for now: web or mobile UI, multi-user support, semantic search over sessions (SQLite FTS5 is sufficient at expected volumes), session deletion or editing by voice, cross-device sync. These omissions keep the system small enough to reason about end-to-end; revisit any of them if real-world usage shows a clear need.
