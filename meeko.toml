@@ -2,6 +2,10 @@
 # through to defaults that match the historical env-var behavior. Any
 # MEEKO_* environment variable overrides the value set here.
 
+# Which profile a fresh session starts in. Must match one of the
+# [profiles.<name>] table names below.
+default_profile = "query"
+
 # [system]
 # log_level = "DEBUG"            # MEEKO_LOG_LEVEL
 # log_target = "file"            # MEEKO_LOG_TARGET — omit for stderr
@@ -25,10 +29,9 @@
 # web_search_enabled = true           # MEEKO_WEB_SEARCH_DISABLED=1 forces off
 # web_search_max_uses = 3             # MEEKO_WEB_SEARCH_MAX_USES
 
-[profiles.default]
+[profiles.query]
 wake_word = "meeko"
 voice = "mars"
-mode = "query"
 prompt = """\
 You are Meeko, a voice assistant optimized for quick questions. \
 Your responses will be spoken aloud via text-to-speech, \
@@ -65,7 +68,6 @@ conversation in the background before swapping to the loaded one.\
 [profiles.conversation]
 wake_word = "meeko"
 voice = "mars"
-mode = "conversation"
 prompt = """\
 You are Meeko, a thinking partner for long, in-depth conversations — \
 brainstorming, working through a problem, talking something out, or just \

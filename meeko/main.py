@@ -220,6 +220,7 @@ async def _init_session_state(
     store: SessionStore,
     resume: str | None,
     profiles: dict[str, Profile],
+    default_profile_name: str,
 ) -> tuple[Profile, str | None, list[dict] | None]:
     """Resolve the active profile, session id, and prior history (if any).
 
@@ -236,15 +237,7 @@ async def _init_session_state(
     if resumed_row is not None:
         session_id = str(resumed_row["id"])
         stored_profile = str(resumed_row["profile_name"])
-        if stored_profile in profiles:
-            profile = profiles[stored_profile]
-        else:
-            logger.warning(
-                "Session %s profile %r missing; falling back to default",
-                session_id,
-                stored_profile,
-            )
-            profile = profiles["default"]
+        profile = profiles[stored_profile]
         await store.touch_session(session_id)
         history = await store.load_turns(session_id)
         logger.info(
@@ -255,7 +248,7 @@ async def _init_session_state(
         )
         return profile, session_id, history
 
-    profile = profiles["default"]
+    profile = profiles[default_profile_name]
     logger.info(
         "Started new session (profile=%s, row deferred until first turn)",
         profile.name,
@@ -393,11 +386,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     deepgram_key = os.environ["DEEPGRAM_API_KEY"]
     anthropic_key = os.environ["ANTHROPIC_API_KEY"]
 
-    profiles = load_profiles()
+    profiles, default_profile_name = load_profiles()
     store = SessionStore.open(config.db_path)
-    profile, session_id, history = await _init_session_state(store, resume, profiles)
+    profile, session_id, history = await _init_session_state(
+        store, resume, profiles, default_profile_name
+    )
 
-    profile_manager = ProfileManager(profiles)
+    profile_manager = ProfileManager(profiles, active_name=default_profile_name)
     session_manager = SessionManager()
 
     # Lazy session creation: the row is INSERTed on the first persisted

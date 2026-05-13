@@ -41,7 +41,7 @@ async def test_open_creates_parent_dir(tmp_path):
 
 
 async def test_create_session_persists_row(tmp_path, store):
-    session_id = await store.create_session("default")
+    session_id = await store.create_session("query")
     assert isinstance(session_id, str) and len(session_id) == 36
 
     conn = sqlite3.connect(str(tmp_path / "meeko.db"))
@@ -52,12 +52,12 @@ async def test_create_session_persists_row(tmp_path, store):
     finally:
         conn.close()
     assert row[0] == session_id
-    assert row[1] == "default"
+    assert row[1] == "query"
     assert row[2] == row[3]  # created_at == last_active at creation
 
 
 async def test_persist_turn_roundtrip_string_content(tmp_path, store):
-    session_id = await store.create_session("default")
+    session_id = await store.create_session("query")
     await store.persist_turn(session_id, "user", "hello world")
 
     conn = sqlite3.connect(str(tmp_path / "meeko.db"))
@@ -72,7 +72,7 @@ async def test_persist_turn_roundtrip_string_content(tmp_path, store):
 
 
 async def test_persist_turn_roundtrip_block_list_content(tmp_path, store):
-    session_id = await store.create_session("default")
+    session_id = await store.create_session("query")
     blocks = [
         {"type": "text", "text": "Hi."},
         {"type": "tool_use", "id": "t1", "name": "timer", "input": {"s": 60}},
@@ -90,7 +90,7 @@ async def test_persist_turn_roundtrip_block_list_content(tmp_path, store):
 
 
 async def test_persist_turn_updates_last_active(tmp_path, store):
-    session_id = await store.create_session("default")
+    session_id = await store.create_session("query")
 
     conn = sqlite3.connect(str(tmp_path / "meeko.db"))
     try:
@@ -113,7 +113,7 @@ async def test_persist_turn_updates_last_active(tmp_path, store):
 
 
 async def test_multiple_sessions_isolated(tmp_path, store):
-    a = await store.create_session("default")
+    a = await store.create_session("query")
     b = await store.create_session("pirate")
     await store.persist_turn(a, "user", "in a")
     await store.persist_turn(b, "user", "in b")
@@ -138,7 +138,7 @@ async def test_get_latest_returns_none_when_empty(store):
 
 
 async def test_get_latest_returns_most_recent_by_last_active(store):
-    a = await store.create_session("default")
+    a = await store.create_session("query")
     b = await store.create_session("pirate")
     # b was created later, so b should be latest
     latest = await store.get_latest_session()
@@ -148,19 +148,19 @@ async def test_get_latest_returns_most_recent_by_last_active(store):
     await store.persist_turn(a, "user", "ping")
     latest = await store.get_latest_session()
     assert latest["id"] == a
-    assert latest["profile_name"] == "default"
+    assert latest["profile_name"] == "query"
 
 
 async def test_get_session_by_id(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     row = await store.get_session(sid)
     assert row["id"] == sid
-    assert row["profile_name"] == "default"
+    assert row["profile_name"] == "query"
     assert await store.get_session("no-such-id") is None
 
 
 async def test_list_sessions_orders_and_counts(store):
-    a = await store.create_session("default")
+    a = await store.create_session("query")
     b = await store.create_session("pirate")
     await store.persist_turn(a, "user", "hi")
     await store.persist_turn(a, "assistant", [{"type": "text", "text": "hey"}])
@@ -179,7 +179,7 @@ async def test_list_sessions_orders_and_counts(store):
 
 
 async def test_load_turns_roundtrips_mixed_content(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hello")
     blocks = [
         {"type": "text", "text": "Hi."},
@@ -195,7 +195,7 @@ async def test_load_turns_roundtrips_mixed_content(store):
 
 
 async def test_touch_session_updates_last_active(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     before = (await store.get_session(sid))["last_active"]
     await store.touch_session(sid)
     after = (await store.get_session(sid))["last_active"]
@@ -203,7 +203,7 @@ async def test_touch_session_updates_last_active(store):
 
 
 async def test_update_session_metadata_writes_row_and_fts(tmp_path, store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.update_session_metadata(
         sid,
         title="Todo app prototype",
@@ -239,7 +239,7 @@ async def test_update_session_metadata_writes_row_and_fts(tmp_path, store):
 
 async def test_update_session_metadata_is_idempotent(tmp_path, store):
     """Re-summarizing a session must replace the FTS row, not duplicate."""
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.update_session_metadata(
         sid, title="first", summary="old", transcript="old text"
     )
@@ -265,12 +265,12 @@ async def test_update_session_metadata_is_idempotent(tmp_path, store):
 async def test_list_untitled_sessions_with_turns_skips_empty_and_titled(store):
     """Backfill candidates: sessions that have turns but no title yet.
     Empty sessions and already-titled sessions must be excluded."""
-    empty_sid = await store.create_session("default")  # no turns, no title
+    empty_sid = await store.create_session("query")  # no turns, no title
 
-    untitled_sid = await store.create_session("default")
+    untitled_sid = await store.create_session("query")
     await store.persist_turn(untitled_sid, "user", "hello")
 
-    titled_sid = await store.create_session("default")
+    titled_sid = await store.create_session("query")
     await store.persist_turn(titled_sid, "user", "hi")
     await store.update_session_metadata(
         titled_sid, title="Done", summary="s", transcript="hi"
@@ -283,8 +283,8 @@ async def test_list_untitled_sessions_with_turns_skips_empty_and_titled(store):
 
 
 async def test_fts_match_finds_by_summary_and_transcript(tmp_path, store):
-    sid_a = await store.create_session("default")
-    sid_b = await store.create_session("default")
+    sid_a = await store.create_session("query")
+    sid_b = await store.create_session("query")
     await store.update_session_metadata(
         sid_a,
         title="Todo app",
@@ -316,8 +316,8 @@ async def test_fts_match_finds_by_summary_and_transcript(tmp_path, store):
 
 
 async def test_search_sessions_returns_ranked_results(store):
-    sid_a = await store.create_session("default")
-    sid_b = await store.create_session("default")
+    sid_a = await store.create_session("query")
+    sid_b = await store.create_session("query")
     await store.update_session_metadata(
         sid_a,
         title="Todo app prototype",
@@ -345,8 +345,8 @@ async def test_search_sessions_title_outranks_transcript(store):
     UNINDEXED ones, so a missing leading 0.0 for session_id silently shifts
     every weight one column to the left.
     """
-    sid_title = await store.create_session("default")
-    sid_transcript = await store.create_session("default")
+    sid_title = await store.create_session("query")
+    sid_transcript = await store.create_session("query")
     await store.update_session_metadata(
         sid_title,
         title="Redis caching strategy",
@@ -364,7 +364,7 @@ async def test_search_sessions_title_outranks_transcript(store):
 
 
 async def test_search_sessions_transcript_fallback(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.update_session_metadata(
         sid,
         title="Project planning",
@@ -377,7 +377,7 @@ async def test_search_sessions_transcript_fallback(store):
 
 
 async def test_search_sessions_no_match(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.update_session_metadata(
         sid,
         title="Cooking tips",
@@ -389,7 +389,7 @@ async def test_search_sessions_no_match(store):
 
 
 async def test_search_sessions_empty_query_returns_empty(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.update_session_metadata(
         sid, title="Something", summary="Stuff.", transcript="things"
     )
@@ -399,7 +399,7 @@ async def test_search_sessions_empty_query_returns_empty(store):
 
 async def test_search_sessions_strips_fts_operators(store):
     """Query characters like * " : ^ must not cause an FTS5 syntax error."""
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.update_session_metadata(
         sid, title="Supabase chat", summary="Database discussion.", transcript="schema"
     )
@@ -413,7 +413,7 @@ async def test_search_sessions_strips_fts_operators(store):
 
 async def test_search_sessions_respects_limit(store):
     for i in range(6):
-        sid = await store.create_session("default")
+        sid = await store.create_session("query")
         await store.update_session_metadata(
             sid,
             title=f"Session {i}",
@@ -427,7 +427,7 @@ async def test_search_sessions_respects_limit(store):
 async def test_search_sessions_date_only_includes_unfinalized(tmp_path, store):
     """Date-only queries hit the base sessions table, so sessions that
     haven't been summarized into sessions_fts yet still match."""
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hello")
     last_active = (await store.get_session(sid))["last_active"]
     # Bracket the actual last_active timestamp.
@@ -437,7 +437,7 @@ async def test_search_sessions_date_only_includes_unfinalized(tmp_path, store):
 
 async def test_search_sessions_date_range_filters(store):
     """`since` and `until` form a half-open range against last_active."""
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hi")
     la = (await store.get_session(sid))["last_active"]
 
@@ -458,8 +458,8 @@ async def test_search_sessions_date_range_filters(store):
 
 
 async def test_search_sessions_query_and_date_intersect(store):
-    sid_match = await store.create_session("default")
-    sid_other = await store.create_session("default")
+    sid_match = await store.create_session("query")
+    sid_other = await store.create_session("query")
     await store.update_session_metadata(
         sid_match, title="Supabase plan", summary="schema", transcript="t"
     )
@@ -479,7 +479,7 @@ async def test_search_sessions_query_and_date_intersect(store):
 
 
 async def test_search_sessions_no_args_returns_empty(store):
-    sid = await store.create_session("default")
+    sid = await store.create_session("query")
     await store.update_session_metadata(sid, title="t", summary="s", transcript="x")
     assert await store.search_sessions() == []
 

@@ -12,7 +12,7 @@ from meeko.speaker import INTER_SENTENCE_SILENCE, Speaker
 @pytest.fixture
 def profile():
     return Profile(
-        name="default",
+        name="query",
         wake_word="meeko",
         prompt="sys",
         voice=None,

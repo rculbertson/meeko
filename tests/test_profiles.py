@@ -12,22 +12,25 @@ from meeko.tools.profile import ProfileManager, get_tool_definitions
 # ---------------------------------------------------------------------------
 
 
-def test_load_profiles_default(tmp_path: Path):
-    """Loading a TOML with just a default profile works."""
+def test_load_profiles_single(tmp_path: Path):
+    """Loading a TOML with a single profile + default_profile works."""
     toml_file = tmp_path / "profiles.toml"
     toml_file.write_text(
         textwrap.dedent("""\
-        [profiles.default]
+        default_profile = "query"
+
+        [profiles.query]
         wake_word = "meeko"
         prompt = "You are Meeko."
     """)
     )
 
-    profiles = load_profiles(toml_file)
-    assert "default" in profiles
-    assert profiles["default"].name == "default"
-    assert profiles["default"].wake_word == "meeko"
-    assert profiles["default"].prompt == "You are Meeko."
+    profiles, default_name = load_profiles(toml_file)
+    assert default_name == "query"
+    assert "query" in profiles
+    assert profiles["query"].name == "query"
+    assert profiles["query"].wake_word == "meeko"
+    assert profiles["query"].prompt == "You are Meeko."
 
 
 def test_load_profiles_multiple(tmp_path: Path):
@@ -35,35 +38,71 @@ def test_load_profiles_multiple(tmp_path: Path):
     toml_file = tmp_path / "profiles.toml"
     toml_file.write_text(
         textwrap.dedent("""\
-        [profiles.default]
+        default_profile = "query"
+
+        [profiles.query]
         wake_word = "meeko"
         prompt = "You are Meeko."
 
-        [profiles.pirate]
-        wake_word = "ahoy"
-        prompt = "You are a pirate."
+        [profiles.conversation]
+        wake_word = "meeko"
+        prompt = "You are a thinking partner."
     """)
     )
 
-    profiles = load_profiles(toml_file)
+    profiles, default_name = load_profiles(toml_file)
     assert len(profiles) == 2
-    assert "default" in profiles
-    assert "pirate" in profiles
-    assert profiles["pirate"].wake_word == "ahoy"
+    assert default_name == "query"
+    assert "query" in profiles
+    assert "conversation" in profiles
 
 
-def test_load_profiles_missing_default(tmp_path: Path):
-    """Loading a TOML without a default profile raises ValueError."""
+def test_load_profiles_missing_default_profile_key(tmp_path: Path):
+    """Loading a TOML without a top-level default_profile raises ValueError."""
     toml_file = tmp_path / "profiles.toml"
     toml_file.write_text(
         textwrap.dedent("""\
+        [profiles.query]
+        wake_word = "meeko"
+        prompt = "You are Meeko."
+    """)
+    )
+
+    with pytest.raises(ValueError, match="Missing top-level 'default_profile'"):
+        load_profiles(toml_file)
+
+
+def test_load_profiles_default_profile_unknown(tmp_path: Path):
+    """default_profile pointing at an undefined profile raises ValueError."""
+    toml_file = tmp_path / "profiles.toml"
+    toml_file.write_text(
+        textwrap.dedent("""\
+        default_profile = "nope"
+
+        [profiles.query]
+        wake_word = "meeko"
+        prompt = "You are Meeko."
+    """)
+    )
+
+    with pytest.raises(ValueError, match="default_profile='nope'"):
+        load_profiles(toml_file)
+
+
+def test_load_profiles_invalid_name(tmp_path: Path):
+    """A profile whose name is not a valid mode raises ValueError."""
+    toml_file = tmp_path / "profiles.toml"
+    toml_file.write_text(
+        textwrap.dedent("""\
+        default_profile = "pirate"
+
         [profiles.pirate]
         wake_word = "ahoy"
         prompt = "You are a pirate."
     """)
     )
 
-    with pytest.raises(ValueError, match="No 'default' profile"):
+    with pytest.raises(ValueError, match="not a valid mode"):
         load_profiles(toml_file)
 
 
@@ -83,8 +122,8 @@ def test_load_profiles_empty(tmp_path: Path):
 
 def _make_profiles():
     return {
-        "default": Profile("default", "meeko", "You are Meeko."),
-        "pirate": Profile("pirate", "ahoy", "You are a pirate."),
+        "query": Profile("query", "meeko", "You are Meeko."),
+        "conversation": Profile("conversation", "meeko", "You are a thinking partner."),
     }
 
 
@@ -92,57 +131,63 @@ async def test_switch_profile():
     """Switching to a valid profile updates the Claude system prompt."""
     profiles = _make_profiles()
     claude = MagicMock()
-    mgr = ProfileManager(profiles, claude_client=claude)
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
 
-    result = await mgr.switch_profile("pirate")
+    result = await mgr.switch_profile("conversation")
 
-    assert result == "Switched to pirate mode."
-    claude.set_system_prompt.assert_called_once_with("You are a pirate.")
-    assert mgr.active_profile.name == "pirate"
+    assert result == "Switched to conversation mode."
+    claude.set_system_prompt.assert_called_once_with("You are a thinking partner.")
+    assert mgr.active_profile.name == "conversation"
 
 
 async def test_switch_profile_unknown():
     profiles = _make_profiles()
-    mgr = ProfileManager(profiles, claude_client=MagicMock())
+    mgr = ProfileManager(profiles, claude_client=MagicMock(), active_name="query")
 
     result = await mgr.switch_profile("nonexistent")
 
     assert "Unknown profile" in result
-    assert "default" in result
-    assert "pirate" in result
-    assert mgr.active_profile.name == "default"
+    assert "query" in result
+    assert "conversation" in result
+    assert mgr.active_profile.name == "query"
 
 
 async def test_switch_profile_already_active():
     profiles = _make_profiles()
-    mgr = ProfileManager(profiles, claude_client=MagicMock())
+    mgr = ProfileManager(profiles, claude_client=MagicMock(), active_name="query")
 
-    result = await mgr.switch_profile("default")
+    result = await mgr.switch_profile("query")
 
     assert "Already using" in result
 
 
 async def test_list_profiles():
     profiles = _make_profiles()
-    mgr = ProfileManager(profiles)
+    mgr = ProfileManager(profiles, active_name="query")
 
     result = mgr.list_profiles()
 
-    assert "default (active)" in result
-    assert "pirate" in result
+    assert "query (active)" in result
+    assert "conversation" in result
 
 
 async def test_list_profiles_after_switch():
     profiles = _make_profiles()
     claude = MagicMock()
-    mgr = ProfileManager(profiles, claude_client=claude)
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
 
-    await mgr.switch_profile("pirate")
+    await mgr.switch_profile("conversation")
     result = mgr.list_profiles()
 
-    assert "pirate (active)" in result
-    assert "default" in result
-    assert "(active)" not in result.split("pirate (active)")[0].split("default")[-1]
+    assert "conversation (active)" in result
+    assert "query" in result
+    assert "(active)" not in result.split("conversation (active)")[0].split("query")[-1]
+
+
+def test_profile_manager_rejects_unknown_active_name():
+    profiles = _make_profiles()
+    with pytest.raises(ValueError, match="not a defined profile"):
+        ProfileManager(profiles, active_name="nope")
 
 
 # ---------------------------------------------------------------------------
@@ -160,5 +205,5 @@ def test_tool_definitions_include_profile_names():
     assert "list_profiles" in names
 
     switch_def = next(d for d in defs if d["name"] == "switch_profile")
-    assert "default" in switch_def["description"]
-    assert "pirate" in switch_def["description"]
+    assert "query" in switch_def["description"]
+    assert "conversation" in switch_def["description"]

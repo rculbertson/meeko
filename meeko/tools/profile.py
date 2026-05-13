@@ -25,10 +25,19 @@ class ProfileManager:
     """
 
     def __init__(
-        self, profiles: dict[str, Profile], claude_client: ClaudeClient | None = None
+        self,
+        profiles: dict[str, Profile],
+        claude_client: ClaudeClient | None = None,
+        *,
+        active_name: str,
     ):
+        if active_name not in profiles:
+            raise ValueError(
+                f"active_name={active_name!r} is not a defined profile. "
+                f"Available: {', '.join(sorted(profiles))}"
+            )
         self._profiles = profiles
-        self._active: str = "default"
+        self._active: str = active_name
         self._claude = claude_client
 
     def set_claude_client(self, claude_client: ClaudeClient) -> None:
@@ -70,15 +79,13 @@ def get_tool_definitions(profiles: dict[str, Profile]) -> list[ToolDefinition]:
             "description": (
                 "Switch the assistant to a different profile/persona. "
                 f"Available profiles: {names_list}. "
-                "Profiles also determine the conversation mode (query — "
+                "The profile name is also the conversation mode (query — "
                 "auto-closes after a short silence; conversation — stays "
                 "open for long, in-depth talks). When the user asks to "
                 "switch modes (e.g. 'switch to conversation mode', "
                 "'let's have a long conversation', 'switch back to query "
                 "mode', 'just quick questions from now on'), call this "
-                "tool with the profile whose mode matches their intent: "
-                "the 'default' profile is query mode and the "
-                "'conversation' profile is conversation mode."
+                "tool with the matching profile name."
             ),
             "input_schema": {
                 "type": "object",

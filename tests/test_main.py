@@ -172,7 +172,7 @@ async def test_stream_turn_persists_user_and_assistant_turns(tmp_path):
 
     store = SessionStore.open(tmp_path / "m.db")
     try:
-        session_id = await store.create_session("default")
+        session_id = await store.create_session("query")
 
         dispatcher = ToolDispatcher()
         mock_anthropic = MagicMock()
@@ -219,7 +219,7 @@ async def test_stream_turn_persists_tool_round_messages(tmp_path):
 
     store = SessionStore.open(tmp_path / "m.db")
     try:
-        session_id = await store.create_session("default")
+        session_id = await store.create_session("query")
 
         round1_final = _final_message(
             "tool_use",
