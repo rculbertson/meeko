@@ -73,7 +73,7 @@ class MeekoConfig:
     # claude
     compaction_trigger_tokens: int = 150000
     web_search_enabled: bool = True
-    web_search_max_uses: int = 3
+    web_search_max_uses: int = 2
 
 
 def load_profiles(

@@ -37,7 +37,7 @@ def test_defaults_match_historical_env_defaults(tmp_path: Path):
     assert cfg.wake_word_disabled is False
     assert cfg.compaction_trigger_tokens == 150000
     assert cfg.web_search_enabled is True
-    assert cfg.web_search_max_uses == 3
+    assert cfg.web_search_max_uses == 2
 
 
 def test_loads_values_from_toml(tmp_path: Path):
