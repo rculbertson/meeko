@@ -1,0 +1,17 @@
+[Unit]
+Description=Meeko voice assistant
+# Wait for sound + USB to be ready (user-bus equivalents of the system targets).
+After=sound.target default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/meeko
+ExecStart=/usr/bin/env uv run python -m meeko.main
+Restart=on-failure
+RestartSec=5
+# Give Meeko time to drain TTS and finalize the session on stop.
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target
