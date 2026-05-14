@@ -6,6 +6,9 @@ After=sound.target default.target
 [Service]
 Type=simple
 WorkingDirectory=%h/meeko
+# systemd user services start with a minimal PATH that omits ~/.local/bin
+# (where uv's installer puts it), so add it explicitly.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env uv run python -m meeko.main
 Restart=on-failure
 RestartSec=5
