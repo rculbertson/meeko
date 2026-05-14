@@ -600,7 +600,7 @@ async def test_compaction_block_round_trips_into_next_turn(monkeypatch):
     assert prior_assistant["content"][0]["type"] == "compaction"
 
 
-def test_compaction_trigger_kwarg_threads_into_context_management():
+def test_compaction_trigger_kwarg_threads_into_context_management(fake_anthropic):
     """The `compaction_trigger_tokens` kwarg threads the value into the
     per-instance context-management dict that gets sent with each turn."""
     client = ClaudeClient(
@@ -690,7 +690,7 @@ def test_web_search_tool_included_by_default(fake_anthropic):
     assert "web_search_20260209" in types
 
 
-def test_web_search_tool_disabled_via_kwarg():
+def test_web_search_tool_disabled_via_kwarg(fake_anthropic):
     """web_search_enabled=False omits the server tool from the tool list."""
     client = ClaudeClient(
         api_key="k",
@@ -702,7 +702,7 @@ def test_web_search_tool_disabled_via_kwarg():
     assert "web_search_20260209" not in types
 
 
-def test_web_search_max_uses_kwarg_threads_into_tool_definition():
+def test_web_search_max_uses_kwarg_threads_into_tool_definition(fake_anthropic):
     client = ClaudeClient(
         api_key="k",
         system_prompt="sys",
