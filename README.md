@@ -167,15 +167,11 @@ To have Meeko start automatically when your Pi boots — and keep running across
 
 Useful commands:
 
-- Tail logs: `journalctl --user -u meeko -f`
-- Logs since boot: `journalctl --user -u meeko -b`
+- Tail logs: `journalctl --user-unit=meeko -f`
+- Logs since boot: `journalctl --user-unit=meeko -b`
 - Status: `systemctl --user status meeko`
 - Restart (e.g. to pick up code changes): `systemctl --user restart meeko`
 - Stop: `systemctl --user stop meeko`
-
-### Developing while the service is running
-
-The service holds the mic and the XVF3800 USB device, so you can't run Meeko in the foreground at the same time. To iterate on code, `systemctl --user stop meeko`, run `uv run python -m meeko.main` directly, then `systemctl --user start meeko` when you're done. A plain `systemctl --user restart meeko` is enough to pick up changes when you're not iterating live.
 
 ## Privacy
 
