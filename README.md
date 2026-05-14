@@ -139,6 +139,40 @@ No reboot or replug needed.
 
 To skip LED control entirely, set `led_disabled = true` in `[system]`. The controller also auto-disables when no XVF3800 is found, so no special handling is needed on a Mac dev machine.
 
+## Run Meeko at boot (Raspberry Pi)
+
+To have Meeko start automatically when your Pi boots — and keep running across reboots without you SSH'ing in — install the shipped systemd user service.
+
+1. Copy the unit into your user systemd directory:
+
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   cp scripts/meeko.service ~/.config/systemd/user/
+   ```
+
+   The unit assumes the repo is at `~/meeko`. Edit `WorkingDirectory=` if you cloned somewhere else.
+
+2. Enable lingering so your user manager starts at boot without a login session:
+
+   ```bash
+   sudo loginctl enable-linger $USER
+   ```
+
+3. Enable and start the service:
+
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user enable --now meeko
+   ```
+
+Useful commands:
+
+- Tail logs: `journalctl --user-unit=meeko -f`
+- Logs since boot: `journalctl --user-unit=meeko -b`
+- Status: `systemctl --user status meeko`
+- Restart (e.g. to pick up code changes): `systemctl --user restart meeko`
+- Stop: `systemctl --user stop meeko`
+
 ## Privacy
 
 Meeko stores all conversation transcripts and summaries locally in SQLite on your device — nothing is uploaded to a third-party assistant cloud. Two external services do see data per turn:

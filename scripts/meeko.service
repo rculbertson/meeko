@@ -1,0 +1,21 @@
+[Unit]
+Description=Meeko voice assistant
+# Wait for the network (Anthropic + Deepgram are called every turn) and for
+# sound + USB to be ready before starting.
+After=network-online.target sound.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/meeko
+# systemd user services start with a minimal PATH that omits ~/.local/bin
+# (where uv's installer puts it), so add it explicitly.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env uv run python -m meeko.main
+Restart=on-failure
+RestartSec=5
+# Give Meeko time to drain TTS and finalize the session on stop.
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target
