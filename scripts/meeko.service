@@ -1,7 +1,8 @@
 [Unit]
 Description=Meeko voice assistant
-# Wait for sound + USB to be ready (user-bus equivalents of the system targets).
-After=sound.target default.target
+# Wait for the network (Anthropic + Deepgram are called every turn) and for
+# sound + USB to be ready before starting.
+After=network-online.target sound.target default.target
 
 [Service]
 Type=simple
