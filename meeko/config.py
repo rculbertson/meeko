@@ -84,8 +84,14 @@ def load_profiles(
     mode, so each profile name must be one of `VALID_MODES`. The top-level
     `default_profile` key selects which profile a fresh session starts in.
     """
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Config file {path!r} not found. Copy meeko.toml.example to "
+            f"{path!r} and edit as needed (see README.md §Setup)."
+        ) from exc
 
     raw_profiles = data.get("profiles", {})
     if not raw_profiles:
