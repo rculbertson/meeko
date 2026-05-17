@@ -21,7 +21,8 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ### Configuration
 - Secrets (`DEEPGRAM_API_KEY`, `ANTHROPIC_API_KEY`) live in `.env`.
-- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]` tables. See the commented examples at the top of `meeko.toml`.
+- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]` tables. See the commented examples in `meeko.toml.example`.
+- `meeko.toml` is **gitignored** — it holds personal per-host settings. The tracked file is `meeko.toml.example`; users copy it to `meeko.toml` on setup. Do not re-track `meeko.toml`.
 - Any `MEEKO_*` environment variable overrides the corresponding TOML value at runtime — useful for one-off testing without editing the file.
 - Loading happens once in `run()` via `meeko.config.load_config()`; components receive their values via constructor kwargs (no module-level `os.environ.get` reads).
 

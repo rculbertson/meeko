@@ -34,6 +34,12 @@ DEEPGRAM_API_KEY=your-deepgram-api-key
 ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
+Copy the shipped example config to a local file (gitignored; this is where you put personal settings):
+
+```
+cp meeko.toml.example meeko.toml
+```
+
 ## Running
 
 ```
@@ -52,7 +58,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — state machine, se
 
 ## Configuration
 
-All non-secret settings live in `meeko.toml` at the repo root. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file.
+All non-secret settings live in `meeko.toml` at the repo root. That file is gitignored (it holds personal per-host settings); start by copying `meeko.toml.example` to `meeko.toml` and editing as needed. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file.
 
 Settings are grouped into four tables: `[system]`, `[audio]`, `[wake_word]`, and `[claude]`. Profiles (personas) are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
 
