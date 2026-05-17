@@ -1,4 +1,4 @@
-# Per-host runtime config. Copy this file to `meeko.toml` and edit as needed.
+# Per-host runtime config. Copy this file to `meeko.toml` (e.g. `cp -n meeko.toml.example meeko.toml`) and edit as needed.
 # `meeko.toml` is gitignored (personal settings); this example file is tracked.
 #
 # See README.md §Configuration for the full list of options, defaults, and

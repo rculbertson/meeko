@@ -89,8 +89,8 @@ def load_profiles(
             data = tomllib.load(f)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"Config file {path!r} not found. Copy meeko.toml.example to "
-            f"{path!r} and edit as needed (see README.md §Setup)."
+            f"Config file '{path}' not found. Copy meeko.toml.example to "
+            f"'{path}' and edit as needed (see README.md §Setup)."
         ) from exc
 
     raw_profiles = data.get("profiles", {})
