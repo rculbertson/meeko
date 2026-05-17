@@ -92,6 +92,8 @@ def load_profiles(
             f"Config file '{path}' not found. Copy meeko.toml.example to "
             f"'{path}' and edit as needed (see README.md §Setup)."
         ) from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid TOML in '{path}': {exc}") from exc
 
     raw_profiles = data.get("profiles", {})
     if not raw_profiles:
@@ -151,6 +153,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
             data = tomllib.load(f)
     except FileNotFoundError:
         data = {}
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid TOML in '{path}': {exc}") from exc
 
     system = data.get("system", {})
     audio = data.get("audio", {})
