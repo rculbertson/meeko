@@ -84,8 +84,16 @@ def load_profiles(
     mode, so each profile name must be one of `VALID_MODES`. The top-level
     `default_profile` key selects which profile a fresh session starts in.
     """
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Config file '{path}' not found. Copy meeko.toml.example to "
+            f"'{path}' and edit as needed (see README.md §Setup)."
+        ) from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid TOML in '{path}': {exc}") from exc
 
     raw_profiles = data.get("profiles", {})
     if not raw_profiles:
@@ -145,6 +153,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
             data = tomllib.load(f)
     except FileNotFoundError:
         data = {}
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid TOML in '{path}': {exc}") from exc
 
     system = data.get("system", {})
     audio = data.get("audio", {})

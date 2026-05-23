@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from meeko.config import MeekoConfig, load_config
+from meeko.config import MeekoConfig, load_config, load_profiles
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +172,11 @@ def test_web_search_enabled_env_overrides_toml_false(
     monkeypatch.setenv("MEEKO_WEB_SEARCH_ENABLED", "1")
     cfg = load_config(toml_file)
     assert cfg.web_search_enabled is True
+
+
+def test_load_profiles_missing_file_friendly_error(tmp_path: Path):
+    """Skipping `cp meeko.toml.example meeko.toml` should produce a
+    helpful error pointing at the example, not a raw FileNotFoundError."""
+    missing = tmp_path / "meeko.toml"
+    with pytest.raises(FileNotFoundError, match="meeko.toml.example"):
+        load_profiles(missing)

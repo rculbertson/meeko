@@ -21,6 +21,9 @@ meeko.db-journal
 meeko.db-wal
 meeko.db-shm
 
+# Per-host runtime config (personal — copy meeko.toml.example to meeko.toml)
+meeko.toml
+
 # Tool-specific config (personal)
 mise.toml
 .claude/settings.local.json
