@@ -73,6 +73,11 @@ class MeekoConfig:
     compaction_trigger_tokens: int = 150000
     web_search_enabled: bool = True
     web_search_max_uses: int = 2
+    # location
+    latitude: float | None = None
+    longitude: float | None = None
+    # weather
+    weather_units: str = "imperial"
 
 
 def load_profiles(
@@ -146,7 +151,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
 
     Precedence: env var > meeko.toml > dataclass default. Missing tables
     and keys silently fall through to defaults; the file may not even
-    define any of `[system]`, `[audio]`, `[wake_word]`, `[claude]`.
+    define any of `[system]`, `[audio]`, `[wake_word]`, `[claude]`,
+    `[location]`, `[weather]`.
     """
     try:
         with open(path, "rb") as f:
@@ -160,6 +166,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
     audio = data.get("audio", {})
     wake = data.get("wake_word", {})
     claude = data.get("claude", {})
+    location = data.get("location", {})
+    weather = data.get("weather", {})
 
     defaults = MeekoConfig()
 
@@ -267,6 +275,35 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
         int(claude.get("web_search_max_uses", defaults.web_search_max_uses)),
     )
 
+    # location
+    def _opt_float_env(name: str, fallback: float | None) -> float | None:
+        v = os.environ.get(name, "").strip()
+        if v:
+            return float(v)
+        return fallback
+
+    latitude = _opt_float_env(
+        "MEEKO_LATITUDE",
+        location.get("latitude", defaults.latitude),
+    )
+    longitude = _opt_float_env(
+        "MEEKO_LONGITUDE",
+        location.get("longitude", defaults.longitude),
+    )
+    if (latitude is None) != (longitude is None):
+        raise ValueError(
+            "location.latitude and location.longitude must both be set, or both unset"
+        )
+
+    # weather
+    weather_units = _str_env(
+        "MEEKO_WEATHER_UNITS", str(weather.get("units", defaults.weather_units))
+    ).lower()
+    if weather_units not in {"imperial", "metric"}:
+        raise ValueError(
+            f"weather units must be 'imperial' or 'metric', got {weather_units!r}"
+        )
+
     return MeekoConfig(
         log_level=log_level,
         log_target=log_target,
@@ -283,4 +320,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
         compaction_trigger_tokens=compaction_trigger_tokens,
         web_search_enabled=web_search_enabled,
         web_search_max_uses=web_search_max_uses,
+        latitude=latitude,
+        longitude=longitude,
+        weather_units=weather_units,
     )

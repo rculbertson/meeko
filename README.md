@@ -34,7 +34,7 @@ DEEPGRAM_API_KEY=your-deepgram-api-key
 ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
-Copy the shipped example config to a local file (gitignored; this is where you put personal settings):
+Copy the shipped example config to a local file (gitignored; this is where you put personal settings like your home location):
 
 ```
 cp -n meeko.toml.example meeko.toml  # -n: don't overwrite if it already exists
@@ -60,7 +60,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — state machine, se
 
 All non-secret settings live in `meeko.toml` at the repo root. That file is gitignored (it holds personal per-host settings); start by copying `meeko.toml.example` to `meeko.toml` and editing as needed. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file.
 
-Settings are grouped into four tables: `[system]`, `[audio]`, `[wake_word]`, and `[claude]`. Profiles (personas) are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
+Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, and `[weather]`. Profiles (personas) are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
 
 ### `[system]`
 
@@ -96,6 +96,19 @@ Settings are grouped into four tables: `[system]`, `[audio]`, `[wake_word]`, and
 | `compaction_trigger_tokens` | `MEEKO_COMPACTION_TRIGGER_TOKENS`  | `150000` | Input-token threshold that triggers server-side compaction.                |
 | `web_search_enabled`        | `MEEKO_WEB_SEARCH_ENABLED`         | `true`   | Expose Anthropic's server-side web search tool to the model.               |
 | `web_search_max_uses`       | `MEEKO_WEB_SEARCH_MAX_USES`        | `2`      | Max web-search calls per turn.                                             |
+
+### `[location]`
+
+| TOML key    | Env var            | Default | Description                                                                                                                                          |
+|-------------|--------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `latitude`  | `MEEKO_LATITUDE`   | unset   | Home latitude (decimal degrees). Used by the weather tool when you don't name a place, and injected into Claude's system prompt so it can answer location-aware questions (sunset/sunrise, regional references, climate, etc.). Must be set with `longitude` or not at all. |
+| `longitude` | `MEEKO_LONGITUDE`  | unset   | Home longitude (decimal degrees). Look both up once via Google Maps (right-click → copy coordinates).                                                |
+
+### `[weather]`
+
+| TOML key | Env var               | Default    | Description                                            |
+|----------|-----------------------|------------|--------------------------------------------------------|
+| `units`  | `MEEKO_WEATHER_UNITS` | `imperial` | `imperial` (°F, mph, inch) or `metric` (°C, km/h, mm). |
 
 ### Profiles
 

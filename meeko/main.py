@@ -52,6 +52,9 @@ from meeko.tools.session import handle as session_handle
 from meeko.tools.timer import get_tool_definitions as timer_tools
 from meeko.tools.timer import handle as timer_handle
 from meeko.tools.timer import timer_manager
+from meeko.tools.weather import get_tool_definitions as weather_tools
+from meeko.tools.weather import handle as weather_handle
+from meeko.tools.weather import weather_client
 from meeko.wake_word import WakeWordDetector
 
 LOG_FILE = "meeko.log"
@@ -262,6 +265,7 @@ def _build_dispatcher(
     session_manager: SessionManager,
     store: SessionStore,
     get_session_id: Callable[[], str | None],
+    config: MeekoConfig,
 ) -> ToolDispatcher:
     dispatcher = ToolDispatcher()
     dispatcher.register(timer_tools(), timer_handle)
@@ -280,6 +284,14 @@ def _build_dispatcher(
         )
 
     dispatcher.register(session_tools(), session_handle_wrapper)
+
+    weather_client.configure(
+        latitude=config.latitude,
+        longitude=config.longitude,
+        units=config.weather_units,
+    )
+    dispatcher.register(weather_tools(), weather_handle)
+
     return dispatcher
 
 
@@ -429,6 +441,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         session_manager,
         store,
         lambda: claude.session_id,
+        config,
     )
 
     claude = ClaudeClient(
@@ -441,6 +454,8 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         compaction_trigger_tokens=config.compaction_trigger_tokens,
         web_search_enabled=config.web_search_enabled,
         web_search_max_uses=config.web_search_max_uses,
+        latitude=config.latitude,
+        longitude=config.longitude,
     )
     if history:
         claude.load_history(history)

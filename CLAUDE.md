@@ -21,7 +21,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ### Configuration
 - Secrets (`DEEPGRAM_API_KEY`, `ANTHROPIC_API_KEY`) live in `.env`.
-- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]` tables. See `README.md §Configuration` for the full list of options and defaults. `meeko.toml.example` shows the minimum required config (profiles only); all other tables are optional and fall back to defaults when absent.
+- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold, home location) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, `[weather]` tables. See `README.md §Configuration` for the full list of options and defaults. `meeko.toml.example` shows the minimum required config (profiles only); all other tables are optional and fall back to defaults when absent.
 - `meeko.toml` is **gitignored** — it holds personal per-host settings. The tracked file is `meeko.toml.example`; users copy it to `meeko.toml` on setup. Do not re-track `meeko.toml`.
 - Any `MEEKO_*` environment variable overrides the corresponding TOML value at runtime — useful for one-off testing without editing the file.
 - Loading happens once in `run()` via `meeko.config.load_config()`; components receive their values via constructor kwargs (no module-level `os.environ.get` reads).
@@ -66,6 +66,19 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - We talk to the chip directly over libusb (pyusb vendor control transfers on resid 20) — not via ReSpeaker's `xvf_host.py`.
 - Linux defaults the USB control interface to root-only. Install `scripts/99-meeko-xvf3800.rules` once (see README) so the `plugdev` group can drive it.
 - `[system] led_disabled = true` (env: `MEEKO_LED_DISABLED=1`) — skip LED control entirely. Also auto-disabled if the XVF3800 isn't found or pyusb/libusb is unavailable, so Mac dev runs need no special handling.
+
+### Home location
+- `[location] latitude` / `longitude` (env: `MEEKO_LATITUDE` / `MEEKO_LONGITUDE`) — decimal degrees, must both be set or both unset.
+- Consumed in two places:
+  - **Weather tool** uses them as the default when the user doesn't name a place.
+  - **System prompt** gets a small `_location_block` (in `meeko/claude_client.py`) inside the cached prefix, so Sonnet can answer location-aware questions (sunset/sunrise, regional references, climate zone, etc.) without the user repeating their location. Sonnet reverse-geocodes the decimal coords from training data — one source of truth, no separate `city`/`region` field.
+
+### Weather tool
+- `meeko/tools/weather.py` exposes a single `get_weather` tool to Sonnet, backed by [Open-Meteo](https://open-meteo.com)'s forecast endpoint (free, no API key). No geocoder.
+- Home coords come from `[location]` (see above). `[weather]` only holds:
+  - `units` (env: `MEEKO_WEATHER_UNITS`) — `imperial` (default) or `metric`. Drives the Open-Meteo query params and the symbols (`°F`/`mph`/`in` vs `°C`/`km/h`/`mm`) in the formatted response.
+- For ad-hoc places ("weather in Tokyo"), **Sonnet supplies `latitude`, `longitude`, and `place_label` directly from its own geographic knowledge** — the tool description tells Sonnet not to web-search for coordinates. This avoids the comma-disambiguation traps a geocoder runs into (`"Portland, Maine"` vs `"Portland, Oregon"`) and saves a network round trip.
+- All error paths return a friendly string (partial coord args, out-of-range coords, network failure, no home location) — never raise — so the tool-use turn stays intact.
 
 ### State machine
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.

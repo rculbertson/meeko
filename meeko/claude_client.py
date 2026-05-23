@@ -153,6 +153,26 @@ def _pop_sentences(buffer: str) -> tuple[list[str], str]:
 _CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 
 
+def _location_block(latitude: float, longitude: float) -> dict[str, Any]:
+    """A small system block carrying the user's home coordinates.
+
+    Stable per host, so it lives inside the cached prefix (no
+    `cache_control` of its own — the breakpoint on the profile-prompt
+    block covers it). Sonnet reverse-geocodes the coords from training
+    data when needed, so a single (lat, lon) suffices for any
+    location-aware question.
+    """
+    return {
+        "type": "text",
+        "text": (
+            f"The user's home location is approximately {latitude}, "
+            f"{longitude} (decimal degrees). Use this when answering "
+            "questions that depend on where the user is — local "
+            "weather, daylight, regional references, and similar."
+        ),
+    }
+
+
 def _today_block() -> dict[str, Any]:
     """A small, uncached system block carrying the user's local date and time.
 
@@ -174,9 +194,19 @@ def _today_block() -> dict[str, Any]:
     }
 
 
-def _system_blocks(prompt: str) -> list[dict[str, Any]]:
+def _system_blocks(
+    prompt: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> list[dict[str, Any]]:
     """Wrap the profile's system prompt with a cache breakpoint and append
     a small dynamic block carrying today's local date.
+
+    When `latitude` and `longitude` are both set, a stable location
+    block is prepended so Sonnet can answer location-aware questions
+    (sunset, regional context, etc.) without the user mentioning where
+    they are. That block sits inside the cached prefix — coords are
+    stable per host, so they ride the same cache as the profile prompt.
 
     The profile prompt is stable per session, so a cache_control on it
     caches the entire `tools + profile prompt` prefix. The trailing
@@ -184,10 +214,12 @@ def _system_blocks(prompt: str) -> list[dict[str, Any]]:
     after the cache breakpoint so cache hits aren't invalidated by the
     daily date change.
     """
-    return [
-        {"type": "text", "text": prompt, "cache_control": _CACHE_CONTROL},
-        _today_block(),
-    ]
+    blocks: list[dict[str, Any]] = []
+    if latitude is not None and longitude is not None:
+        blocks.append(_location_block(latitude, longitude))
+    blocks.append({"type": "text", "text": prompt, "cache_control": _CACHE_CONTROL})
+    blocks.append(_today_block())
+    return blocks
 
 
 def _with_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -232,9 +264,13 @@ class ClaudeClient:
         compaction_trigger_tokens: int = DEFAULT_COMPACTION_TRIGGER_TOKENS,
         web_search_enabled: bool = DEFAULT_WEB_SEARCH_ENABLED,
         web_search_max_uses: int = DEFAULT_WEB_SEARCH_MAX_USES,
+        latitude: float | None = None,
+        longitude: float | None = None,
     ):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._profile_prompt = system_prompt
+        self._latitude = latitude
+        self._longitude = longitude
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
         if web_search_enabled:
@@ -312,7 +348,9 @@ class ClaudeClient:
                 async with self._client.beta.messages.stream(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
-                    system=_system_blocks(self._profile_prompt),
+                    system=_system_blocks(
+                        self._profile_prompt, self._latitude, self._longitude
+                    ),
                     tools=self._tools,
                     messages=_with_cache_breakpoint(request_messages),
                     betas=[COMPACTION_BETA],
