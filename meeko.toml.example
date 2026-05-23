@@ -8,6 +8,21 @@
 # [profiles.<name>] table names below.
 default_profile = "query"
 
+[location]
+# Your home coordinates. Used by the weather tool when you don't name a
+# place, and injected into Claude's system prompt so it can answer
+# questions that depend on where you are (sunset/sunrise, regional
+# references, climate, etc.). Look these up once via Google Maps —
+# right-click the spot and copy coordinates.
+# Env overrides: MEEKO_LATITUDE / MEEKO_LONGITUDE
+# latitude = 40.7484
+# longitude = -73.9857
+
+[weather]
+# "imperial" (°F, mph, inch) or "metric" (°C, km/h, mm).
+# Env override: MEEKO_WEATHER_UNITS
+units = "imperial"
+
 [profiles.query]
 wake_word = "meeko"
 voice = "mars"

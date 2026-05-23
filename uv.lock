@@ -343,6 +343,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "deepgram-sdk" },
+    { name = "httpx" },
     { name = "onnxruntime" },
     { name = "openwakeword" },
     { name = "pyaudio" },
@@ -366,6 +367,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40.0" },
     { name = "deepgram-sdk", specifier = ">=6.1.1" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "onnxruntime", specifier = ">=1.17.0" },
     { name = "openwakeword", specifier = ">=0.6.0" },
     { name = "pyaudio", specifier = ">=0.2.14" },

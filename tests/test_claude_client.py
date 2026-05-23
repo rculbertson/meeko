@@ -120,6 +120,39 @@ def test_system_prompt_has_cache_control(fake_anthropic):
     assert "Today is" in blocks[-1]["text"]
 
 
+def test_system_blocks_include_location_when_coords_set(fake_anthropic):
+    from meeko.claude_client import _system_blocks
+
+    blocks = _system_blocks("You are Meeko.", 40.7484, -73.9857)
+    # Location block precedes the cached profile prompt and is itself
+    # uncached (the cache breakpoint sits on the profile-prompt block
+    # below, which covers everything before it).
+    assert "40.7484" in blocks[0]["text"]
+    assert "-73.9857" in blocks[0]["text"]
+    assert "cache_control" not in blocks[0]
+    assert blocks[1]["text"] == "You are Meeko."
+    assert blocks[1]["cache_control"] == {"type": "ephemeral"}
+    assert "Today is" in blocks[-1]["text"]
+
+
+def test_system_blocks_omit_location_when_coords_unset(fake_anthropic):
+    from meeko.claude_client import _system_blocks
+
+    blocks = _system_blocks("You are Meeko.", None, None)
+    # No location block — first block is the cached profile prompt.
+    assert blocks[0]["text"] == "You are Meeko."
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert len(blocks) == 2  # profile prompt + today
+
+
+def test_system_blocks_omit_location_when_only_one_coord_set(fake_anthropic):
+    from meeko.claude_client import _system_blocks
+
+    blocks = _system_blocks("You are Meeko.", 40.0, None)
+    assert blocks[0]["text"] == "You are Meeko."
+    assert len(blocks) == 2
+
+
 def test_set_system_prompt_updates_profile_prompt(fake_anthropic):
     client = _make_client()
     client.set_system_prompt("New persona.")
