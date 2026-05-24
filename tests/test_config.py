@@ -262,12 +262,13 @@ def test_ensure_config_exists_auto_creates_from_example(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)  # ensure no cwd meeko.toml interferes
 
-    created = ensure_config_exists()
+    path, created = ensure_config_exists()
 
-    assert created == tmp_path / "meeko" / "meeko.toml"
-    assert created.exists()
-    # The copied example must be a loadable config with profiles defined.
-    profiles, default_name = load_profiles(created)
+    assert created is True
+    assert path == tmp_path / "meeko" / "meeko.toml"
+    assert path.exists()
+    # The copied default must be a loadable config with profiles defined.
+    profiles, default_name = load_profiles(path)
     assert profiles
     assert default_name in profiles
 
@@ -282,6 +283,8 @@ def test_ensure_config_exists_noop_when_present(
     xdg_file.write_text('default_profile = "query"\n')
     monkeypatch.chdir(tmp_path)
 
-    assert ensure_config_exists() == xdg_file
-    # Untouched: still our minimal content, not the example.
+    path, created = ensure_config_exists()
+    assert created is False
+    assert path == xdg_file
+    # Untouched: still our minimal content, not the bundled default.
     assert xdg_file.read_text() == 'default_profile = "query"\n'

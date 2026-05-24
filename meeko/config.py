@@ -9,7 +9,6 @@ environment variable overrides the corresponding TOML value, so existing
 env-var setups keep working.
 """
 
-import logging
 import os
 import shutil
 import tomllib
@@ -17,8 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from meeko.sessions import default_db_path as _default_db_path
-
-logger = logging.getLogger("meeko")
 
 VALID_MODES = {"query", "conversation"}
 
@@ -69,15 +66,21 @@ def _bundled_default_config_path() -> Path:
     return Path(__file__).resolve().parent / "default_config.toml"
 
 
-def ensure_config_exists() -> Path:
+def ensure_config_exists() -> tuple[Path, bool]:
     """Resolve the config path; if nothing exists anywhere, copy the bundled
-    `default_config.toml` to the XDG location and return it."""
+    `default_config.toml` to the XDG location.
+
+    Returns `(path, created)` where `created` is True iff the file was just
+    written. The caller is responsible for any user-facing notification —
+    logging here would be suppressed since `setup_logging()` runs later.
+    """
     path = resolve_config_path()
+    created = False
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(_bundled_default_config_path(), path)
-        logger.info("No config found; wrote default config to %s", path)
-    return path
+        created = True
+    return path, created
 
 
 def _default_wake_word_model() -> Path:

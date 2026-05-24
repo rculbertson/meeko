@@ -406,9 +406,13 @@ async def _apply_post_turn_session_change(
 
 async def run(resume: str | None = None, list_sessions: bool = False):
     load_dotenv()
-    config_path = ensure_config_exists()
+    config_path, config_created = ensure_config_exists()
     config = load_config(config_path)
     setup_logging(log_level=config.log_level, log_target=config.log_target)
+    if config_created:
+        # Logged after setup_logging so it reaches the configured handler
+        # (stderr or the rotating file) rather than being suppressed.
+        logger.info("No config found; wrote default config to %s", config_path)
 
     if list_sessions:
         store = SessionStore.open(config.db_path)
