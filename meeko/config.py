@@ -82,6 +82,13 @@ def ensure_config_exists() -> tuple[Path, bool]:
     if path.is_file() or os.environ.get("MEEKO_CONFIG"):
         return path, False
     # path is the XDG default here (resolve_config_path fell through to it).
+    # If it exists but isn't a regular file (e.g. a directory), copying would
+    # raise an opaque IsADirectoryError — surface a clear message instead.
+    if path.exists():
+        raise IsADirectoryError(
+            f"Config path {path} exists but is not a regular file; "
+            f"remove it so Meeko can create a default config there."
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(_bundled_default_config_path(), path)
     return path, True
@@ -160,7 +167,7 @@ def load_profiles(
             data = tomllib.load(f)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"Config file '{path}' not found (see README.md §Setup)."
+            f"Config file '{path}' not found (see README.md §Configuration)."
         ) from exc
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"Invalid TOML in '{path}': {exc}") from exc

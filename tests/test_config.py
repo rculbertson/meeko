@@ -317,3 +317,16 @@ def test_resolve_config_path_ignores_directory_at_xdg(
     assert resolve_config_path() == tmp_path / "meeko" / "meeko.toml"
     # is_file() is False for the dir, so it's the auto-create target, not a hit.
     assert not resolve_config_path().is_file()
+
+
+def test_ensure_config_exists_raises_when_path_is_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A directory at the XDG target must yield a clear error, not an opaque
+    # IsADirectoryError from shutil.copyfile.
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "meeko" / "meeko.toml").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(IsADirectoryError, match="not a regular file"):
+        ensure_config_exists()
