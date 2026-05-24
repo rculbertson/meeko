@@ -655,17 +655,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     # shutdown cancels drive_turns_task directly, before run()'s finally
     # has a chance to set stop_event.
     barge_in_requested = False
-    # Set by request_barge_in() so the next EndOfTurn in pull_stt_events
-    # is recognised as the barge-in utterance (e.g. "stop", "wait") and
-    # dropped rather than sent to Claude as a conversation turn.
-    post_barge_in_pending = False
 
     def request_barge_in() -> None:
         """Cancel the in-flight speak task, if any. Called from
         pull_stt_events when StartOfTurn fires during SPEAKING (the
         assistant is talking) or PROCESSING (the assistant's reply is
         still being generated; user has changed their mind)."""
-        nonlocal barge_in_requested, post_barge_in_pending
+        nonlocal barge_in_requested
         # Flip state synchronously so any EndOfTurn arriving before the
         # cancel propagates through drive_turns isn't dropped as echo
         # by pull_stt_events. This must happen even when there's no
@@ -679,7 +675,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # state EndOfTurns are queued normally).
         cancel_idle_monitor()
         state_manager.set(State.LISTENING)
-        post_barge_in_pending = True
         if current_speak_task is not None and not current_speak_task.done():
             logger.info("Barge-in: cancelling in-flight reply")
             barge_in_requested = True
@@ -689,8 +684,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         """Always drain stt_session.events(); decide synchronously
         whether each EndOfTurn should drive a turn, and queue the ones
         that should."""
-        nonlocal post_barge_in_pending
-        post_barge_in_pending = False  # clear any flag left over from prior session
         # If we want to make it faster, we can also use EagerEndOfTurn and
         # TurnResumed events which allows us to send text to the LLM eagerly.
         # If they're done talking, great, we already sent the text to the LLM.
@@ -748,11 +741,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             # window before drive_turns picks up the turn and
             # transitions to PROCESSING.)
             state_manager.set_listening_active(False)
-            if post_barge_in_pending:
-                post_barge_in_pending = False
-                if text:
-                    logger.info("[barge-in utterance dropped] %s", text)
-                continue
             if not text:
                 continue
             await turn_queue.put(text)
