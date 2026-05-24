@@ -1,5 +1,7 @@
-# Per-host runtime config. Copy this file to `meeko.toml` (e.g. `cp -n meeko.toml.example meeko.toml`) and edit as needed.
-# `meeko.toml` is gitignored (personal settings); this example file is tracked.
+# Meeko runtime config. Auto-created from Meeko's bundled default
+# (meeko/default_config.toml) on first run — Meeko only writes it when no
+# config exists, so your edits here are preserved across restarts.
+# Edit freely to customize.
 #
 # See README.md §Configuration for the full list of options, defaults, and
 # MEEKO_* environment-variable overrides.

@@ -34,11 +34,7 @@ DEEPGRAM_API_KEY=your-deepgram-api-key
 ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
-Copy the shipped example config to a local file (gitignored; this is where you put personal settings like your home location):
-
-```
-cp -n meeko.toml.example meeko.toml  # -n: don't overwrite if it already exists
-```
+That's all the setup required. On first run Meeko creates a config file at `~/.config/meeko/meeko.toml` (copied from the bundled `meeko/default_config.toml`) and starts with working defaults; edit that file to add personal settings like your home location.
 
 ## Running
 
@@ -48,7 +44,7 @@ uv run python -m meeko.main
 
 Say "Hey Meeko" to wake it. Press `Ctrl+C` to quit.
 
-The shipped `meeko.toml.example` provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
+The default config provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
 
 ## How it works
 
@@ -58,7 +54,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — state machine, se
 
 ## Configuration
 
-All non-secret settings live in `meeko.toml` at the repo root. That file is gitignored (it holds personal per-host settings); start by copying `meeko.toml.example` to `meeko.toml` and editing as needed. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file.
+All non-secret settings live in `meeko.toml`. Meeko looks for it in this order: `$MEEKO_CONFIG`, then `$XDG_CONFIG_HOME/meeko/meeko.toml` (i.e. `~/.config/meeko/meeko.toml`), then `./meeko.toml` in the working directory. If none exist, it auto-creates `~/.config/meeko/meeko.toml` from the bundled `meeko/default_config.toml` on first run. Edit that file to customize. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file. (API keys stay in `.env` in the project root.)
 
 Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, and `[weather]`. Profiles (personas) are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
 
@@ -123,7 +119,7 @@ Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[cl
 | `conversation_idle_seconds`   | (conversation profile) silence before the verbal check-in. Default `60.0`.         |
 | `conversation_close_seconds`  | (conversation profile) silence after the check-in before closing. Default `20.0`.  |
 
-See the shipped `meeko.toml.example` for working examples of both profiles.
+See the bundled `meeko/default_config.toml` for working examples of both profiles.
 
 ## Notes for the ReSpeaker XVF3800
 

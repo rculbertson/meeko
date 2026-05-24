@@ -1,26 +1,99 @@
 """Meeko configuration loading.
 
 Loads both per-host runtime config (`MeekoConfig`) and the conversation
-personas (`Profile`) from a single `meeko.toml` file. Secrets stay in
-`.env`; everything else lives in `meeko.toml`. Any `MEEKO_*` environment
-variable overrides the corresponding TOML value, so existing env-var
-setups keep working.
+personas (`Profile`) from a single `meeko.toml` file. The file is located
+via `resolve_config_path()`: `$MEEKO_CONFIG`, then the XDG path
+(`~/.config/meeko/meeko.toml`), then `./meeko.toml`. Secrets stay in
+`.env` (cwd-relative); everything else lives in `meeko.toml`. Any `MEEKO_*`
+environment variable overrides the corresponding TOML value, so existing
+env-var setups keep working.
 """
 
 import os
+import shutil
 import tomllib
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 
 from meeko.sessions import default_db_path as _default_db_path
 
 VALID_MODES = {"query", "conversation"}
 
-DEFAULT_CONFIG_PATH = "meeko.toml"
+DEFAULT_CONFIG_FILENAME = "meeko.toml"
 
 
 _BOOL_TRUE = {"1", "true", "yes"}
 _BOOL_FALSE = {"0", "false", "no", "off"}
+
+
+def default_config_path() -> Path:
+    """Default config location, following the XDG Base Directory spec.
+
+    `$XDG_CONFIG_HOME/meeko/meeko.toml`, falling back to
+    `~/.config/meeko/meeko.toml` when `$XDG_CONFIG_HOME` is unset or, per
+    the spec, set to a relative (non-absolute) path.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else None
+    if base is None or not base.is_absolute():
+        base = Path.home() / ".config"
+    return base / "meeko" / DEFAULT_CONFIG_FILENAME
+
+
+def resolve_config_path() -> Path:
+    """Effective config path by precedence.
+
+    1. `$MEEKO_CONFIG` (explicit override)
+    2. the XDG path (`default_config_path()`) if it exists
+    3. `./meeko.toml` in the cwd if it exists (dev / legacy fallback)
+
+    Falls through to the XDG path (the auto-create target) when none exist.
+    """
+    override = os.environ.get("MEEKO_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    xdg_path = default_config_path()
+    if xdg_path.is_file():
+        return xdg_path
+    cwd_path = Path(DEFAULT_CONFIG_FILENAME)
+    if cwd_path.is_file():
+        return cwd_path
+    return xdg_path
+
+
+def ensure_config_exists() -> tuple[Path, bool]:
+    """Resolve the config path; if nothing exists anywhere, copy the bundled
+    `default_config.toml` to the XDG location.
+
+    Returns `(path, created)` where `created` is True iff the file was just
+    written. The caller is responsible for any user-facing notification —
+    logging here would be suppressed since `setup_logging()` runs later.
+
+    An explicit `$MEEKO_CONFIG` override is never auto-created: if it points
+    at a missing file (e.g. a typo), that surfaces via the loaders' "not
+    found" error rather than silently writing a default to that path.
+    """
+    path = resolve_config_path()
+    if path.is_file() or os.environ.get("MEEKO_CONFIG"):
+        return path, False
+    # path is the XDG default here (resolve_config_path fell through to it).
+    # If it exists but isn't a regular file (e.g. a directory), copying would
+    # raise an opaque IsADirectoryError — surface a clear message instead.
+    if path.exists():
+        raise IsADirectoryError(
+            f"Config path {path} exists but is not a regular file; "
+            f"remove it so Meeko can create a default config there."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Locate the bundled default via importlib.resources so it resolves
+    # correctly however the package is installed (source tree, wheel, zip).
+    source = resources.files("meeko") / "default_config.toml"
+    with resources.as_file(source) as src:
+        # copyfile (not copy2): the generated user config should get a fresh
+        # mtime and the user's umask, not the packaged file's metadata.
+        shutil.copyfile(src, path)
+    return path, True
 
 
 def _default_wake_word_model() -> Path:
@@ -79,21 +152,24 @@ class MeekoConfig:
 
 
 def load_profiles(
-    path: str | Path = DEFAULT_CONFIG_PATH,
+    path: str | Path | None = None,
 ) -> tuple[dict[str, Profile], str]:
     """Load conversation profiles from `meeko.toml`.
 
     Returns `(profiles, default_profile_name)`. The profile name is the
     mode, so each profile name must be one of `VALID_MODES`. The top-level
     `default_profile` key selects which profile a fresh session starts in.
+
+    With no explicit `path`, resolves via `resolve_config_path()`.
     """
+    if path is None:
+        path = resolve_config_path()
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"Config file '{path}' not found. Copy meeko.toml.example to "
-            f"'{path}' and edit as needed (see README.md §Setup)."
+            f"Config file '{path}' not found (see README.md §Configuration)."
         ) from exc
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"Invalid TOML in '{path}': {exc}") from exc
@@ -144,14 +220,17 @@ def load_profiles(
     return profiles, default_profile
 
 
-def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MeekoConfig:
+def load_config(path: str | Path | None = None) -> MeekoConfig:
     """Load `MeekoConfig` from `meeko.toml`, with env-var overrides.
 
     Precedence: env var > meeko.toml > dataclass default. Missing tables
     and keys silently fall through to defaults; the file may not even
     define any of `[system]`, `[audio]`, `[wake_word]`, `[claude]`,
-    `[location]`, `[weather]`.
+    `[location]`, `[weather]`. With no explicit `path`, resolves via
+    `resolve_config_path()`.
     """
+    if path is None:
+        path = resolve_config_path()
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)

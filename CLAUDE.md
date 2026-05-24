@@ -21,10 +21,10 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ### Configuration
 - Secrets (`DEEPGRAM_API_KEY`, `ANTHROPIC_API_KEY`) live in `.env`.
-- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold, home location) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, `[weather]` tables. See `README.md §Configuration` for the full list of options and defaults. `meeko.toml.example` shows the minimum required config (profiles only); all other tables are optional and fall back to defaults when absent.
-- `meeko.toml` is **gitignored** — it holds personal per-host settings. The tracked file is `meeko.toml.example`; users copy it to `meeko.toml` on setup. Do not re-track `meeko.toml`.
+- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold, home location) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, `[weather]` tables. See `README.md §Configuration` for the full list of options and defaults. `meeko/default_config.toml` (the bundled default, copied to the XDG location on first run) shows the minimum required config (profiles only); all other tables are optional and fall back to defaults when absent.
+- **Config location** follows XDG. `meeko.config.resolve_config_path()` resolves it by precedence: `$MEEKO_CONFIG` → `$XDG_CONFIG_HOME/meeko/meeko.toml` (i.e. `~/.config/meeko/meeko.toml`) → `./meeko.toml` (cwd fallback, kept for dev). On first run `ensure_config_exists()` copies the bundled `meeko/default_config.toml` into the XDG location, so a fresh checkout starts with working defaults — no manual copy step. Do not re-track `meeko.toml` (still gitignored for the cwd-fallback dev case). The DB lives separately in the XDG data dir (`meeko.sessions.default_db_path()`, `~/.local/share/meeko/`).
 - Any `MEEKO_*` environment variable overrides the corresponding TOML value at runtime — useful for one-off testing without editing the file.
-- Loading happens once in `run()` via `meeko.config.load_config()`; components receive their values via constructor kwargs (no module-level `os.environ.get` reads).
+- Loading happens once in `run()`: `ensure_config_exists()` resolves/creates the path, then `load_config()` and `load_profiles()` are both passed that path. Components receive their values via constructor kwargs (no module-level `os.environ.get` reads).
 
 ### Claude API calls
 - Model: `claude-sonnet-4-6` for main conversation and end-of-session summarization (long transcripts + summary quality drives resume-by-voice recall)

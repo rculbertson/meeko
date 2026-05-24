@@ -21,12 +21,15 @@ meeko.db-journal
 meeko.db-wal
 meeko.db-shm
 
-# Per-host runtime config (personal — copy meeko.toml.example to meeko.toml)
+# Per-host runtime config (personal). Lives at ~/.config/meeko/meeko.toml;
+# a ./meeko.toml here is a supported cwd fallback for dev, so keep it ignored.
 meeko.toml
 
 # Tool-specific config (personal)
 mise.toml
 .claude/settings.local.json
+# Claude Code runtime state (transient; .claude/settings.json stays tracked)
+.claude/scheduled_tasks.lock
 
 # Test fixtures (generated — see README)
 tests/fixtures/

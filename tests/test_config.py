@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from meeko.config import MeekoConfig, load_config, load_profiles
+from meeko.config import (
+    MeekoConfig,
+    default_config_path,
+    ensure_config_exists,
+    load_config,
+    load_profiles,
+    resolve_config_path,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -175,8 +182,151 @@ def test_web_search_enabled_env_overrides_toml_false(
 
 
 def test_load_profiles_missing_file_friendly_error(tmp_path: Path):
-    """Skipping `cp meeko.toml.example meeko.toml` should produce a
-    helpful error pointing at the example, not a raw FileNotFoundError."""
+    """A missing explicit config path should produce a helpful error that
+    names the path and points at the README, not a raw FileNotFoundError."""
     missing = tmp_path / "meeko.toml"
-    with pytest.raises(FileNotFoundError, match="meeko.toml.example"):
+    with pytest.raises(FileNotFoundError, match="not found"):
         load_profiles(missing)
+
+
+# --- XDG config path resolution ---
+
+
+def test_default_config_path_follows_xdg(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    path = default_config_path()
+    assert path.name == "meeko.toml"
+    assert path.parent.name == "meeko"
+    assert path.parent.parent == Path.home() / ".config"
+
+
+def test_default_config_path_honors_xdg_config_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert default_config_path() == tmp_path / "meeko" / "meeko.toml"
+
+
+def test_default_config_path_ignores_relative_xdg(monkeypatch: pytest.MonkeyPatch):
+    # Per the XDG spec, a relative $XDG_CONFIG_HOME is invalid; fall back.
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative/config")
+    assert default_config_path() == Path.home() / ".config" / "meeko" / "meeko.toml"
+
+
+def test_resolve_config_path_meeko_config_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MEEKO_CONFIG", str(tmp_path / "custom.toml"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert resolve_config_path() == tmp_path / "custom.toml"
+
+
+def test_resolve_config_path_prefers_xdg_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    xdg_file = tmp_path / "meeko" / "meeko.toml"
+    xdg_file.parent.mkdir(parents=True)
+    xdg_file.write_text('default_profile = "query"\n')
+    # Even with a cwd meeko.toml present, XDG takes precedence.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "meeko.toml").write_text("")
+    assert resolve_config_path() == xdg_file
+
+
+def test_resolve_config_path_falls_back_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    # Point XDG at an empty dir so the XDG file does not exist.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "meeko.toml").write_text("")
+    assert resolve_config_path() == Path("meeko.toml")
+
+
+def test_resolve_config_path_defaults_to_xdg_when_none_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)  # no cwd meeko.toml here
+    assert resolve_config_path() == tmp_path / "xdg" / "meeko" / "meeko.toml"
+
+
+def test_ensure_config_exists_auto_creates_from_example(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)  # ensure no cwd meeko.toml interferes
+
+    path, created = ensure_config_exists()
+
+    assert created is True
+    assert path == tmp_path / "meeko" / "meeko.toml"
+    assert path.exists()
+    # The copied default must be a loadable config with profiles defined.
+    profiles, default_name = load_profiles(path)
+    assert profiles
+    assert default_name in profiles
+
+
+def test_ensure_config_exists_noop_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    xdg_file = tmp_path / "meeko" / "meeko.toml"
+    xdg_file.parent.mkdir(parents=True)
+    xdg_file.write_text('default_profile = "query"\n')
+    monkeypatch.chdir(tmp_path)
+
+    path, created = ensure_config_exists()
+    assert created is False
+    assert path == xdg_file
+    # Untouched: still our minimal content, not the bundled default.
+    assert xdg_file.read_text() == 'default_profile = "query"\n'
+
+
+def test_ensure_config_exists_does_not_create_for_missing_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # An explicit $MEEKO_CONFIG pointing at a missing file must NOT be
+    # auto-created (e.g. a typo should surface as a load error, not get a
+    # default silently written to the wrong path).
+    override = tmp_path / "typo.toml"
+    monkeypatch.setenv("MEEKO_CONFIG", str(override))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    path, created = ensure_config_exists()
+    assert created is False
+    assert path == override
+    assert not override.exists()
+
+
+def test_resolve_config_path_ignores_directory_at_xdg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A directory at the XDG path is not a config file; fall through.
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "meeko" / "meeko.toml").mkdir(parents=True)  # a dir, not a file
+    monkeypatch.chdir(tmp_path)  # no cwd meeko.toml here
+    assert resolve_config_path() == tmp_path / "meeko" / "meeko.toml"
+    # is_file() is False for the dir, so it's the auto-create target, not a hit.
+    assert not resolve_config_path().is_file()
+
+
+def test_ensure_config_exists_raises_when_path_is_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A directory at the XDG target must yield a clear error, not an opaque
+    # IsADirectoryError from shutil.copyfile.
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "meeko" / "meeko.toml").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(IsADirectoryError, match="not a regular file"):
+        ensure_config_exists()
