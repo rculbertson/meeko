@@ -53,10 +53,10 @@ def resolve_config_path() -> Path:
     if override:
         return Path(override).expanduser()
     xdg_path = default_config_path()
-    if xdg_path.exists():
+    if xdg_path.is_file():
         return xdg_path
     cwd_path = Path(DEFAULT_CONFIG_FILENAME)
-    if cwd_path.exists():
+    if cwd_path.is_file():
         return cwd_path
     return xdg_path
 
@@ -73,14 +73,18 @@ def ensure_config_exists() -> tuple[Path, bool]:
     Returns `(path, created)` where `created` is True iff the file was just
     written. The caller is responsible for any user-facing notification —
     logging here would be suppressed since `setup_logging()` runs later.
+
+    An explicit `$MEEKO_CONFIG` override is never auto-created: if it points
+    at a missing file (e.g. a typo), that surfaces via the loaders' "not
+    found" error rather than silently writing a default to that path.
     """
     path = resolve_config_path()
-    created = False
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(_bundled_default_config_path(), path)
-        created = True
-    return path, created
+    if path.is_file() or os.environ.get("MEEKO_CONFIG"):
+        return path, False
+    # path is the XDG default here (resolve_config_path fell through to it).
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_bundled_default_config_path(), path)
+    return path, True
 
 
 def _default_wake_word_model() -> Path:

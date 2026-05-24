@@ -288,3 +288,32 @@ def test_ensure_config_exists_noop_when_present(
     assert path == xdg_file
     # Untouched: still our minimal content, not the bundled default.
     assert xdg_file.read_text() == 'default_profile = "query"\n'
+
+
+def test_ensure_config_exists_does_not_create_for_missing_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # An explicit $MEEKO_CONFIG pointing at a missing file must NOT be
+    # auto-created (e.g. a typo should surface as a load error, not get a
+    # default silently written to the wrong path).
+    override = tmp_path / "typo.toml"
+    monkeypatch.setenv("MEEKO_CONFIG", str(override))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    path, created = ensure_config_exists()
+    assert created is False
+    assert path == override
+    assert not override.exists()
+
+
+def test_resolve_config_path_ignores_directory_at_xdg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A directory at the XDG path is not a config file; fall through.
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "meeko" / "meeko.toml").mkdir(parents=True)  # a dir, not a file
+    monkeypatch.chdir(tmp_path)  # no cwd meeko.toml here
+    assert resolve_config_path() == tmp_path / "meeko" / "meeko.toml"
+    # is_file() is False for the dir, so it's the auto-create target, not a hit.
+    assert not resolve_config_path().is_file()
