@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -62,7 +63,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 
 
 def default_db_path() -> Path:
-    return Path.home() / ".meeko" / "meeko.db"
+    """Default DB location, following the XDG Base Directory spec.
+
+    `$XDG_DATA_HOME/meeko/meeko.db`, falling back to
+    `~/.local/share/meeko/meeko.db` when `$XDG_DATA_HOME` is unset.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "share"
+    return base / "meeko" / "meeko.db"
 
 
 def _now() -> str:

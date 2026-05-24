@@ -12,6 +12,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from meeko.sessions import default_db_path as _default_db_path
+
 VALID_MODES = {"query", "conversation"}
 
 DEFAULT_CONFIG_PATH = "meeko.toml"
@@ -19,10 +21,6 @@ DEFAULT_CONFIG_PATH = "meeko.toml"
 
 _BOOL_TRUE = {"1", "true", "yes"}
 _BOOL_FALSE = {"0", "false", "no", "off"}
-
-
-def _default_db_path() -> Path:
-    return Path.home() / ".meeko" / "meeko.db"
 
 
 def _default_wake_word_model() -> Path:

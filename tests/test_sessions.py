@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -484,7 +485,16 @@ async def test_search_sessions_no_args_returns_empty(store):
     assert await store.search_sessions() == []
 
 
-def test_default_db_path_defaults_to_home():
+def test_default_db_path_follows_xdg(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     path = default_db_path()
     assert path.name == "meeko.db"
-    assert path.parent.name == ".meeko"
+    assert path.parent.name == "meeko"
+    assert path.parent.parent == Path.home() / ".local" / "share"
+
+
+def test_default_db_path_honors_xdg_data_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert default_db_path() == tmp_path / "meeko" / "meeko.db"

@@ -25,7 +25,7 @@ def test_defaults_match_historical_env_defaults(tmp_path: Path):
     assert cfg.log_level == "DEBUG"
     assert cfg.log_target is None
     assert cfg.db_path.name == "meeko.db"
-    assert cfg.db_path.parent.name == ".meeko"
+    assert cfg.db_path.parent.name == "meeko"
     assert cfg.led_disabled is False
     assert cfg.input_channels == 2
     assert cfg.output_channels == 2
