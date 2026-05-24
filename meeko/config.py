@@ -13,6 +13,7 @@ import os
 import shutil
 import tomllib
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 
 from meeko.sessions import default_db_path as _default_db_path
@@ -61,11 +62,6 @@ def resolve_config_path() -> Path:
     return xdg_path
 
 
-def _bundled_default_config_path() -> Path:
-    # Shipped default config, packaged alongside this module.
-    return Path(__file__).resolve().parent / "default_config.toml"
-
-
 def ensure_config_exists() -> tuple[Path, bool]:
     """Resolve the config path; if nothing exists anywhere, copy the bundled
     `default_config.toml` to the XDG location.
@@ -90,7 +86,13 @@ def ensure_config_exists() -> tuple[Path, bool]:
             f"remove it so Meeko can create a default config there."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(_bundled_default_config_path(), path)
+    # Locate the bundled default via importlib.resources so it resolves
+    # correctly however the package is installed (source tree, wheel, zip).
+    source = resources.files("meeko") / "default_config.toml"
+    with resources.as_file(source) as src:
+        # copyfile (not copy2): the generated user config should get a fresh
+        # mtime and the user's umask, not the packaged file's metadata.
+        shutil.copyfile(src, path)
     return path, True
 
 
