@@ -498,3 +498,11 @@ def test_default_db_path_honors_xdg_data_home(
 ):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     assert default_db_path() == tmp_path / "meeko" / "meeko.db"
+
+
+def test_default_db_path_ignores_relative_xdg_data_home(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Per the XDG spec, a relative $XDG_DATA_HOME is invalid; fall back.
+    monkeypatch.setenv("XDG_DATA_HOME", "relative/data")
+    assert default_db_path() == Path.home() / ".local" / "share" / "meeko" / "meeko.db"
