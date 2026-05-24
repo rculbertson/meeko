@@ -64,18 +64,18 @@ def resolve_config_path() -> Path:
     return xdg_path
 
 
-def _bundled_example_path() -> Path:
-    # Repo-root meeko.toml.example, relative to this package file (clone deploy).
-    return Path(__file__).resolve().parent.parent / "meeko.toml.example"
+def _bundled_default_config_path() -> Path:
+    # Shipped default config, packaged alongside this module.
+    return Path(__file__).resolve().parent / "default_config.toml"
 
 
 def ensure_config_exists() -> Path:
     """Resolve the config path; if nothing exists anywhere, copy the bundled
-    `meeko.toml.example` to the XDG location and return it."""
+    `default_config.toml` to the XDG location and return it."""
     path = resolve_config_path()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(_bundled_example_path(), path)
+        shutil.copyfile(_bundled_default_config_path(), path)
         logger.info("No config found; wrote default config to %s", path)
     return path
 

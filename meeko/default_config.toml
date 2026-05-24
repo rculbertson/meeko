@@ -1,7 +1,7 @@
-# Per-host runtime config template. On first run Meeko copies this file to
-# `~/.config/meeko/meeko.toml` (the XDG config location) if no config exists;
-# edit that copy to customize. This example file is tracked; the generated
-# `meeko.toml` is gitignored.
+# Meeko runtime config. Auto-created from Meeko's bundled default
+# (meeko/default_config.toml) on first run — Meeko only writes it when no
+# config exists, so your edits here are preserved across restarts.
+# Edit freely to customize.
 #
 # See README.md §Configuration for the full list of options, defaults, and
 # MEEKO_* environment-variable overrides.
