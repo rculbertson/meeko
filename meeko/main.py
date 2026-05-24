@@ -34,7 +34,13 @@ from websockets.exceptions import ConnectionClosed
 
 from meeko.audio_io import AudioIO
 from meeko.claude_client import ClaudeClient
-from meeko.config import MeekoConfig, Profile, load_config, load_profiles
+from meeko.config import (
+    MeekoConfig,
+    Profile,
+    ensure_config_exists,
+    load_config,
+    load_profiles,
+)
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
 from meeko.leds import LedController, LedState
@@ -400,7 +406,8 @@ async def _apply_post_turn_session_change(
 
 async def run(resume: str | None = None, list_sessions: bool = False):
     load_dotenv()
-    config = load_config()
+    config_path = ensure_config_exists()
+    config = load_config(config_path)
     setup_logging(log_level=config.log_level, log_target=config.log_target)
 
     if list_sessions:
@@ -414,7 +421,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     deepgram_key = os.environ["DEEPGRAM_API_KEY"]
     anthropic_key = os.environ["ANTHROPIC_API_KEY"]
 
-    profiles, default_profile_name = load_profiles()
+    profiles, default_profile_name = load_profiles(config_path)
     store = SessionStore.open(config.db_path)
     profile, session_id, history = await _init_session_state(
         store, resume, profiles, default_profile_name

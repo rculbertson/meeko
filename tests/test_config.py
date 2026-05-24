@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from meeko.config import MeekoConfig, load_config, load_profiles
+from meeko.config import (
+    MeekoConfig,
+    default_config_path,
+    ensure_config_exists,
+    load_config,
+    load_profiles,
+    resolve_config_path,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -175,8 +182,106 @@ def test_web_search_enabled_env_overrides_toml_false(
 
 
 def test_load_profiles_missing_file_friendly_error(tmp_path: Path):
-    """Skipping `cp meeko.toml.example meeko.toml` should produce a
-    helpful error pointing at the example, not a raw FileNotFoundError."""
+    """A missing explicit config path should produce a helpful error that
+    names the path and points at the README, not a raw FileNotFoundError."""
     missing = tmp_path / "meeko.toml"
-    with pytest.raises(FileNotFoundError, match="meeko.toml.example"):
+    with pytest.raises(FileNotFoundError, match="not found"):
         load_profiles(missing)
+
+
+# --- XDG config path resolution ---
+
+
+def test_default_config_path_follows_xdg(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    path = default_config_path()
+    assert path.name == "meeko.toml"
+    assert path.parent.name == "meeko"
+    assert path.parent.parent == Path.home() / ".config"
+
+
+def test_default_config_path_honors_xdg_config_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert default_config_path() == tmp_path / "meeko" / "meeko.toml"
+
+
+def test_default_config_path_ignores_relative_xdg(monkeypatch: pytest.MonkeyPatch):
+    # Per the XDG spec, a relative $XDG_CONFIG_HOME is invalid; fall back.
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative/config")
+    assert default_config_path() == Path.home() / ".config" / "meeko" / "meeko.toml"
+
+
+def test_resolve_config_path_meeko_config_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MEEKO_CONFIG", str(tmp_path / "custom.toml"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert resolve_config_path() == tmp_path / "custom.toml"
+
+
+def test_resolve_config_path_prefers_xdg_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    xdg_file = tmp_path / "meeko" / "meeko.toml"
+    xdg_file.parent.mkdir(parents=True)
+    xdg_file.write_text('default_profile = "query"\n')
+    # Even with a cwd meeko.toml present, XDG takes precedence.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "meeko.toml").write_text("")
+    assert resolve_config_path() == xdg_file
+
+
+def test_resolve_config_path_falls_back_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    # Point XDG at an empty dir so the XDG file does not exist.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "meeko.toml").write_text("")
+    assert resolve_config_path() == Path("meeko.toml")
+
+
+def test_resolve_config_path_defaults_to_xdg_when_none_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)  # no cwd meeko.toml here
+    assert resolve_config_path() == tmp_path / "xdg" / "meeko" / "meeko.toml"
+
+
+def test_ensure_config_exists_auto_creates_from_example(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)  # ensure no cwd meeko.toml interferes
+
+    created = ensure_config_exists()
+
+    assert created == tmp_path / "meeko" / "meeko.toml"
+    assert created.exists()
+    # The copied example must be a loadable config with profiles defined.
+    profiles, default_name = load_profiles(created)
+    assert profiles
+    assert default_name in profiles
+
+
+def test_ensure_config_exists_noop_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MEEKO_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    xdg_file = tmp_path / "meeko" / "meeko.toml"
+    xdg_file.parent.mkdir(parents=True)
+    xdg_file.write_text('default_profile = "query"\n')
+    monkeypatch.chdir(tmp_path)
+
+    assert ensure_config_exists() == xdg_file
+    # Untouched: still our minimal content, not the example.
+    assert xdg_file.read_text() == 'default_profile = "query"\n'
