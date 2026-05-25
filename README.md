@@ -118,6 +118,7 @@ Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[cl
 | `idle_timeout_seconds`        | (query profile) silence window before silent close. Default `5.0`.                 |
 | `conversation_idle_seconds`   | (conversation profile) silence before the verbal check-in. Default `60.0`.         |
 | `conversation_close_seconds`  | (conversation profile) silence after the check-in before closing. Default `20.0`.  |
+| `post_wake_timeout_seconds`   | silence window after the wake word, before the first turn; on expiry the session closes silently and returns to IDLE. Default `15.0`. Non-positive disables. |
 
 See the bundled `meeko/default_config.toml` for working examples of both profiles.
 
