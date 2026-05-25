@@ -568,6 +568,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 if wake_detector.process(data):
                     state_manager.set(State.LISTENING)
                     logger.info("Wake word accepted; entering LISTENING")
+                    start_post_wake_monitor()
                 continue
             if config.mute_mic_while_speaking and state_manager.state == State.SPEAKING:
                 continue
@@ -644,6 +645,37 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 speak=speaker.speak,
             )
         )
+
+    def on_post_wake_timeout() -> None:
+        # Wake word fired but the user never spoke. Close silently and
+        # return to IDLE, regardless of mode. Same race guard as
+        # on_idle_timeout: a turn may have landed between the sleep
+        # waking and this running.
+        if state_manager.state != State.LISTENING or not turn_queue.empty():
+            return
+        logger.info(
+            "Post-wake timeout (%.1fs, no speech); ending session",
+            profile_manager.active_profile.post_wake_timeout_seconds,
+        )
+        session_manager.request_end()
+        turn_queue.put_nowait(_IDLE_TIMEOUT_SENTINEL)
+
+    def start_post_wake_monitor() -> None:
+        # Arms the silence window that runs from the wake word until the
+        # user's first turn. Shares idle_monitor_task so the existing
+        # cancel_idle_monitor() calls (StartOfTurn, barge-in, next turn,
+        # shutdown) tear it down.
+        nonlocal idle_monitor_task
+        cancel_idle_monitor()
+        timeout = profile_manager.active_profile.post_wake_timeout_seconds
+        if timeout <= 0:
+            return
+
+        async def _monitor() -> None:
+            await asyncio.sleep(timeout)
+            on_post_wake_timeout()
+
+        idle_monitor_task = asyncio.create_task(_monitor())
 
     # Set in drive_turns while a Claude+TTS turn is running so
     # request_barge_in() can cancel just that turn without tearing down

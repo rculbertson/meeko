@@ -734,6 +734,7 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
             prompt="system",
             voice=None,
             idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
         )
     }
 
@@ -930,6 +931,7 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
             prompt="system",
             voice=None,
             idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
         )
     }
 
@@ -1185,6 +1187,7 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
             prompt="system",
             voice=None,
             idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
         )
     }
 
@@ -1288,6 +1291,129 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
         await store.close()
     assert len(rows) == 1
     assert rows[0]["turn_count"] >= 1
+
+
+async def test_post_wake_timeout_returns_to_idle_without_session_row(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """Wake word fires → LISTENING, but the user never speaks. The
+    post-wake monitor expires, ends the session silently (no TTS), and
+    returns to IDLE (detector reset). Since no turn happened, lazy row
+    creation never fires, so no session row is written to the DB."""
+    from meeko.sessions import SessionStore
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    pa_instance = MagicMock()
+    mic_stream = MagicMock()
+    speaker_stream = MagicMock()
+    captured_cb: dict = {}
+
+    def open_stream(**kwargs):
+        if kwargs.get("input"):
+            captured_cb["cb"] = kwargs["stream_callback"]
+            return mic_stream
+        return speaker_stream
+
+    pa_instance.open.side_effect = open_stream
+    speaker_stream.write.side_effect = lambda data: None
+
+    # Short post-wake window; idle monitor disabled so only the
+    # post-wake path can end the (turn-less) session.
+    wake_profiles = {
+        "query": Profile(
+            name="query",
+            wake_word="meeko",
+            prompt="system",
+            voice=None,
+            idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0.05,
+        )
+    }
+
+    class _FakeDetector:
+        def __init__(self, *a, **kw):
+            self.calls = 0
+            self.resets = 0
+
+        def process(self, pcm: bytes) -> bool:
+            self.calls += 1
+            return self.calls == 1  # fire once, then stay quiet
+
+        def reset(self) -> None:
+            self.resets += 1
+
+    detector_holder: dict = {}
+
+    def make_detector(*a, **kw):
+        d = _FakeDetector()
+        detector_holder["d"] = d
+        return d
+
+    # User never speaks: ready is never set, so no EndOfTurn fires.
+    fake_stt = _HoldingSTTClient("dg-test")
+    fake_tts = _FakeTTSClient("dg-test")
+
+    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
+        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ClaudeClient", side_effect=make_claude),
+        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run())
+        try:
+            for _ in range(500):
+                if "cb" in captured_cb and "d" in detector_holder:
+                    break
+                await real_sleep(0.01)
+            assert "cb" in captured_cb
+            # One mic frame fires the wake detector → LISTENING + arms
+            # the post-wake monitor. We push no further frames, so the
+            # user "says nothing".
+            captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
+
+            detector = detector_holder["d"]
+            # Post-wake monitor expires → end_session → IDLE → detector
+            # reset.
+            for _ in range(500):
+                if detector.resets >= 1:
+                    break
+                await real_sleep(0.01)
+            assert detector.resets >= 1, "post-wake timeout never ended the session"
+            # No TTS: the silent close speaks nothing.
+            assert fake_tts.calls == []
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    # No turn ever happened, so lazy row creation never fired: the DB
+    # has no session row.
+    store = SessionStore.open(db_path)
+    try:
+        rows = await store.list_sessions()
+    finally:
+        await store.close()
+    assert rows == []
 
 
 async def test_end_session_without_wake_word_transitions_to_listening(
@@ -1407,6 +1533,7 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
             prompt="system",
             voice=None,
             idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
         )
     }
 
@@ -1639,6 +1766,7 @@ async def test_new_session_after_profile_switch_records_active_profile(
             prompt="default system",
             voice=None,
             idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
         ),
         "pirate": Profile(
             name="pirate",
@@ -1646,6 +1774,7 @@ async def test_new_session_after_profile_switch_records_active_profile(
             prompt="pirate system",
             voice=None,
             idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
         ),
     }
 
@@ -2458,6 +2587,7 @@ async def test_endofturn_while_idle_does_not_drive_a_turn(
             prompt="system",
             voice=None,
             idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
         )
     }
 

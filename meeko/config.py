@@ -109,12 +109,18 @@ class Profile:
     idle_timeout_seconds: float = 5.0
     conversation_idle_seconds: float = 60.0
     conversation_close_seconds: float = 20.0
+    post_wake_timeout_seconds: float = 15.0
 
     # The profile name is the mode. "query" auto-closes silently after
     # `idle_timeout_seconds` of silence; "conversation" prompts after
     # `conversation_idle_seconds` then closes after
     # `conversation_close_seconds` more silence (see meeko/main.py
     # _idle_monitor).
+    #
+    # `post_wake_timeout_seconds` is the silence window right after the
+    # wake word, before the user's first turn. On expiry the session
+    # closes silently and returns to IDLE (re-wake required), regardless
+    # of mode. Non-positive disables it.
     @property
     def mode(self) -> str:
         return self.name
@@ -201,6 +207,11 @@ def load_profiles(
             conversation_close_seconds=float(
                 fields.get(
                     "conversation_close_seconds", Profile.conversation_close_seconds
+                )
+            ),
+            post_wake_timeout_seconds=float(
+                fields.get(
+                    "post_wake_timeout_seconds", Profile.post_wake_timeout_seconds
                 )
             ),
         )
