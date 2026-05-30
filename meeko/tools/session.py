@@ -231,6 +231,73 @@ def get_tool_definitions() -> list[ToolDefinition]:
     ]
 
 
+def _handle_end(manager: SessionManager) -> str:
+    manager.request_end()
+    logger.info("end_session tool called; will transition after SPEAKING")
+    return "Session ended. Meeko will return to idle after this turn."
+
+
+def _handle_new(manager: SessionManager) -> str:
+    manager.request_new()
+    logger.info("new_session tool called; will rotate session after SPEAKING")
+    return "Starting a fresh session. Meeko will swap the context after this turn."
+
+
+async def _handle_list(args: dict, store: SessionStore | None) -> str:
+    query = str(args.get("query", "")).strip() or None
+    since_arg = str(args.get("since", "")).strip() or None
+    until_arg = str(args.get("until", "")).strip() or None
+    if not (query or since_arg or until_arg):
+        return "Please provide a search query or date range."
+    if store is None:
+        return "Session search is not available."
+    try:
+        since_iso = _local_date_to_utc_iso(since_arg) if since_arg else None
+        until_iso = _local_date_to_utc_iso(until_arg) if until_arg else None
+    except ValueError:
+        return "Invalid date format. Use YYYY-MM-DD for `since` and `until`."
+    results = await store.search_sessions(query, since=since_iso, until=until_iso)
+    criteria = _describe_criteria(query, since_arg, until_arg)
+    if not results:
+        return f"No sessions found {criteria}."
+    lines = [f"Found {len(results)} session(s) {criteria}:"]
+    for i, r in enumerate(results, 1):
+        title = r["title"] or "(no title)"
+        lines.append(
+            f'{i}. "{title}" — {_format_local_date(r["last_active"])} '
+            f"(id: {r['session_id']})"
+        )
+    return "\n".join(lines)
+
+
+async def _handle_load(
+    args: dict,
+    manager: SessionManager,
+    store: SessionStore | None,
+    current_session_id: str | None,
+) -> str:
+    session_id = str(args.get("id", "")).strip()
+    if not session_id:
+        return "Please provide a session id."
+    if store is None:
+        return "Session loading is not available."
+    row = await store.get_session(session_id)
+    if row is None:
+        return (
+            f"No session found with id '{session_id}'. "
+            "Call list_sessions to find the correct id."
+        )
+    if session_id == current_session_id:
+        return "That's the current session — already loaded."
+    manager.request_load(session_id)
+    title = row.get("title") or "(untitled)"
+    logger.info(
+        "load_session tool called for %s; will swap history after SPEAKING",
+        session_id[:8],
+    )
+    return f"Loading '{title}'. Continuing from there after this turn."
+
+
 async def handle(
     fn_name: str,
     args: dict,
@@ -240,61 +307,11 @@ async def handle(
     current_session_id: str | None = None,
 ) -> str:
     if fn_name == "end_session":
-        manager.request_end()
-        logger.info("end_session tool called; will transition after SPEAKING")
-        return "Session ended. Meeko will return to idle after this turn."
-
+        return _handle_end(manager)
     if fn_name == "new_session":
-        manager.request_new()
-        logger.info("new_session tool called; will rotate session after SPEAKING")
-        return "Starting a fresh session. Meeko will swap the context after this turn."
-
+        return _handle_new(manager)
     if fn_name == "list_sessions":
-        query = str(args.get("query", "")).strip() or None
-        since_arg = str(args.get("since", "")).strip() or None
-        until_arg = str(args.get("until", "")).strip() or None
-        if not (query or since_arg or until_arg):
-            return "Please provide a search query or date range."
-        if store is None:
-            return "Session search is not available."
-        try:
-            since_iso = _local_date_to_utc_iso(since_arg) if since_arg else None
-            until_iso = _local_date_to_utc_iso(until_arg) if until_arg else None
-        except ValueError:
-            return "Invalid date format. Use YYYY-MM-DD for `since` and `until`."
-        results = await store.search_sessions(query, since=since_iso, until=until_iso)
-        criteria = _describe_criteria(query, since_arg, until_arg)
-        if not results:
-            return f"No sessions found {criteria}."
-        lines = [f"Found {len(results)} session(s) {criteria}:"]
-        for i, r in enumerate(results, 1):
-            title = r["title"] or "(no title)"
-            lines.append(
-                f'{i}. "{title}" — {_format_local_date(r["last_active"])} '
-                f"(id: {r['session_id']})"
-            )
-        return "\n".join(lines)
-
+        return await _handle_list(args, store)
     if fn_name == "load_session":
-        session_id = str(args.get("id", "")).strip()
-        if not session_id:
-            return "Please provide a session id."
-        if store is None:
-            return "Session loading is not available."
-        row = await store.get_session(session_id)
-        if row is None:
-            return (
-                f"No session found with id '{session_id}'. "
-                "Call list_sessions to find the correct id."
-            )
-        if session_id == current_session_id:
-            return "That's the current session — already loaded."
-        manager.request_load(session_id)
-        title = row.get("title") or "(untitled)"
-        logger.info(
-            "load_session tool called for %s; will swap history after SPEAKING",
-            session_id[:8],
-        )
-        return f"Loading '{title}'. Continuing from there after this turn."
-
+        return await _handle_load(args, manager, store, current_session_id)
     return f"Unknown session function: {fn_name}"
