@@ -4,6 +4,7 @@ Stubs out `httpx.AsyncClient` so the suite stays offline; the WeatherClient
 itself is exercised end-to-end (forecast fetch + format).
 """
 
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -26,9 +27,9 @@ def test_tool_definition_shape():
     schema = d["input_schema"]
     assert schema["type"] == "object"
     props = schema["properties"]
-    assert set(props) == {"latitude", "longitude", "place_label"}
-    # All three args are optional individually; the handler enforces
-    # all-or-nothing at runtime.
+    assert set(props) == {"latitude", "longitude", "place_label", "date"}
+    # All args are optional individually; the handler enforces the
+    # all-or-nothing place rule and date validation at runtime.
     assert not schema.get("required")
 
 
@@ -80,19 +81,41 @@ class _StubClient:
 _FORECAST = "https://api.open-meteo.com/v1/forecast"
 
 
-def _forecast_payload() -> dict:
+def _today_iso() -> str:
+    return datetime.now().astimezone().date().isoformat()
+
+
+def _hourly_times(day_iso: str) -> list[str]:
+    return [f"{day_iso}T{h:02d}:00" for h in range(24)]
+
+
+def _forecast_payload(
+    *,
+    day_iso: str | None = None,
+    prob_max: int = 80,
+    rain_hours: tuple[int, ...] = (14, 15, 16),
+) -> dict:
+    """One-day payload (start_date == end_date), so every array has length 1
+    for `daily` and 24 for `hourly`."""
+    day_iso = day_iso or _today_iso()
+    probs = [90 if h in rain_hours else 0 for h in range(24)]
     return {
         "current": {
             "temperature_2m": 54.3,
+            "relative_humidity_2m": 47.0,
             "weather_code": 2,
-            "wind_speed_10m": 8.1,
-            "wind_direction_10m": 315,  # NW
         },
         "daily": {
-            "temperature_2m_max": [61.0, 58.0],
-            "temperature_2m_min": [48.0, 49.0],
-            "precipitation_probability_max": [10, 80],
-            "weather_code": [2, 61],
+            "time": [day_iso],
+            "temperature_2m_max": [61.0],
+            "temperature_2m_min": [48.0],
+            "precipitation_probability_max": [prob_max],
+            "weather_code": [61],
+        },
+        "hourly": {
+            "time": _hourly_times(day_iso),
+            "precipitation_probability": probs,
+            "precipitation": [0.1 if h in rain_hours else 0.0 for h in range(24)],
         },
     }
 
@@ -118,8 +141,10 @@ def _configure_no_home(client: WeatherClient, units: str = "imperial") -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_uses_home_coords_when_args_omitted(monkeypatch):
-    stub = _StubClient({_FORECAST: [_forecast_payload()]})
+async def test_handle_uses_home_coords_and_bounds_to_today(monkeypatch):
+    # No rain in the immediate hours so the timing clause doesn't depend on
+    # the wall clock; we assert it separately below.
+    stub = _StubClient({_FORECAST: [_forecast_payload(rain_hours=())]})
     _install_stub_client(monkeypatch, stub)
 
     client = WeatherClient()
@@ -131,14 +156,22 @@ async def test_handle_uses_home_coords_when_args_omitted(monkeypatch):
     forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
     assert forecast_call[1]["latitude"] == _HOME_LAT
     assert forecast_call[1]["longitude"] == _HOME_LON
+    # Bounded to a single day.
+    today = _today_iso()
+    assert forecast_call[1]["start_date"] == today
+    assert forecast_call[1]["end_date"] == today
 
-    assert "Home:" in result
+    assert "Home, today" in result
+    assert today in result
+    # Today shows current temp + humidity and the live weather code (partly
+    # cloudy = code 2).
     assert "54°F" in result
+    assert "humidity 47%" in result
     assert "partly cloudy" in result
-    assert "8 mph" in result and "from NW" in result
-    assert "Today" in result and "Tomorrow" in result
-    assert "10%" in result
-    assert "light rain" in result
+    assert "High 61°F, low 48°F" in result
+    assert "80% chance of precipitation" in result
+    # Wind is gone.
+    assert "mph" not in result and "from" not in result.lower()
 
 
 @pytest.mark.asyncio
@@ -159,11 +192,107 @@ async def test_handle_uses_supplied_coords_when_provided(monkeypatch):
         },
     )
 
-    # Forecast must use the supplied coords, not the home coords.
     forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
     assert forecast_call[1]["latitude"] == 43.6591
     assert forecast_call[1]["longitude"] == -70.2568
     assert "Portland, Maine" in result
+
+
+@pytest.mark.asyncio
+async def test_future_day_selection_and_no_current_conditions(monkeypatch):
+    three_out = (datetime.now().astimezone().date() + timedelta(days=3)).isoformat()
+    stub = _StubClient({_FORECAST: [_forecast_payload(day_iso=three_out)]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"date": three_out})
+
+    forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
+    assert forecast_call[1]["start_date"] == three_out
+    assert forecast_call[1]["end_date"] == three_out
+
+    # Future day: weekday label, daily weather code (rain=61), high/low,
+    # precip — but NO current temp / humidity.
+    assert three_out in result
+    assert "light rain" in result
+    assert "High 61°F, low 48°F" in result
+    assert "humidity" not in result
+    assert "Currently" not in result
+
+
+@pytest.mark.asyncio
+async def test_precip_timing_window_rendered(monkeypatch):
+    # A future day so "now" filtering doesn't trim the morning window.
+    day = (datetime.now().astimezone().date() + timedelta(days=2)).isoformat()
+    stub = _StubClient(
+        {_FORECAST: [_forecast_payload(day_iso=day, rain_hours=(14, 15, 16))]}
+    )
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"date": day})
+
+    assert "precipitation likely around 2–4 PM" in result
+
+
+@pytest.mark.asyncio
+async def test_low_precip_chance_omits_timing(monkeypatch):
+    day = (datetime.now().astimezone().date() + timedelta(days=2)).isoformat()
+    stub = _StubClient(
+        {_FORECAST: [_forecast_payload(day_iso=day, prob_max=10, rain_hours=())]}
+    )
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"date": day})
+
+    assert "10% chance of precipitation" in result
+    assert "precipitation likely" not in result
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_date_returns_message_without_fetch(monkeypatch):
+    # No stub installed: if get_weather tried to fetch, the missing
+    # AsyncClient would surface. It must short-circuit before that.
+    far = (datetime.now().astimezone().date() + timedelta(days=30)).isoformat()
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"date": far})
+    assert "two weeks" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_past_date_returns_message_without_fetch(monkeypatch):
+    past = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"date": past})
+    assert "look ahead" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_unparseable_date_returns_message_without_fetch(monkeypatch):
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"date": "next thursday"})
+    assert "date" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -215,7 +344,7 @@ async def test_handle_no_home_and_no_arg_returns_config_message(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_metric_units_change_forecast_params_and_symbols(monkeypatch):
-    stub = _StubClient({_FORECAST: [_forecast_payload()]})
+    stub = _StubClient({_FORECAST: [_forecast_payload(rain_hours=())]})
     _install_stub_client(monkeypatch, stub)
 
     client = WeatherClient()
@@ -226,6 +355,6 @@ async def test_metric_units_change_forecast_params_and_symbols(monkeypatch):
 
     forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
     assert forecast_call[1]["temperature_unit"] == "celsius"
-    assert forecast_call[1]["wind_speed_unit"] == "kmh"
-    assert "°C" in result and "km/h" in result
+    assert forecast_call[1]["precipitation_unit"] == "mm"
+    assert "°C" in result
     assert "°F" not in result

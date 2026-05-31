@@ -1,14 +1,21 @@
 """Weather tool for the voice assistant.
 
-Provides `get_weather`, which fetches current conditions plus a short
-forecast from Open-Meteo (free, no API key). The user's home location is
-configured as explicit `[location] latitude` / `longitude` in
-`meeko.toml`. For ad-hoc queries ("weather in Tokyo"), Sonnet supplies
-`latitude`, `longitude`, and `place_label` directly from its own
-geographic knowledge — no geocoder involved.
+Provides `get_weather`, which fetches current conditions plus the forecast
+for a single requested day from Open-Meteo (free, no API key). The user's
+home location is configured as explicit `[location] latitude` / `longitude`
+in `meeko.toml`. For ad-hoc queries ("weather in Tokyo"), Sonnet supplies
+`latitude`, `longitude`, and `place_label` directly from its own geographic
+knowledge — no geocoder involved.
+
+The reply defaults to **today**; Sonnet (which is told today's date every
+turn) may pass a `date` to ask about any day up to 14 days out. The query is
+bounded to that single day with Open-Meteo's `start_date`/`end_date`, so the
+hourly block stays small even though the horizon is two weeks. Hourly
+precipitation is scanned to say *when* precipitation is expected.
 """
 
 import logging
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -22,6 +29,15 @@ _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 # eat several seconds on its own; we'd rather wait than fail and have
 # Sonnet apologize on a flaky network.
 _HTTP_TIMEOUT = 10.0
+
+# How far ahead we'll forecast. Open-Meteo's free forecast reaches further,
+# but two weeks is plenty for conversation and keeps relative-day references
+# unambiguous.
+_MAX_FORECAST_DAYS = 13  # today + 13 = 14 days inclusive
+
+# An hour counts as "wet" when its precipitation probability is at least this
+# (percent). When probability is missing we fall back to any measurable amount.
+_PRECIP_PROB_THRESHOLD = 50
 
 # WMO weather code → short phrase. Open-Meteo's `weather_code` follows
 # WMO 4677 (truncated). https://open-meteo.com/en/docs#api-documentation
@@ -56,25 +72,6 @@ _WMO_PHRASES: dict[int, str] = {
     99: "thunderstorm with heavy hail",
 }
 
-_COMPASS = [
-    "N",
-    "NNE",
-    "NE",
-    "ENE",
-    "E",
-    "ESE",
-    "SE",
-    "SSE",
-    "S",
-    "SSW",
-    "SW",
-    "WSW",
-    "W",
-    "WNW",
-    "NW",
-    "NNW",
-]
-
 
 def _wmo_phrase(code: int | None) -> str:
     if code is None:
@@ -82,11 +79,65 @@ def _wmo_phrase(code: int | None) -> str:
     return _WMO_PHRASES.get(int(code), f"weather code {code}")
 
 
-def _compass_from_degrees(deg: float | None) -> str:
-    if deg is None:
+def _fmt_hour(dt: datetime, *, with_ampm: bool = True) -> str:
+    """A bare 12-hour clock label, e.g. '2 PM' or (with_ampm=False) '2'."""
+    label = dt.strftime("%-I")
+    if with_ampm:
+        label += " " + dt.strftime("%p")
+    return label
+
+
+def _fmt_run(run: list[datetime]) -> str:
+    """Render one contiguous run of wet hours as a spoken time range."""
+    first, last = run[0], run[-1]
+    if first.hour == last.hour:
+        return f"around {_fmt_hour(first)}"
+    # Drop the meridiem from the start when both ends share it ("2–4 PM"),
+    # keep it when they straddle noon/midnight ("11 AM–1 PM").
+    same_ampm = first.strftime("%p") == last.strftime("%p")
+    start = _fmt_hour(first, with_ampm=not same_ampm)
+    end = _fmt_hour(last)
+    return f"around {start}–{end}"
+
+
+def _precip_window(hourly: dict[str, Any], *, is_today: bool) -> str:
+    """Scan one day of hourly data and describe when precipitation is likely.
+
+    Returns a phrase like "around 2–4 PM" or "around 8–9 AM and 4–6 PM", or
+    "" when no hour crosses the threshold. For today, hours already past are
+    skipped so we don't report rain that supposedly happened this morning.
+    """
+    times = hourly.get("time") or []
+    probs = hourly.get("precipitation_probability") or []
+    amts = hourly.get("precipitation") or []
+    now_hour = datetime.now().astimezone().hour if is_today else None
+
+    runs: list[list[datetime]] = []
+    run: list[datetime] = []
+    for i, t in enumerate(times):
+        try:
+            dt = datetime.fromisoformat(t)
+        except TypeError, ValueError:
+            continue
+        if now_hour is not None and dt.hour < now_hour:
+            continue
+        prob = probs[i] if i < len(probs) else None
+        amt = amts[i] if i < len(amts) else None
+        if prob is not None:
+            wet = prob >= _PRECIP_PROB_THRESHOLD
+        else:
+            wet = amt is not None and amt > 0
+        if wet:
+            run.append(dt)
+        elif run:
+            runs.append(run)
+            run = []
+    if run:
+        runs.append(run)
+
+    if not runs:
         return ""
-    idx = int((deg % 360) / 22.5 + 0.5) % 16
-    return _COMPASS[idx]
+    return " and ".join(_fmt_run(r) for r in runs)
 
 
 class WeatherClient:
@@ -129,17 +180,15 @@ class WeatherClient:
         }
 
     @property
-    def _unit_symbols(self) -> tuple[str, str, str]:
-        # (temperature, wind speed, precipitation amount)
-        if self._units == "metric":
-            return ("°C", "km/h", "mm")
-        return ("°F", "mph", "in")
+    def _temp_symbol(self) -> str:
+        return "°C" if self._units == "metric" else "°F"
 
     async def get_weather(
         self,
         latitude: float | None,
         longitude: float | None,
         place_label: str | None,
+        date_str: str | None = None,
     ) -> str:
         supplied = [v is not None for v in (latitude, longitude, place_label)]
         if any(supplied) and not all(supplied):
@@ -160,8 +209,22 @@ class WeatherClient:
         else:
             return "No home location is configured. Try asking for a specific city."
 
+        today = datetime.now().astimezone().date()
+        if date_str is None:
+            req_date = today
+        else:
+            try:
+                req_date = date.fromisoformat(date_str)
+            except TypeError, ValueError:
+                return "I didn't understand that date. Try asking for a specific day."
+            delta = (req_date - today).days
+            if delta < 0:
+                return "I can only look ahead, not back — try today or a day to come."
+            if delta > _MAX_FORECAST_DAYS:
+                return "I can only forecast about two weeks ahead."
+
         try:
-            forecast = await self._fetch_forecast(latitude, longitude)
+            forecast = await self._fetch_forecast(latitude, longitude, req_date)
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
                 "Weather forecast fetch failed (%s): %s",
@@ -171,18 +234,23 @@ class WeatherClient:
             )
             return "Sorry, I couldn't reach the weather service right now."
 
-        return _format_forecast(label, forecast, self._unit_symbols)
+        return _format_forecast(label, forecast, req_date, today, self._temp_symbol)
 
-    async def _fetch_forecast(self, lat: float, lon: float) -> dict[str, Any]:
+    async def _fetch_forecast(
+        self, lat: float, lon: float, req_date: date
+    ) -> dict[str, Any]:
+        iso = req_date.isoformat()
         params = {
             "latitude": lat,
             "longitude": lon,
-            "current": "temperature_2m,weather_code,wind_speed_10m,wind_direction_10m",
+            "current": "temperature_2m,relative_humidity_2m,weather_code",
             "daily": (
                 "temperature_2m_max,temperature_2m_min,"
                 "precipitation_probability_max,weather_code"
             ),
-            "forecast_days": 2,
+            "hourly": "precipitation_probability,precipitation",
+            "start_date": iso,
+            "end_date": iso,
             "timezone": "auto",
             **self._unit_params,
         }
@@ -199,44 +267,61 @@ def _round(value: Any) -> str:
         return "?"
 
 
+def _day_label(req_date: date, today: date) -> str:
+    delta = (req_date - today).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "tomorrow"
+    return req_date.strftime("%A")
+
+
+def _first(seq: Any) -> Any:
+    """First element of a daily array, or None when empty/missing."""
+    if isinstance(seq, list) and seq:
+        return seq[0]
+    return None
+
+
 def _format_forecast(
     place: str,
     forecast: dict[str, Any],
-    symbols: tuple[str, str, str],
+    req_date: date,
+    today: date,
+    temp_sym: str,
 ) -> str:
-    temp_sym, wind_sym, _ = symbols
+    is_today = req_date == today
 
     current = forecast.get("current") or {}
     daily = forecast.get("daily") or {}
+    hourly = forecast.get("hourly") or {}
 
-    cur_temp = _round(current.get("temperature_2m"))
-    cur_phrase = _wmo_phrase(current.get("weather_code"))
-    cur_wind = _round(current.get("wind_speed_10m"))
-    cur_dir = _compass_from_degrees(current.get("wind_direction_10m"))
-    wind_clause = f"wind {cur_wind} {wind_sym}"
-    if cur_dir:
-        wind_clause += f" from {cur_dir}"
+    # Conditions phrase: today uses the live code, a future day its daily code.
+    if is_today:
+        phrase = _wmo_phrase(current.get("weather_code"))
+    else:
+        phrase = _wmo_phrase(_first(daily.get("weather_code")))
 
-    parts = [f"{place}: {cur_temp}{temp_sym}, {cur_phrase}, {wind_clause}."]
+    label = _day_label(req_date, today)
+    parts = [f"{place}, {label} ({req_date.isoformat()}): {phrase}."]
 
-    highs = daily.get("temperature_2m_max") or []
-    lows = daily.get("temperature_2m_min") or []
-    pops = daily.get("precipitation_probability_max") or []
-    codes = daily.get("weather_code") or []
+    if is_today:
+        cur_temp = _round(current.get("temperature_2m"))
+        humidity = _round(current.get("relative_humidity_2m"))
+        parts.append(f"Currently {cur_temp}{temp_sym}, humidity {humidity}%.")
 
-    day_labels = ["Today", "Tomorrow"]
-    for i, label in enumerate(day_labels):
-        if i >= len(highs) or i >= len(lows):
-            break
-        segment = (
-            f"{label}: high {_round(highs[i])}{temp_sym}, "
-            f"low {_round(lows[i])}{temp_sym}"
-        )
-        if i < len(pops) and pops[i] is not None:
-            segment += f", {int(pops[i])}% chance of precipitation"
-        if i < len(codes):
-            segment += f", {_wmo_phrase(codes[i])}"
-        parts.append(segment + ".")
+    hi = _round(_first(daily.get("temperature_2m_max")))
+    lo = _round(_first(daily.get("temperature_2m_min")))
+    parts.append(f"High {hi}{temp_sym}, low {lo}{temp_sym}.")
+
+    prob = _first(daily.get("precipitation_probability_max"))
+    if prob is not None:
+        precip = f"{int(prob)}% chance of precipitation"
+        if prob >= _PRECIP_PROB_THRESHOLD:
+            window = _precip_window(hourly, is_today=is_today)
+            if window:
+                precip += f", precipitation likely {window}"
+        parts.append(precip + ".")
 
     return " ".join(parts)
 
@@ -250,7 +335,11 @@ def get_tool_definitions() -> list[ToolDefinition]:
         {
             "name": "get_weather",
             "description": (
-                "Get current weather conditions and a short forecast. "
+                "Get weather conditions and the forecast for a single day. "
+                "Defaults to today; to ask about a future day, pass `date` "
+                "as YYYY-MM-DD — you know today's date, so resolve relative "
+                "references like 'tomorrow' or 'Tuesday' yourself. Any day "
+                "from today up to 14 days out is supported. "
                 "To look up a place other than the user's home, supply "
                 "`latitude` and `longitude` in decimal degrees from your "
                 "own knowledge of world geography — DO NOT call "
@@ -278,6 +367,13 @@ def get_tool_definitions() -> list[ToolDefinition]:
                             "e.g. 'Tokyo' or 'Portland, Maine'."
                         ),
                     },
+                    "date": {
+                        "type": "string",
+                        "description": (
+                            "Day to forecast, as YYYY-MM-DD. Omit for "
+                            "today. Must be today or within the next 14 days."
+                        ),
+                    },
                 },
             },
         },
@@ -291,5 +387,6 @@ async def handle(fn_name: str, args: dict) -> str:
             latitude=args.get("latitude"),
             longitude=args.get("longitude"),
             place_label=args.get("place_label"),
+            date_str=args.get("date"),
         )
     return f"Unknown weather function: {fn_name}"
