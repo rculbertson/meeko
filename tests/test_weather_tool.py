@@ -4,7 +4,7 @@ Stubs out `httpx.AsyncClient` so the suite stays offline; the WeatherClient
 itself is exercised end-to-end (forecast fetch + format).
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -13,6 +13,8 @@ import pytest
 from meeko.tools import weather as weather_mod
 from meeko.tools.weather import (
     WeatherClient,
+    _now_hour_local,
+    _precip_window,
     get_tool_definitions,
     handle,
 )
@@ -100,6 +102,7 @@ def _forecast_payload(
     day_iso = day_iso or _today_iso()
     probs = [90 if h in rain_hours else 0 for h in range(24)]
     return {
+        "utc_offset_seconds": 0,
         "current": {
             "temperature_2m": 54.3,
             "relative_humidity_2m": 47.0,
@@ -221,6 +224,37 @@ async def test_future_day_selection_and_no_current_conditions(monkeypatch):
     assert "High 61°F, low 48°F" in result
     assert "humidity" not in result
     assert "Currently" not in result
+
+
+def test_precip_window_filters_by_supplied_now_hour():
+    # 24 hourly rows, rain 14:00–16:00. With no cutoff the window renders;
+    # a cutoff past those hours filters them out entirely — independent of
+    # the machine's wall clock.
+    wet = (14, 15, 16)
+    hourly = {
+        "time": _hourly_times("2026-06-02"),
+        "precipitation_probability": [90 if h in wet else 0 for h in range(24)],
+        "precipitation": [0.1 if h in wet else 0.0 for h in range(24)],
+    }
+    assert _precip_window(hourly, now_hour=None) == "around 2–4 PM"
+    assert _precip_window(hourly, now_hour=12) == "around 2–4 PM"
+    # Current hour is kept (14 is not < 14); 17 onward drops the window.
+    assert _precip_window(hourly, now_hour=14) == "around 2–4 PM"
+    assert _precip_window(hourly, now_hour=17) == ""
+
+
+def test_now_hour_local_uses_api_offset_not_server_tz():
+    # Future day → no cutoff.
+    assert _now_hour_local({"utc_offset_seconds": 3600}, is_today=False) is None
+    # Offset chosen so the target-local time is exactly midnight → hour 0,
+    # regardless of where (or when) this test runs.
+    now = datetime.now(UTC)
+    secs_since_utc_midnight = now.hour * 3600 + now.minute * 60 + now.second
+    payload = {"utc_offset_seconds": -secs_since_utc_midnight}
+    assert _now_hour_local(payload, is_today=True) == 0
+    # Missing offset falls back to a sane 0–23 hour rather than raising.
+    fallback = _now_hour_local({}, is_today=True)
+    assert isinstance(fallback, int) and 0 <= fallback <= 23
 
 
 @pytest.mark.asyncio

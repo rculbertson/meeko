@@ -15,7 +15,7 @@ precipitation is scanned to say *when* precipitation is expected.
 """
 
 import logging
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -100,17 +100,33 @@ def _fmt_run(run: list[datetime]) -> str:
     return f"around {start}–{end}"
 
 
-def _precip_window(hourly: dict[str, Any], *, is_today: bool) -> str:
+def _now_hour_local(forecast: dict[str, Any], is_today: bool) -> int | None:
+    """The current hour (0–23) in the *forecast location's* timezone, or None
+    for a future day. Open-Meteo is queried with `timezone=auto`, so its hourly
+    timestamps are in the target location's local time — which may differ from
+    this machine's. We rebuild "now" there from the `utc_offset_seconds` the API
+    returns, falling back to this machine's local hour if it's missing."""
+    if not is_today:
+        return None
+    offset = forecast.get("utc_offset_seconds")
+    if isinstance(offset, (int, float)):
+        local = datetime.now(UTC) + timedelta(seconds=offset)
+        return local.hour
+    return datetime.now().astimezone().hour
+
+
+def _precip_window(hourly: dict[str, Any], *, now_hour: int | None) -> str:
     """Scan one day of hourly data and describe when precipitation is likely.
 
     Returns a phrase like "around 2–4 PM" or "around 8–9 AM and 4–6 PM", or
-    "" when no hour crosses the threshold. For today, hours already past are
+    "" when no hour crosses the threshold. When `now_hour` is set (the day is
+    today, *in the forecast location's timezone*), hours already past are
     skipped so we don't report rain that supposedly happened this morning.
+    Pass `None` for a future day, where every hour is still ahead.
     """
     times = hourly.get("time") or []
     probs = hourly.get("precipitation_probability") or []
     amts = hourly.get("precipitation") or []
-    now_hour = datetime.now().astimezone().hour if is_today else None
 
     runs: list[list[datetime]] = []
     run: list[datetime] = []
@@ -318,7 +334,8 @@ def _format_forecast(
     if prob is not None:
         precip = f"{int(prob)}% chance of precipitation"
         if prob >= _PRECIP_PROB_THRESHOLD:
-            window = _precip_window(hourly, is_today=is_today)
+            now_hour = _now_hour_local(forecast, is_today)
+            window = _precip_window(hourly, now_hour=now_hour)
             if window:
                 precip += f", precipitation likely {window}"
         parts.append(precip + ".")
