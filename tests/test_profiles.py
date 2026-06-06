@@ -157,6 +157,26 @@ async def test_switch_profile_persists_to_store():
     store.set_profile_name.assert_awaited_once_with("sess-1", "conversation")
 
 
+async def test_switch_profile_survives_persist_failure(caplog):
+    """A failed DB write must not fail the switch: the in-memory mode
+    change has already happened (and the user heard it confirmed), so a
+    persist error is logged and swallowed, not raised."""
+    profiles = _make_profiles()
+    claude = MagicMock()
+    claude.session_id = "sess-1"
+    store = MagicMock()
+    store.set_profile_name = AsyncMock(side_effect=RuntimeError("db locked"))
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
+    mgr.set_store(store)
+
+    with caplog.at_level("WARNING", logger="meeko"):
+        result = await mgr.switch_profile("conversation")
+
+    assert result == "Switched to conversation mode."
+    assert mgr.active_profile.name == "conversation"
+    assert any("Failed to persist" in r.getMessage() for r in caplog.records)
+
+
 async def test_switch_profile_skips_persist_when_no_live_row():
     """Lazy session creation: no row exists yet (session_id is None), so
     there's nothing to update — the row inherits the active profile when

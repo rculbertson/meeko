@@ -109,7 +109,18 @@ class ProfileManager:
         if self._store is not None and self._claude is not None:
             session_id = self._claude.session_id
             if session_id is not None:
-                await self._store.set_profile_name(session_id, profile_name)
+                try:
+                    await self._store.set_profile_name(session_id, profile_name)
+                except Exception:
+                    # Best-effort: the in-memory switch already succeeded, so
+                    # a write failure only means a future resume restores the
+                    # prior mode. Log and keep the tool call intact rather
+                    # than failing the switch the user just heard confirmed.
+                    logger.warning(
+                        "Failed to persist profile switch for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
         logger.info("Switched to profile: %s", profile_name)
         return f"Switched to {profile_name} mode."
 
