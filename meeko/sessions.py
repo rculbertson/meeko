@@ -207,6 +207,24 @@ class SessionStore:
     async def touch_session(self, session_id: str) -> None:
         await self._run(self._touch_session_sync, session_id)
 
+    def _set_profile_name_sync(self, session_id: str, profile_name: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET profile_name = ? WHERE id = ?",
+                (profile_name, session_id),
+            )
+
+    async def set_profile_name(self, session_id: str, profile_name: str) -> None:
+        """Persist a mid-session profile/mode switch to the session row.
+
+        ``profile_name`` is set at creation and otherwise frozen, but a
+        ``switch_profile`` tool call changes the active mode for the rest
+        of the session. Without writing it back, a later resume/load would
+        restore the row's *creation* mode (e.g. query, with its short idle
+        timeout) rather than the mode the session was actually left in.
+        """
+        await self._run(self._set_profile_name_sync, session_id, profile_name)
+
     def _update_session_metadata_sync(
         self,
         session_id: str,

@@ -13,6 +13,7 @@ from meeko.tools.dispatch import ToolDefinition
 
 if TYPE_CHECKING:
     from meeko.claude_client import ClaudeClient
+    from meeko.sessions import SessionStore
     from meeko.speaker import Speaker
 
 logger = logging.getLogger("meeko")
@@ -41,12 +42,16 @@ class ProfileManager:
         self._active: str = active_name
         self._claude = claude_client
         self._speaker: Speaker | None = None
+        self._store: SessionStore | None = None
 
     def set_claude_client(self, claude_client: ClaudeClient) -> None:
         self._claude = claude_client
 
     def set_speaker(self, speaker: Speaker) -> None:
         self._speaker = speaker
+
+    def set_store(self, store: SessionStore) -> None:
+        self._store = store
 
     @property
     def active_profile(self) -> Profile:
@@ -97,6 +102,14 @@ class ProfileManager:
         if self._speaker is not None:
             self._speaker.set_profile(profile)
         self._active = profile_name
+        # Persist the switch to the live session row so a later resume/load
+        # restores this mode rather than the row's creation-time mode. When
+        # no row exists yet (lazy creation hasn't fired), there's nothing to
+        # update — the row will be created with the now-active profile name.
+        if self._store is not None and self._claude is not None:
+            session_id = self._claude.session_id
+            if session_id is not None:
+                await self._store.set_profile_name(session_id, profile_name)
         logger.info("Switched to profile: %s", profile_name)
         return f"Switched to {profile_name} mode."
 

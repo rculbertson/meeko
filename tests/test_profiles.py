@@ -1,6 +1,6 @@
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -138,6 +138,40 @@ async def test_switch_profile():
     assert result == "Switched to conversation mode."
     claude.set_system_prompt.assert_called_once_with("You are a thinking partner.")
     assert mgr.active_profile.name == "conversation"
+
+
+async def test_switch_profile_persists_to_store():
+    """A mid-session switch must be written back to the live session row,
+    so a later resume/load restores the switched mode rather than the
+    row's creation-time mode (the query/conversation idle-timeout bug)."""
+    profiles = _make_profiles()
+    claude = MagicMock()
+    claude.session_id = "sess-1"
+    store = MagicMock()
+    store.set_profile_name = AsyncMock()
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
+    mgr.set_store(store)
+
+    await mgr.switch_profile("conversation")
+
+    store.set_profile_name.assert_awaited_once_with("sess-1", "conversation")
+
+
+async def test_switch_profile_skips_persist_when_no_live_row():
+    """Lazy session creation: no row exists yet (session_id is None), so
+    there's nothing to update — the row inherits the active profile when
+    it's eventually created."""
+    profiles = _make_profiles()
+    claude = MagicMock()
+    claude.session_id = None
+    store = MagicMock()
+    store.set_profile_name = AsyncMock()
+    mgr = ProfileManager(profiles, claude_client=claude, active_name="query")
+    mgr.set_store(store)
+
+    await mgr.switch_profile("conversation")
+
+    store.set_profile_name.assert_not_called()
 
 
 async def test_switch_profile_unknown():

@@ -203,6 +203,18 @@ async def test_touch_session_updates_last_active(store):
     assert after >= before
 
 
+async def test_set_profile_name_updates_row(store):
+    """A session created as query but switched to conversation mid-session
+    must come back as conversation on reload — otherwise the restored
+    session inherits query's short idle timeout and closes itself."""
+    sid = await store.create_session("query")
+    assert (await store.get_session(sid))["profile_name"] == "query"
+
+    await store.set_profile_name(sid, "conversation")
+
+    assert (await store.get_session(sid))["profile_name"] == "conversation"
+
+
 async def test_update_session_metadata_writes_row_and_fts(tmp_path, store):
     sid = await store.create_session("query")
     await store.update_session_metadata(

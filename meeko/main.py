@@ -471,6 +471,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     if history:
         claude.load_history(history)
     profile_manager.set_claude_client(claude)
+    profile_manager.set_store(store)
 
     # Separate Anthropic client for background summarization — sidesteps
     # any concern about concurrent use with the live conversation client
