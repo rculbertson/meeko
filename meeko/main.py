@@ -431,7 +431,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         store, resume, profiles, default_profile_name
     )
 
-    profile_manager = ProfileManager(profiles, active_name=default_profile_name)
+    # active_name is profile.name, not default_profile_name: on resume,
+    # _init_session_state resolves profile from the stored session's
+    # profile_name, and the runtime (idle timeout, wake word, voice) is
+    # driven by profile_manager.active_profile. Seeding it with the
+    # default would restore a resumed conversation session under query's
+    # short idle timeout (it matches profile.name for fresh starts).
+    profile_manager = ProfileManager(profiles, active_name=profile.name)
     session_manager = SessionManager()
 
     # Lazy session creation: the row is INSERTed on the first persisted

@@ -773,6 +773,102 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
     assert fake_tts.calls == []
 
 
+async def test_run_resume_seeds_active_profile_from_stored_session(
+    monkeypatch, tmp_path
+):
+    """Resuming a session stored under a non-default profile must seed the
+    ProfileManager's active profile from the session, not the default.
+
+    The runtime mode (idle timeout, wake word, voice) is driven by
+    profile_manager.active_profile; seeding it with default_profile_name
+    would restore a resumed conversation session under query's short idle
+    timeout and close it prematurely."""
+    from meeko.sessions import SessionStore
+    from meeko.tools.profile import ProfileManager
+
+    db_path = tmp_path / "meeko.db"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+
+    seed = SessionStore.open(db_path)
+    try:
+        session_id = await seed.create_session("conversation")
+        await seed.persist_turn(session_id, "user", "prior question")
+    finally:
+        await seed.close()
+
+    pa_instance = MagicMock()
+    pa_instance.open.side_effect = [MagicMock(), MagicMock()]
+
+    session_entered = asyncio.Event()
+
+    class _SignalingSTTClient(_FakeSTTClient):
+        @contextlib.asynccontextmanager
+        async def session(self):
+            async with super().session() as s:
+                session_entered.set()
+                yield s
+
+    fake_stt = _SignalingSTTClient("dg-test")
+    fake_stt.events = []
+    fake_tts = _FakeTTSClient("dg-test")
+
+    resume_profiles = {
+        "query": Profile(
+            name="query",
+            wake_word="meeko",
+            prompt="query-system",
+            voice=None,
+            idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
+        ),
+        "conversation": Profile(
+            name="conversation",
+            wake_word="meeko",
+            prompt="conversation-system",
+            voice=None,
+            idle_timeout_seconds=0,
+            post_wake_timeout_seconds=0,
+        ),
+    }
+
+    captured: dict = {}
+
+    def make_manager(profiles, *args, **kwargs):
+        mgr = ProfileManager(profiles, *args, **kwargs)
+        captured["manager"] = mgr
+        return mgr
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay, *a, **kw):
+        if delay >= 1.0:
+            return await real_sleep(0)
+        return await real_sleep(delay, *a, **kw)
+
+    with (
+        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
+        patch(
+            "meeko.main.load_profiles",
+            return_value=(resume_profiles, "query"),
+        ),
+        patch("meeko.main.load_dotenv"),
+        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
+        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
+        patch("meeko.main.ProfileManager", side_effect=make_manager),
+        patch("meeko.main.asyncio.sleep", new=fast_sleep),
+        patch("meeko.main.setup_logging"),
+    ):
+        task = asyncio.create_task(meeko_main.run(resume=session_id))
+        await asyncio.wait_for(session_entered.wait(), timeout=5)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    assert captured["manager"].active_profile.name == "conversation"
+
+
 async def test_run_resume_unknown_id_exits(monkeypatch, fake_profiles, tmp_path):
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
