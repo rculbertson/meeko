@@ -4,7 +4,7 @@ Stubs out `httpx.AsyncClient` so the suite stays offline; the WeatherClient
 itself is exercised end-to-end (forecast fetch + format).
 """
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import httpx
@@ -58,7 +58,9 @@ class _StubClient:
     """Mimics `httpx.AsyncClient` as an async context manager.
 
     `responder` maps URL → list of payloads (consumed in order on each
-    matching call); an `Exception` payload is raised instead of returned.
+    matching call); an `Exception` payload is raised instead of returned, and
+    a callable one is invoked with the request params to build the payload
+    (so a test can return exactly the window the code asked for).
     """
 
     def __init__(self, responder: dict[str, list[Any]]):
@@ -79,6 +81,8 @@ class _StubClient:
         payload = queue.pop(0)
         if isinstance(payload, Exception):
             raise payload
+        if callable(payload):
+            payload = payload(dict(params or {}))
         return _StubResponse(payload)
 
 
@@ -468,7 +472,7 @@ async def test_hourly_returns_48_rows_from_the_current_hour(monkeypatch):
     assert "daily" not in call[1]
     today = datetime.now().astimezone().date()
     assert call[1]["start_date"] == (today - timedelta(days=1)).isoformat()
-    assert call[1]["end_date"] == (today + timedelta(days=2)).isoformat()
+    assert call[1]["end_date"] == (today + timedelta(days=3)).isoformat()
 
     assert result.startswith("Home, next 48 hours. Currently 54°F, partly cloudy:")
     rows = _hourly_rows(result)
@@ -614,6 +618,45 @@ async def test_hourly_metric_units(monkeypatch):
     assert call[1]["temperature_unit"] == "celsius"
     assert "°C" in result
     assert "°F" not in result
+
+
+@pytest.mark.asyncio
+async def test_hourly_full_window_when_location_is_a_day_ahead(monkeypatch):
+    """A location whose local date is ahead of this machine's still gets 48
+    rows — the request window is padded a day at each end, not just the near
+    one."""
+    today = datetime.now().astimezone().date()
+    # Put the forecast location at 9 AM on this machine's *tomorrow* (roughly
+    # a Pi in US/Eastern asking about Tokyo).
+    # Half past the hour, so sub-second drift between computing the offset and
+    # the code re-reading the clock can't shift which hour the window starts on.
+    target = datetime.combine(today + timedelta(days=1), time(9, 30))
+    offset = int((target - datetime.now(UTC).replace(tzinfo=None)).total_seconds())
+
+    def _payload_for_window(params: dict) -> dict:
+        start = date.fromisoformat(params["start_date"])
+        end = date.fromisoformat(params["end_date"])
+        return _hourly_payload(
+            start_date=start,
+            days=(end - start).days + 1,
+            offset_seconds=offset,
+        )
+
+    stub = _StubClient({_FORECAST: [_payload_for_window]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"hourly": True})
+
+    call = next(c for c in stub.calls if c[0] == _FORECAST)
+    assert call[1]["end_date"] == (today + timedelta(days=3)).isoformat()
+
+    rows = _hourly_rows(result)
+    assert len(rows) == _HOURLY_HOURS
+    assert rows[0].startswith(f"{target.strftime('%a')} 9 AM")
 
 
 def test_now_local_uses_api_offset_not_server_tz():

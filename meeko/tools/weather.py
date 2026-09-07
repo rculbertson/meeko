@@ -310,9 +310,11 @@ class WeatherClient:
     async def _fetch_hourly(self, lat: float, lon: float) -> dict[str, Any]:
         # Open-Meteo's hourly arrays always start at 00:00 local of `start_date`,
         # so we ask for a window and slice from "now" at the target location.
-        # 48 hours from the current hour reaches into the third calendar day;
-        # the extra day on the near side covers locations whose local date is
-        # behind this machine's (their "now" would otherwise precede the array).
+        # 48 hours from the current hour reaches into the third calendar day, and
+        # the target's local date can be a day either side of this machine's (UTC
+        # offsets span -12 to +14) — so we pad a spare day at *both* ends. Behind
+        # us, their "now" would otherwise precede the array; ahead of us, the
+        # array would run out before 48 rows.
         today = datetime.now().astimezone().date()
         params = {
             "latitude": lat,
@@ -320,7 +322,7 @@ class WeatherClient:
             "current": "temperature_2m,relative_humidity_2m,weather_code",
             "hourly": "temperature_2m,precipitation_probability,weather_code",
             "start_date": (today - timedelta(days=1)).isoformat(),
-            "end_date": (today + timedelta(days=2)).isoformat(),
+            "end_date": (today + timedelta(days=3)).isoformat(),
             "timezone": "auto",
             **self._unit_params,
         }
