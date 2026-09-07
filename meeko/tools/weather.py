@@ -1,17 +1,23 @@
 """Weather tool for the voice assistant.
 
-Provides `get_weather`, which fetches current conditions plus the forecast
-for a single requested day from Open-Meteo (free, no API key). The user's
-home location is configured as explicit `[location] latitude` / `longitude`
-in `meeko.toml`. For ad-hoc queries ("weather in Tokyo"), Sonnet supplies
-`latitude`, `longitude`, and `place_label` directly from its own geographic
-knowledge — no geocoder involved.
+Provides `get_weather`, which fetches conditions from Open-Meteo (free, no
+API key). The user's home location is configured as explicit
+`[location] latitude` / `longitude` in `meeko.toml`. For ad-hoc queries
+("weather in Tokyo"), Sonnet supplies `latitude`, `longitude`, and
+`place_label` directly from its own geographic knowledge — no geocoder
+involved.
 
-The reply defaults to **today**; Sonnet (which is told today's date every
-turn) may pass a `date` to ask about any day up to 14 days out. The query is
-bounded to that single day with Open-Meteo's `start_date`/`end_date`, so the
-hourly block stays small even though the horizon is two weeks. Hourly
-precipitation is scanned to say *when* precipitation is expected.
+Two modes, selected by the `hourly` flag:
+
+* **Daily** (default) — current conditions plus the forecast for a single
+  requested day. Defaults to today; Sonnet (which is told today's date every
+  turn) may pass a `date` to ask about any day up to 14 days out. The query is
+  bounded to that single day with Open-Meteo's `start_date`/`end_date`, so the
+  hourly block stays small even though the horizon is two weeks. Hourly
+  precipitation is scanned to say *when* precipitation is expected.
+* **Hourly** (`hourly=true`) — one compact row per hour for the next 48 hours
+  starting at the current hour, for "what's it doing this afternoon?" style
+  questions. `date` is ignored in this mode.
 """
 
 import logging
@@ -34,6 +40,11 @@ _HTTP_TIMEOUT = 10.0
 # but two weeks is plenty for conversation and keeps relative-day references
 # unambiguous.
 _MAX_FORECAST_DAYS = 13  # today + 13 = 14 days inclusive
+
+# How many hourly rows the `hourly=true` mode returns, starting at the current
+# hour. 48 rows of ~30 characters is a small tool result — Sonnet condenses it
+# for speech rather than reading it out.
+_HOURLY_HOURS = 48
 
 # An hour counts as "wet" when its precipitation probability is at least this
 # (percent). When probability is missing we fall back to any measurable amount.
@@ -100,19 +111,26 @@ def _fmt_run(run: list[datetime]) -> str:
     return f"around {start}–{end}"
 
 
-def _now_hour_local(forecast: dict[str, Any], is_today: bool) -> int | None:
-    """The current hour (0–23) in the *forecast location's* timezone, or None
-    for a future day. Open-Meteo is queried with `timezone=auto`, so its hourly
-    timestamps are in the target location's local time — which may differ from
-    this machine's. We rebuild "now" there from the `utc_offset_seconds` the API
-    returns, falling back to this machine's local hour if it's missing."""
-    if not is_today:
-        return None
+def _now_local(forecast: dict[str, Any]) -> datetime:
+    """ "Now" as a naive datetime in the *forecast location's* timezone.
+
+    Open-Meteo is queried with `timezone=auto`, so its hourly timestamps are in
+    the target location's local time — which may differ from this machine's. We
+    rebuild "now" there from the `utc_offset_seconds` the API returns, falling
+    back to this machine's local time if it's missing.
+    """
     offset = forecast.get("utc_offset_seconds")
     if isinstance(offset, (int, float)):
-        local = datetime.now(UTC) + timedelta(seconds=offset)
-        return local.hour
-    return datetime.now().astimezone().hour
+        return (datetime.now(UTC) + timedelta(seconds=offset)).replace(tzinfo=None)
+    return datetime.now().astimezone().replace(tzinfo=None)
+
+
+def _now_hour_local(forecast: dict[str, Any], is_today: bool) -> int | None:
+    """The current hour (0–23) at the forecast location, or None for a future
+    day (where every hour of that day is still ahead)."""
+    if not is_today:
+        return None
+    return _now_local(forecast).hour
 
 
 def _precip_window(hourly: dict[str, Any], *, now_hour: int | None) -> str:
@@ -205,6 +223,7 @@ class WeatherClient:
         longitude: float | None,
         place_label: str | None,
         date_str: str | None = None,
+        hourly: bool = False,
     ) -> str:
         supplied = [v is not None for v in (latitude, longitude, place_label)]
         if any(supplied) and not all(supplied):
@@ -226,6 +245,22 @@ class WeatherClient:
             return "No home location is configured. Try asking for a specific city."
 
         today = datetime.now().astimezone().date()
+
+        if hourly:
+            # The window is always "the next 48 hours from now" — any `date`
+            # Sonnet happened to pass alongside is ignored.
+            try:
+                forecast = await self._fetch_hourly(latitude, longitude)
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning(
+                    "Weather hourly fetch failed (%s): %s",
+                    type(exc).__name__,
+                    exc or "(no message)",
+                    exc_info=True,
+                )
+                return "Sorry, I couldn't reach the weather service right now."
+            return _format_hourly(label, forecast, self._temp_symbol)
+
         if date_str is None:
             req_date = today
         else:
@@ -270,6 +305,28 @@ class WeatherClient:
             "timezone": "auto",
             **self._unit_params,
         }
+        return await self._get(params)
+
+    async def _fetch_hourly(self, lat: float, lon: float) -> dict[str, Any]:
+        # Open-Meteo's hourly arrays always start at 00:00 local of `start_date`,
+        # so we ask for a window and slice from "now" at the target location.
+        # 48 hours from the current hour reaches into the third calendar day;
+        # the extra day on the near side covers locations whose local date is
+        # behind this machine's (their "now" would otherwise precede the array).
+        today = datetime.now().astimezone().date()
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,relative_humidity_2m,weather_code",
+            "hourly": "temperature_2m,precipitation_probability,weather_code",
+            "start_date": (today - timedelta(days=1)).isoformat(),
+            "end_date": (today + timedelta(days=2)).isoformat(),
+            "timezone": "auto",
+            **self._unit_params,
+        }
+        return await self._get(params)
+
+    async def _get(self, params: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(_FORECAST_URL, params=params)
             resp.raise_for_status()
@@ -343,6 +400,51 @@ def _format_forecast(
     return " ".join(parts)
 
 
+def _format_hourly(place: str, forecast: dict[str, Any], temp_sym: str) -> str:
+    """Render up to `_HOURLY_HOURS` rows, one per hour, starting at the current
+    hour at the forecast location."""
+    current = forecast.get("current") or {}
+    hourly = forecast.get("hourly") or {}
+
+    times = hourly.get("time") or []
+    temps = hourly.get("temperature_2m") or []
+    codes = hourly.get("weather_code") or []
+    probs = hourly.get("precipitation_probability") or []
+
+    # Truncate to the hour so the row covering the current hour is included.
+    cutoff = _now_local(forecast).replace(minute=0, second=0, microsecond=0)
+
+    rows: list[str] = []
+    for i, t in enumerate(times):
+        try:
+            dt = datetime.fromisoformat(t)
+        except TypeError, ValueError:
+            continue
+        if dt < cutoff:
+            continue
+        temp = _round(temps[i] if i < len(temps) else None)
+        phrase = _wmo_phrase(codes[i] if i < len(codes) else None)
+        row = f"{dt.strftime('%a')} {_fmt_hour(dt)}  {temp}{temp_sym}  {phrase}"
+        prob = probs[i] if i < len(probs) else None
+        if prob is not None:
+            row += f"  {int(prob)}%"
+        rows.append(row)
+        if len(rows) == _HOURLY_HOURS:
+            break
+
+    if not rows:
+        return "Sorry, I couldn't get an hourly forecast for there right now."
+
+    header = f"{place}, next {len(rows)} hours"
+    cur_temp = current.get("temperature_2m")
+    if cur_temp is not None:
+        header += (
+            f". Currently {_round(cur_temp)}{temp_sym}, "
+            f"{_wmo_phrase(current.get('weather_code'))}"
+        )
+    return header + ":\n" + "\n".join(rows)
+
+
 # Singleton instance. The orchestrator calls `configure()` on startup.
 weather_client = WeatherClient()
 
@@ -352,7 +454,12 @@ def get_tool_definitions() -> list[ToolDefinition]:
         {
             "name": "get_weather",
             "description": (
-                "Get weather conditions and the forecast for a single day. "
+                "Get weather conditions and the forecast for a single day, "
+                "or an hour-by-hour forecast for the next 48 hours. "
+                "Set `hourly` to true when the question is about part of a "
+                "day — 'this afternoon', 'tonight', 'when I leave at 7 "
+                "tomorrow' — and summarize the rows rather than reading "
+                "them all out. Leave `hourly` off for whole-day questions. "
                 "Defaults to today; to ask about a future day, pass `date` "
                 "as YYYY-MM-DD — you know today's date, so resolve relative "
                 "references like 'tomorrow' or 'Tuesday' yourself. Any day "
@@ -388,7 +495,15 @@ def get_tool_definitions() -> list[ToolDefinition]:
                         "type": "string",
                         "description": (
                             "Day to forecast, as YYYY-MM-DD. Omit for "
-                            "today. Must be today or within the next 14 days."
+                            "today. Must be today or within the next 14 days. "
+                            "Ignored when `hourly` is true."
+                        ),
+                    },
+                    "hourly": {
+                        "type": "boolean",
+                        "description": (
+                            "Return one row per hour for the next 48 hours "
+                            "instead of a single-day summary."
                         ),
                     },
                 },
@@ -405,5 +520,6 @@ async def handle(fn_name: str, args: dict) -> str:
             longitude=args.get("longitude"),
             place_label=args.get("place_label"),
             date_str=args.get("date"),
+            hourly=bool(args.get("hourly")),
         )
     return f"Unknown weather function: {fn_name}"

@@ -75,6 +75,8 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ### Weather tool
 - `meeko/tools/weather.py` exposes a single `get_weather` tool to Sonnet, backed by [Open-Meteo](https://open-meteo.com)'s forecast endpoint (free, no API key). No geocoder.
+- Two modes on the one tool. Default: current conditions + a single requested day (today, or any `date` up to 14 days out), bounded with `start_date`/`end_date`. `hourly = true`: one compact row per hour (`Mon 3 PM  54°F  rain  90%`) for the next 48 hours starting at the current hour — `date` is ignored there. Sonnet is told to set `hourly` for part-of-day questions and to summarize the rows rather than read them out.
+- Both paths reconstruct "now" at the *forecast location* from the API's `utc_offset_seconds` (`_now_local`), not from this machine's clock — the hourly window and the precipitation-timing cutoff both depend on it.
 - Home coords come from `[location]` (see above). `[weather]` only holds:
   - `units` (env: `MEEKO_WEATHER_UNITS`) — `imperial` (default) or `metric`. Drives the Open-Meteo query params and the symbols (`°F`/`mph`/`in` vs `°C`/`km/h`/`mm`) in the formatted response.
 - For ad-hoc places ("weather in Tokyo"), **Sonnet supplies `latitude`, `longitude`, and `place_label` directly from its own geographic knowledge** — the tool description tells Sonnet not to web-search for coordinates. This avoids the comma-disambiguation traps a geocoder runs into (`"Portland, Maine"` vs `"Portland, Oregon"`) and saves a network round trip.

@@ -4,7 +4,7 @@ Stubs out `httpx.AsyncClient` so the suite stays offline; the WeatherClient
 itself is exercised end-to-end (forecast fetch + format).
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -12,8 +12,10 @@ import pytest
 
 from meeko.tools import weather as weather_mod
 from meeko.tools.weather import (
+    _HOURLY_HOURS,
     WeatherClient,
     _now_hour_local,
+    _now_local,
     _precip_window,
     get_tool_definitions,
     handle,
@@ -29,7 +31,7 @@ def test_tool_definition_shape():
     schema = d["input_schema"]
     assert schema["type"] == "object"
     props = schema["properties"]
-    assert set(props) == {"latitude", "longitude", "place_label", "date"}
+    assert set(props) == {"latitude", "longitude", "place_label", "date", "hourly"}
     # All args are optional individually; the handler enforces the
     # all-or-nothing place rule and date validation at runtime.
     assert not schema.get("required")
@@ -392,3 +394,233 @@ async def test_metric_units_change_forecast_params_and_symbols(monkeypatch):
     assert forecast_call[1]["precipitation_unit"] == "mm"
     assert "°C" in result
     assert "°F" not in result
+
+
+# --- Hourly mode -------------------------------------------------------
+
+
+def _midnight_offset() -> tuple[int, date]:
+    """A `utc_offset_seconds` that puts the forecast location at exactly
+    midnight, plus the local date that implies. Lets the hourly tests assert an
+    exact first row regardless of where (or when) they run."""
+    now = datetime.now(UTC)
+    secs_since_utc_midnight = now.hour * 3600 + now.minute * 60 + now.second
+    return -secs_since_utc_midnight, now.replace(tzinfo=None).date()
+
+
+def _hourly_payload(
+    *,
+    start_date: date,
+    days: int = 4,
+    offset_seconds: int = 0,
+    temp: float = 55.4,
+    code: int = 61,
+    prob: int | None = 40,
+) -> dict:
+    """A multi-day hourly payload shaped like Open-Meteo's, starting at 00:00
+    local on `start_date`."""
+    times: list[str] = []
+    for d in range(days):
+        day_iso = (start_date + timedelta(days=d)).isoformat()
+        times.extend(_hourly_times(day_iso))
+    hourly: dict[str, Any] = {
+        "time": times,
+        "temperature_2m": [temp] * len(times),
+        "weather_code": [code] * len(times),
+    }
+    if prob is not None:
+        hourly["precipitation_probability"] = [prob] * len(times)
+    return {
+        "utc_offset_seconds": offset_seconds,
+        "current": {
+            "temperature_2m": 54.3,
+            "relative_humidity_2m": 47.0,
+            "weather_code": 2,
+        },
+        "hourly": hourly,
+    }
+
+
+def _hourly_rows(result: str) -> list[str]:
+    return result.split("\n")[1:]
+
+
+@pytest.mark.asyncio
+async def test_hourly_returns_48_rows_from_the_current_hour(monkeypatch):
+    offset, local_today = _midnight_offset()
+    payload = _hourly_payload(
+        start_date=local_today - timedelta(days=1), offset_seconds=offset
+    )
+    stub = _StubClient({_FORECAST: [payload]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"hourly": True})
+
+    call = next(c for c in stub.calls if c[0] == _FORECAST)
+    assert call[1]["latitude"] == _HOME_LAT
+    assert "temperature_2m" in call[1]["hourly"]
+    assert "weather_code" in call[1]["hourly"]
+    # Hourly mode has no use for the daily block.
+    assert "daily" not in call[1]
+    today = datetime.now().astimezone().date()
+    assert call[1]["start_date"] == (today - timedelta(days=1)).isoformat()
+    assert call[1]["end_date"] == (today + timedelta(days=2)).isoformat()
+
+    assert result.startswith("Home, next 48 hours. Currently 54°F, partly cloudy:")
+    rows = _hourly_rows(result)
+    assert len(rows) == _HOURLY_HOURS
+    # Location-local midnight → the first row is that hour, on today's date.
+    assert rows[0] == f"{local_today.strftime('%a')} 12 AM  55°F  light rain  40%"
+
+
+@pytest.mark.asyncio
+async def test_hourly_rows_cross_midnight_with_day_labels(monkeypatch):
+    offset, local_today = _midnight_offset()
+    payload = _hourly_payload(
+        start_date=local_today - timedelta(days=1), offset_seconds=offset
+    )
+    stub = _StubClient({_FORECAST: [payload]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    rows = _hourly_rows(await handle("get_weather", {"hourly": True}))
+
+    tomorrow = local_today + timedelta(days=1)
+    # Rows 0–23 are today, 24–47 tomorrow — starting from local midnight.
+    assert rows[23].startswith(f"{local_today.strftime('%a')} 11 PM")
+    assert rows[24].startswith(f"{tomorrow.strftime('%a')} 12 AM")
+    assert rows[47].startswith(f"{tomorrow.strftime('%a')} 11 PM")
+
+
+@pytest.mark.asyncio
+async def test_hourly_ignores_date_argument(monkeypatch):
+    offset, local_today = _midnight_offset()
+    payload = _hourly_payload(
+        start_date=local_today - timedelta(days=1), offset_seconds=offset
+    )
+    stub = _StubClient({_FORECAST: [payload]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    # A date far outside the daily path's 14-day window must not short-circuit
+    # the hourly request.
+    far = (datetime.now().astimezone().date() + timedelta(days=30)).isoformat()
+    result = await handle("get_weather", {"hourly": True, "date": far})
+
+    assert "two weeks" not in result
+    assert len(_hourly_rows(result)) == _HOURLY_HOURS
+
+
+@pytest.mark.asyncio
+async def test_hourly_uses_supplied_coords_and_label(monkeypatch):
+    offset, local_today = _midnight_offset()
+    payload = _hourly_payload(
+        start_date=local_today - timedelta(days=1), offset_seconds=offset
+    )
+    stub = _StubClient({_FORECAST: [payload]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle(
+        "get_weather",
+        {
+            "hourly": True,
+            "latitude": 43.6591,
+            "longitude": -70.2568,
+            "place_label": "Portland, Maine",
+        },
+    )
+
+    call = next(c for c in stub.calls if c[0] == _FORECAST)
+    assert call[1]["latitude"] == 43.6591
+    assert result.startswith("Portland, Maine, next 48 hours")
+
+
+@pytest.mark.asyncio
+async def test_hourly_omits_probability_when_absent(monkeypatch):
+    offset, local_today = _midnight_offset()
+    payload = _hourly_payload(
+        start_date=local_today - timedelta(days=1),
+        offset_seconds=offset,
+        prob=None,
+    )
+    stub = _StubClient({_FORECAST: [payload]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    rows = _hourly_rows(await handle("get_weather", {"hourly": True}))
+    assert rows[0].endswith("light rain")
+    assert "%" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_hourly_empty_block_returns_friendly_message(monkeypatch):
+    stub = _StubClient({_FORECAST: [{"utc_offset_seconds": 0, "hourly": {}}]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"hourly": True})
+    assert "couldn't get an hourly forecast" in result
+
+
+@pytest.mark.asyncio
+async def test_hourly_http_error_returns_friendly_message(monkeypatch):
+    stub = _StubClient({_FORECAST: [httpx.ConnectError("nope")]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client)
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"hourly": True})
+    assert "couldn't reach" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_hourly_metric_units(monkeypatch):
+    offset, local_today = _midnight_offset()
+    payload = _hourly_payload(
+        start_date=local_today - timedelta(days=1), offset_seconds=offset
+    )
+    stub = _StubClient({_FORECAST: [payload]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    _configure_home(client, units="metric")
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", {"hourly": True})
+
+    call = next(c for c in stub.calls if c[0] == _FORECAST)
+    assert call[1]["temperature_unit"] == "celsius"
+    assert "°C" in result
+    assert "°F" not in result
+
+
+def test_now_local_uses_api_offset_not_server_tz():
+    offset, local_today = _midnight_offset()
+    local = _now_local({"utc_offset_seconds": offset})
+    assert local.tzinfo is None
+    assert local.date() == local_today
+    assert local.hour == 0
+    # Missing offset falls back to this machine's local time rather than raising.
+    assert _now_local({}).tzinfo is None

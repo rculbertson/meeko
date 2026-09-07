@@ -106,6 +106,8 @@ Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[cl
 |----------|-----------------------|------------|--------------------------------------------------------|
 | `units`  | `MEEKO_WEATHER_UNITS` | `imperial` | `imperial` (°F, mph, inch) or `metric` (°C, km/h, mm). |
 
+Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Claude can ask for either a single day — today by default, any day up to two weeks out — or an hour-by-hour forecast covering the next 48 hours, which it picks automatically for questions about part of a day ("what's it doing this afternoon?"). Name a place ("weather in Tokyo") and Claude supplies the coordinates itself; otherwise `[location]` is used.
+
 ### Profiles
 
 `[profiles.<name>]` blocks define personas. The profile name *is* the conversation mode, so it must be either `query` (auto-closes after a short silence) or `conversation` (stays open through pauses, asks before closing). A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required. Each profile has:
