@@ -25,7 +25,11 @@ jobs:
           allow-prereleases: true
 
       - name: Install system dependencies
-        run: sudo apt-get install -y portaudio19-dev
+        # Refresh the index first: the runner image's baked apt index goes stale
+        # and portaudio19-dev then 404s.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -42,7 +46,11 @@ jobs:
           DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
+      # Fork PRs have no CODECOV_TOKEN, so the upload can only fail there.
+      # (fail_ci_if_error already defaults to false, so it never failed the job —
+      # this skips the guaranteed-to-error step entirely.)
       - name: Upload coverage to Codecov
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

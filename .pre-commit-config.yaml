@@ -1,3 +1,7 @@
+# pytest runs at pre-push; without this, `pre-commit install` would only
+# install the pre-commit hook and the test gate would never run locally.
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.10

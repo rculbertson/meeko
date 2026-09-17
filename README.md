@@ -3,6 +3,10 @@
 Meeko is a personal voice assistant backed by Claude. It handles the usual quick questions, as well as extended, open-ended thinking sessions where context accumulates over time. Meeko remembers the full text of every conversation, so you can pause mid-thought, come back days later, and pick up exactly where you left off. Just say "let's go back to the conversation about the app I'm building" and Meeko finds it and resumes.
 
 
+## Project status
+
+Meeko is a personal project, maintained in spare time. It works and I use it daily, but I review issues and pull requests in batches — expect weeks, not days. Contributions are genuinely welcome anyway; please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open an issue before starting anything large so you don't build something I end up declining.
+
 ## Features
 
 - **Named, resumable sessions** — every conversation is saved and searchable by voice.
@@ -43,6 +47,16 @@ uv run python -m meeko.main
 ```
 
 Say "Hey Meeko" to wake it. Press `Ctrl+C` to quit.
+
+Two flags are available for working with prior sessions from the terminal:
+
+```
+uv run python -m meeko.main --list-sessions        # print prior sessions and exit
+uv run python -m meeko.main --resume               # resume the most recent session
+uv run python -m meeko.main --resume SESSION_ID    # resume a specific session
+```
+
+Resuming by voice works too — just ask ("let's go back to the conversation about the app I'm building") and Meeko searches and loads it.
 
 The default config provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
 
@@ -115,7 +129,7 @@ Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Cla
 | Key                           | Description                                                                        |
 |-------------------------------|------------------------------------------------------------------------------------|
 | `wake_word`                   | Wake-phrase label (advisory; the ONNX model determines the actual phrase).         |
-| `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`.                                          |
+| `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`. Optional; defaults to `asteria`.          |
 | `prompt`                      | The system prompt that defines the persona.                                        |
 | `idle_timeout_seconds`        | (query profile) silence window before silent close. Default `5.0`.                 |
 | `conversation_idle_seconds`   | (conversation profile) silence before the verbal check-in. Default `60.0`.         |
@@ -203,6 +217,10 @@ Both are accessed with your own API keys; their handling of your data is governe
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, tests, and lint.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Note that openWakeWord's pre-trained preprocessor models, which the wake-word path downloads at runtime, are CC-BY-NC-SA-4.0; see [models/README.md](models/README.md) before using Meeko commercially.
 
 ## Inspiration
 After a concussion left me unable to look at screens for a week, I couldn't use my laptop, my phone, or even watch TV. What saved my sanity was talking to Claude's voice mode — hours of conversation about whatever was on my mind, no screen required.

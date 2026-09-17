@@ -12,8 +12,8 @@ wheels/
 # Secrets
 .env
 
-# Logs
-meeko.log
+# Logs (rotated files contain verbatim conversation transcripts)
+meeko.log*
 
 # Local SQLite DB (sessions/turns)
 meeko.db
@@ -40,3 +40,10 @@ htmlcov/
 
 # Private docs (not for public repo)
 private/
+
+# Editor/IDE directories (defensive: never belongs in the public repo)
+.idea/
+.vscode/
+*.code-workspace
+*.iml
+.DS_Store

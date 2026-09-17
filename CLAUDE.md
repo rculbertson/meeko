@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The public architecture overview is in `ARCHITECTURE.md`; the internal working design doc (with open questions and superseded designs) is in `private/meeko-design.md`. Read at least `ARCHITECTURE.md` before making significant changes.
+Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The architecture overview — component tour, state machine, session persistence, and the rationale behind the key design decisions — is in `ARCHITECTURE.md`. Read it before making significant changes.
 
 ## Current State
 
@@ -59,7 +59,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
   - `model` (env: `MEEKO_WAKE_WORD_MODEL`) — path to the ONNX model. Default `models/hey_meeko.onnx`.
   - `threshold` (env: `MEEKO_WAKE_WORD_THRESHOLD`) — confidence (0–1). Default `0.96`.
   - `disabled = true` (env: `MEEKO_WAKE_WORD_DISABLED=1`) — skip the gate; start directly in `LISTENING`.
-- First run downloads openWakeWord's preprocessor ONNX files (~3 MB). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
+- First run downloads openWakeWord's model set (~19 MB; Meeko only uses the ~2.4 MB of preprocessors, see `models/README.md`). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
 ### LEDs
 - The XVF3800's WS2812 ring is driven by `meeko/leds.py` to mirror the state machine: IDLE off, LISTENING solid cyan, LISTENING_ACTIVE DoA (cyan indicator on darker cyan) while the user is speaking, PROCESSING blue breath, SPEAKING solid green. Errors get a ~3s red breath.
@@ -90,7 +90,7 @@ States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (bar
 
 ## What's Out of Scope (v1)
 
-Do not add: web/mobile UI, multi-user support, semantic search over sessions, session deletion by voice, cross-device sync. See `ARCHITECTURE.md` §9.
+Do not add: web/mobile UI, multi-user support, semantic search over sessions, session deletion or editing by voice, cross-device sync. See `ARCHITECTURE.md` §9.
 
 ## Testing
 

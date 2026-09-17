@@ -111,7 +111,7 @@ Meeko calls the Claude API directly — not via Deepgram's managed LLM. This is 
 
 **Server-side compaction.** Enabled via `client.beta.messages.stream(...)` with `betas=["compact-2026-01-12"]` and `context_management={"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": compaction_trigger_tokens}}]}`. The threshold is configured via `[claude] compaction_trigger_tokens` in `meeko.toml` (default `150000`). When the API summarizes a prefix, it returns a `compaction` content block in the assistant message. The client round-trips that block in the in-memory message array (so the server doesn't re-summarize the same prefix on the next turn) and filters it out before SQLite persistence (so on-disk transcripts stay verbatim).
 
-**Web search.** `ClaudeClient` exposes Anthropic's `web_search_20260209` server tool to Sonnet, gated by `[claude] web_search_enabled` (default `true`) and capped at `[claude] web_search_max_uses` calls per turn (default `3`). Web search is a server-side tool: the model invokes it inside the same streaming turn, emits `server_tool_use` and `web_search_tool_result` blocks, and we round-trip those blocks in the in-memory message array so the cached prefix stays valid. Result blocks are normalized before SQLite persistence so the on-disk transcript stays compact.
+**Web search.** `ClaudeClient` exposes Anthropic's `web_search_20260209` server tool to Sonnet, gated by `[claude] web_search_enabled` (default `true`) and capped at `[claude] web_search_max_uses` calls per turn (default `2`). Web search is a server-side tool: the model invokes it inside the same streaming turn, emits `server_tool_use` and `web_search_tool_result` blocks, and we round-trip those blocks in the in-memory message array so the cached prefix stays valid. Result blocks are normalized before SQLite persistence so the on-disk transcript stays compact.
 
 ### 4.4 Deepgram TTS (Aura-2)
 
@@ -146,7 +146,7 @@ See the post-turn block in [meeko/main.py](meeko/main.py).
 
 On startup Meeko sits in `IDLE` with the mic open, but audio is fed to an [openWakeWord](https://github.com/dscripka/openWakeWord) detector running on-device (ONNX) instead of Deepgram STT. Saying "Hey Meeko" transitions the session to `LISTENING`, after which mic audio flows to Deepgram normally — the gate is **one-shot per session**, follow-up turns do not require re-waking. After `end_session`, the detector is reset and the session returns to `IDLE`.
 
-Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/hey_meeko.onnx`, threshold `0.96`. First run downloads openWakeWord's preprocessor ONNX files (~3 MB); for offline deploys, run `uv run python -m meeko.wake_word` on a network-connected host first to pre-populate the cache.
+Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/hey_meeko.onnx`, threshold `0.96`. First run downloads openWakeWord's model set (~19 MB; Meeko only uses the ~2.4 MB of preprocessors, see `models/README.md`); for offline deploys, run `uv run python -m meeko.wake_word` on a network-connected host first to pre-populate the cache.
 
 ### 4.7 Profiles and idle behavior
 
