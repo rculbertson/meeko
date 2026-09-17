@@ -3,6 +3,10 @@
 Meeko is a personal voice assistant backed by Claude. It handles the usual quick questions, as well as extended, open-ended thinking sessions where context accumulates over time. Meeko remembers the full text of every conversation, so you can pause mid-thought, come back days later, and pick up exactly where you left off. Just say "let's go back to the conversation about the app I'm building" and Meeko finds it and resumes.
 
 
+## Project status
+
+Meeko is a personal project, maintained in spare time. It works and I use it daily, but I review issues and pull requests in batches — expect weeks, not days. Contributions are genuinely welcome anyway; please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open an issue before starting anything large so you don't build something I end up declining.
+
 ## Features
 
 - **Named, resumable sessions** — every conversation is saved and searchable by voice.

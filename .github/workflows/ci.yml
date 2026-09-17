@@ -46,3 +46,6 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          # Fork PRs have no CODECOV_TOKEN; don't fail a contributor's build
+          # over an upload they can't authenticate.
+          fail_ci_if_error: false
