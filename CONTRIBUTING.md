@@ -23,10 +23,11 @@ Windows is also unsupported; the code targets macOS and Raspberry Pi OS.
 ## Dev setup
 
 ```bash
-mise install            # installs Python 3.14 via .python-version
-uv sync --all-groups    # includes dev dependencies (pytest, ruff, pre-commit)
+uv sync --all-groups    # installs Python 3.14 if needed, plus dev deps (pytest, ruff, pre-commit)
 pre-commit install
 ```
+
+`uv` provisions Python itself from the tracked `.python-version`, so no separate version manager is required. If you already use [mise](https://mise.jdx.dev/), `mise install` reads the same file.
 
 ## Tests
 

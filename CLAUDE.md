@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The public architecture overview is in `ARCHITECTURE.md`; the internal working design doc (with open questions and superseded designs) is in `private/meeko-design.md`. Read at least `ARCHITECTURE.md` before making significant changes.
+Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The architecture overview — component tour, state machine, session persistence, and the rationale behind the key design decisions — is in `ARCHITECTURE.md`. Read it before making significant changes.
 
 ## Current State
 

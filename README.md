@@ -48,6 +48,16 @@ uv run python -m meeko.main
 
 Say "Hey Meeko" to wake it. Press `Ctrl+C` to quit.
 
+Two flags are available for working with prior sessions from the terminal:
+
+```
+uv run python -m meeko.main --list-sessions        # print prior sessions and exit
+uv run python -m meeko.main --resume               # resume the most recent session
+uv run python -m meeko.main --resume SESSION_ID    # resume a specific session
+```
+
+Resuming by voice works too — just ask ("let's go back to the conversation about the app I'm building") and Meeko searches and loads it.
+
 The default config provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
 
 ## How it works
@@ -119,7 +129,7 @@ Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Cla
 | Key                           | Description                                                                        |
 |-------------------------------|------------------------------------------------------------------------------------|
 | `wake_word`                   | Wake-phrase label (advisory; the ONNX model determines the actual phrase).         |
-| `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`.                                          |
+| `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`. Optional; defaults to `asteria`.          |
 | `prompt`                      | The system prompt that defines the persona.                                        |
 | `idle_timeout_seconds`        | (query profile) silence window before silent close. Default `5.0`.                 |
 | `conversation_idle_seconds`   | (conversation profile) silence before the verbal check-in. Default `60.0`.         |
