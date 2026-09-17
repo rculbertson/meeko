@@ -187,7 +187,7 @@ def test_preprocessor_download_failure_raises_operator_friendly_error(
 
     original_cause = OSError("network down")
 
-    def fail_download():
+    def fail_download(**kwargs):
         raise original_cause
 
     monkeypatch.setattr(wake_word.os.path, "exists", fake_exists)
@@ -197,3 +197,53 @@ def test_preprocessor_download_failure_raises_operator_friendly_error(
         WakeWordDetector(model_path=str(model_path), threshold=0.5)
     assert "python -m meeko.wake_word" in str(excinfo.value)
     assert excinfo.value.__cause__ is original_cause
+
+
+def test_preprocessor_download_skips_bundled_wake_words(fake_model, monkeypatch):
+    """openWakeWord downloads its six bundled wake words (~12 MB Meeko never
+    loads) whenever model_names is empty. Passing a non-empty list suppresses
+    them while still fetching the melspectrogram/embedding/VAD models, which
+    download_models() fetches unconditionally."""
+    import os as _os
+
+    model_path, _ = fake_model
+    real_exists = _os.path.exists
+
+    def fake_exists(p):
+        # pytest itself calls os.path.exists with Path objects while this
+        # patch is active, so normalize before matching.
+        if str(p).endswith(("melspectrogram.onnx", "embedding_model.onnx")):
+            return False
+        return real_exists(p)
+
+    calls = []
+
+    def record_download(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(wake_word.os.path, "exists", fake_exists)
+    monkeypatch.setattr(
+        wake_word.openwakeword.utils, "download_models", record_download
+    )
+
+    WakeWordDetector(model_path=model_path, threshold=0.5)
+
+    assert len(calls) == 1
+    names = calls[0]["model_names"]
+    # An empty list — or [""], since matching is a substring test — would pull
+    # the full ~19 MB set.
+    assert names, "model_names must be non-empty or all bundled models download"
+    assert "" not in names
+
+
+def test_no_bundled_models_sentinel_matches_nothing_upstream():
+    """The suppression trick relies on the sentinel matching no official model
+    name. If openWakeWord ever ships a model whose filename contains it, the
+    bundled downloads would silently come back."""
+    official = [
+        v["download_url"].split("/")[-1] for v in wake_word.openwakeword.MODELS.values()
+    ]
+    for sentinel in wake_word._NO_BUNDLED_MODELS:
+        assert sentinel, "empty sentinel would match every model"
+        matches = [name for name in official if sentinel in name]
+        assert matches == [], f"{sentinel!r} now matches {matches}"

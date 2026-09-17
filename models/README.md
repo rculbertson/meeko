@@ -37,12 +37,12 @@ files.
 
 ## First-run download
 
-On first run openWakeWord fetches its models into its own cache. Meeko calls
-`download_models()` with no arguments, which pulls **openWakeWord's full model set (~19 MB
-measured)** — the two preprocessors Meeko actually uses total about 2.4 MB; the rest are
-bundled wake words (`alexa`, `hey_jarvis`, `hey_mycroft`, `hey_rhasspy`, `timer`,
-`weather`) and `silero_vad`, none of which Meeko loads. Budget accordingly when baking an
-offline Pi image. To pre-populate the cache on a network-connected machine:
+On first run openWakeWord fetches its models into its own cache — **about 6.7 MB**: the
+`melspectrogram` and `embedding` preprocessors Meeko runs every wake-word inference
+through, plus `silero_vad`. openWakeWord would otherwise also pull its six bundled wake
+words (`alexa`, `hey_jarvis`, `hey_mycroft`, `hey_rhasspy`, `timer`, `weather`, ~12 MB),
+which Meeko never loads; `_ensure_preprocessors()` suppresses those. To pre-populate the
+cache on a network-connected machine before an offline deploy:
 
 ```bash
 uv run python -m meeko.wake_word

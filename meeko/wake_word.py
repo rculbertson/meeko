@@ -37,6 +37,18 @@ def _preprocessor_cache_dir() -> str:
     )
 
 
+# openWakeWord's download_models() always fetches the melspectrogram,
+# embedding and VAD models — the only ones Meeko loads. With an empty
+# model_names it *also* pulls its six bundled wake words (alexa, hey_jarvis,
+# hey_mycroft, hey_rhasspy, timer, weather), ~12 MB Meeko never touches.
+#
+# Passing any non-empty list that matches no official model name suppresses
+# those extras, cutting the first-run download from ~19 MB to ~6.7 MB.
+# Matching is a substring test against official filenames, so both [] and
+# [""] would pull the full set — the value has to be non-empty and specific.
+_NO_BUNDLED_MODELS = ["hey_meeko"]
+
+
 def _ensure_preprocessors() -> None:
     """Fetch openWakeWord's shared melspectrogram + embedding ONNX
     preprocessors on first run. Idempotent — no-op if the files are
@@ -49,7 +61,7 @@ def _ensure_preprocessors() -> None:
         return
     logger.info("Downloading openWakeWord preprocessor models (one-time)")
     try:
-        openwakeword.utils.download_models()
+        openwakeword.utils.download_models(model_names=_NO_BUNDLED_MODELS)
     except Exception as exc:
         raise RuntimeError(
             "Failed to download openWakeWord preprocessor models. Run "
