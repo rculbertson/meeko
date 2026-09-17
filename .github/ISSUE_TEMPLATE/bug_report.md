@@ -24,6 +24,9 @@ labels: bug
 **Logs**
 
 <!--
-Run with MEEKO_LOG_LEVEL=DEBUG and paste the relevant excerpt.
-Transcripts of what you said may appear in the logs — trim anything private.
+DEBUG is already the default log level, and logs go to stderr unless you redirect them.
+To get a file you can excerpt, run with MEEKO_LOG_TARGET=file — Meeko writes meeko.log
+in the working directory.
+
+Transcripts of what you said appear in the logs — trim anything private before pasting.
 -->

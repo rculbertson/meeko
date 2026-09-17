@@ -22,9 +22,11 @@ Windows is also unsupported; the code targets macOS and Raspberry Pi OS.
 
 ## Dev setup
 
+First install PortAudio, which `pyaudio` compiles against — `brew install portaudio` on macOS, `sudo apt install portaudio19-dev` on Debian/Ubuntu/Raspberry Pi OS. Without it `uv sync` fails while building `pyaudio`.
+
 ```bash
-uv sync --all-groups    # installs Python 3.14 if needed, plus dev deps (pytest, ruff, pre-commit)
-pre-commit install
+uv sync --all-groups        # installs Python 3.14 if needed, plus dev deps (pytest, ruff, pre-commit)
+uv run pre-commit install   # installs both the pre-commit and pre-push hooks
 ```
 
 `uv` provisions Python itself from the tracked `.python-version`, so no separate version manager is required. If you already use [mise](https://mise.jdx.dev/), `mise install` reads the same file.
@@ -70,17 +72,26 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-Both run automatically via pre-commit hooks; the same checks run in CI.
+Ruff runs on commit and pytest runs on push, via the hooks installed above; the same checks run in CI.
 
 ## Git workflow
 
 - Implement features on a new branch, never directly on `main`.
 - Branch naming: `<github-username>/<short-description>`.
 - Commit when a discrete, working piece is complete; each commit should run correctly on its own.
-- Before opening a PR, commit outstanding changes and run `gh pr create` — ruff and tests run automatically via pre-commit hooks.
+- Before opening a PR, commit outstanding changes and run `gh pr create` — ruff runs on commit and the test suite runs on push.
 
 ## AI-assisted contributions
 
-Meeko's repo-specific conventions for AI-assisted work (when to read the design doc, how the config layer is wired, what's load-bearing) are documented in [CLAUDE.md](CLAUDE.md). Treat it as the canonical guide when using Claude Code or similar tools in this repo.
+Meeko's repo-specific conventions for AI-assisted work (how the config layer is wired, what's load-bearing, which invariants not to break) are documented in [CLAUDE.md](CLAUDE.md). Treat it as the canonical guide when using Claude Code or similar tools in this repo.
 
-This repo's tracked `.claude/settings.json` also registers Deepgram's [skills marketplace](https://github.com/deepgram/skills) and enables its plugin, which gives Claude Code the Deepgram API reference used throughout `meeko/deepgram_*.py`. Claude Code asks you to trust the workspace before any of it loads, so nothing is enabled behind your back, and the plugin ships documentation skills only — no hooks or commands that execute. To opt out, decline the trust prompt, or manage it with `/plugin` inside Claude Code.
+This repo tracks a `.claude/settings.json`, and trusting the workspace applies all of it. Worth knowing what that grants:
+
+- **A `permissions.allow` list** that pre-authorizes some tool calls without prompting: `WebSearch`, `WebFetch` to `api.deepgram.com`, and `Bash` for `uv`, `cat`, `head`, `tail`, `grep`, `awk`, `sed`, `wc`. Note `Bash(uv *)` covers any `uv` subcommand and `Bash(sed *)` can write files. Fine for this repo's workflow, but it is a real grant — read it before accepting.
+- **Deepgram's [skills marketplace](https://github.com/deepgram/skills)** and its plugin, which supply the Deepgram API reference used throughout `meeko/deepgram_stt.py` and `meeko/deepgram_tts.py`. The plugin ships documentation skills only — no hooks or commands that execute — and `skillOverrides` turns off the two skills that would run setup actions.
+
+Claude Code asks you to trust the workspace before any of this loads, so nothing applies behind your back. To opt out, decline the trust prompt, or manage plugins with `/plugin`.
+
+## License
+
+Meeko is MIT licensed. By contributing, you agree that your contributions are licensed under the same terms.

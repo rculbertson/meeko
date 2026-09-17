@@ -218,6 +218,10 @@ Both are accessed with your own API keys; their handling of your data is governe
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, tests, and lint.
 
+## License
+
+MIT — see [LICENSE](LICENSE). Note that openWakeWord's pre-trained preprocessor models, which the wake-word path downloads at runtime, are CC-BY-NC-SA-4.0; see [models/README.md](models/README.md) before using Meeko commercially.
+
 ## Inspiration
 After a concussion left me unable to look at screens for a week, I couldn't use my laptop, my phone, or even watch TV. What saved my sanity was talking to Claude's voice mode — hours of conversation about whatever was on my mind, no screen required.
 

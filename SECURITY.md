@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately via [GitHub's private vulnerability reporting](https://github.com/rculbertson/meeko/security/advisories/new) rather than opening a public issue.
+Please report security issues privately via [GitHub's private vulnerability reporting](https://github.com/rculbertson/meeko/security/advisories/new) rather than opening a public issue. If that link 404s, private reporting hasn't been enabled yet — open a regular issue saying only that you have a security report and asking for a contact, without the details.
 
 Meeko is maintained in spare time, so there is no response-time guarantee. Reports are read and taken seriously, but a fix may take a while. If something is actively dangerous to users, say so prominently in the report and it will be prioritized.
 
