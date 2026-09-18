@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from meeko import stt_supervisor as supervisor_mod
-from meeko.stt_supervisor import STTSupervisor
+from meeko.stt_supervisor import STTSupervisor, run_session_workers
 
 
 @pytest.fixture
@@ -186,3 +186,127 @@ async def test_cancellation_propagates(audio_mock):
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# ---------------------------------------------------------------------------
+# run_session_workers
+#
+# The contract STTSupervisor depends on: the first worker to finish ends
+# the session, and if it raised, that exception must reach run() so it
+# backs off and reconnects. A swallowed exception is invisible — Meeko
+# would just go deaf until the next normal return.
+# ---------------------------------------------------------------------------
+
+
+class _Worker:
+    """A controllable session worker that records how it ended."""
+
+    def __init__(self, *, raise_on_cancel: BaseException | None = None):
+        self.started = False
+        self.cancelled = False
+        self.finished = False
+        self._go = asyncio.Event()
+        self._outcome: BaseException | None = None
+        self._raise_on_cancel = raise_on_cancel
+
+    def finish(self, exc: BaseException | None = None) -> None:
+        self._outcome = exc
+        self._go.set()
+
+    async def run(self) -> None:
+        self.started = True
+        try:
+            await self._go.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            if self._raise_on_cancel is not None:
+                raise self._raise_on_cancel
+            raise
+        self.finished = True
+        if self._outcome is not None:
+            raise self._outcome
+
+
+async def _started(*workers: _Worker) -> None:
+    for _ in range(10):
+        if all(w.started for w in workers):
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("workers never started")
+
+
+async def test_first_worker_exception_propagates_and_the_rest_are_cancelled():
+    a, b, c = _Worker(), _Worker(), _Worker()
+    task = asyncio.create_task(run_session_workers(a.run(), b.run(), c.run()))
+    await _started(a, b, c)
+
+    a.finish(ConnectionError("socket died"))
+
+    with pytest.raises(ConnectionError, match="socket died"):
+        await asyncio.wait_for(task, timeout=1.0)
+    assert b.cancelled and c.cancelled
+
+
+async def test_first_worker_returning_normally_ends_the_session_cleanly():
+    """A normal return (e.g. the event stream closed) ends the session
+    without an exception — the supervisor reconnects without backoff."""
+    a, b = _Worker(), _Worker()
+    task = asyncio.create_task(run_session_workers(a.run(), b.run()))
+    await _started(a, b)
+
+    a.finish()
+
+    await asyncio.wait_for(task, timeout=1.0)
+    assert a.finished
+    assert b.cancelled
+
+
+async def test_the_other_workers_are_awaited_not_just_cancelled():
+    """They share the dying session; none may still be running when the
+    supervisor opens the next one."""
+    worker_tasks: list[asyncio.Task] = []
+    real_create_task = asyncio.create_task
+
+    def spy(coro, **kwargs):
+        t = real_create_task(coro, **kwargs)
+        worker_tasks.append(t)
+        return t
+
+    a, b = _Worker(), _Worker()
+    with patch.object(supervisor_mod.asyncio, "create_task", spy):
+        task = real_create_task(run_session_workers(a.run(), b.run()))
+        await _started(a, b)
+        a.finish()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert len(worker_tasks) == 2
+    assert all(t.done() for t in worker_tasks)
+
+
+async def test_an_error_during_cancellation_does_not_mask_the_original():
+    """If a sibling raises while being torn down, the supervisor must
+    still see the exception that actually ended the session."""
+    a = _Worker()
+    noisy = _Worker(raise_on_cancel=RuntimeError("cleanup blew up"))
+    task = asyncio.create_task(run_session_workers(a.run(), noisy.run()))
+    await _started(a, noisy)
+
+    a.finish(ConnectionError("the real cause"))
+
+    with pytest.raises(ConnectionError, match="the real cause"):
+        await asyncio.wait_for(task, timeout=1.0)
+    assert noisy.cancelled
+
+
+async def test_cancelling_the_call_cancels_and_awaits_every_worker():
+    """Shutdown path: no worker may outlive the call and keep using the
+    session (or the mic) after the supervisor has gone."""
+    a, b, c = _Worker(), _Worker(), _Worker()
+    task = asyncio.create_task(run_session_workers(a.run(), b.run(), c.run()))
+    await _started(a, b, c)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert a.cancelled and b.cancelled and c.cancelled
