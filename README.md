@@ -124,19 +124,23 @@ Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Cla
 
 ### Profiles
 
-`[profiles.<name>]` blocks define personas. The profile name *is* the conversation mode, so it must be either `query` (auto-closes after a short silence) or `conversation` (stays open through pauses, asks before closing). A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required. Each profile has:
+`[profiles.<name>]` blocks define personas. The name is free-form: the default config ships `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing), and you can add more — each is just another block, and "switch to <name> mode" switches to it by voice. How a profile behaves when you go quiet is set entirely by its `idle_*` keys, not its name. A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required. Each profile has:
 
 | Key                           | Description                                                                        |
 |-------------------------------|------------------------------------------------------------------------------------|
 | `wake_word`                   | Wake-phrase label (advisory; the ONNX model determines the actual phrase).         |
 | `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`. Optional; defaults to `asteria`.          |
 | `prompt`                      | The system prompt that defines the persona.                                        |
-| `idle_timeout_seconds`        | (query profile) silence window before silent close. Default `5.0`.                 |
-| `conversation_idle_seconds`   | (conversation profile) silence before the verbal check-in. Default `60.0`.         |
-| `conversation_close_seconds`  | (conversation profile) silence after the check-in before closing. Default `20.0`.  |
+| `description`                 | One line telling Claude when to switch to this profile. Optional but recommended; without it Claude only has the name to go on. |
+| `idle_timeout_seconds`        | silence after a turn before Meeko acts (check-in or close). Default `5.0`. Non-positive disables. |
+| `idle_prompt`                 | spoken check-in after that silence. Unset (default) skips straight to closing.     |
+| `idle_close_seconds`          | further silence after `idle_prompt` before closing. Only used with `idle_prompt`. Default `20.0`. |
+| `idle_close_text`             | spoken just before the session closes. Unset (default) closes silently.            |
 | `post_wake_timeout_seconds`   | silence window after the wake word, before the first turn; on expiry the session closes silently and returns to IDLE. Default `15.0`. Non-positive disables. |
 
-See the bundled `meeko/default_config.toml` for working examples of both profiles.
+With no `idle_*` keys a profile closes silently after 5 seconds; the shipped `conversation` profile sets all four to get its spoken check-in. See the bundled `meeko/default_config.toml` for working examples of both profiles.
+
+**Upgrading from an older config:** `conversation_idle_seconds` and `conversation_close_seconds` were renamed to `idle_timeout_seconds` and `idle_close_seconds`, and Meeko refuses to start while they are present. A `[profiles.conversation]` block that set no timing keys used to get the spoken check-in automatically and now gets the silent 5-second close — copy the four `idle_*` lines from the bundled `[profiles.conversation]` to keep it.
 
 ## Notes for the ReSpeaker XVF3800
 

@@ -66,7 +66,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
   - `model` (env: `MEEKO_WAKE_WORD_MODEL`) — path to the ONNX model. Default `models/hey_meeko.onnx`.
   - `threshold` (env: `MEEKO_WAKE_WORD_THRESHOLD`) — confidence (0–1). Default `0.96`.
   - `disabled = true` (env: `MEEKO_WAKE_WORD_DISABLED=1`) — skip the gate; start directly in `LISTENING`.
-- `post_wake_timeout_seconds` is a **per-profile** key (not `[wake_word]`), default `15.0`: the silence window between the wake word firing and the user's first turn. On expiry the session closes silently and returns to `IDLE` in both modes. Non-positive disables it.
+- `post_wake_timeout_seconds` is a **per-profile** key (not `[wake_word]`), default `15.0`: the silence window between the wake word firing and the user's first turn. On expiry the session always closes silently and returns to `IDLE`, whatever the profile's `idle_*` keys say. Non-positive disables it.
 - First run downloads openWakeWord's melspectrogram, embedding and VAD models (~6.7 MB; its six bundled wake words are suppressed, see `models/README.md`). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
 ### LEDs
@@ -93,7 +93,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 ### State machine
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.
 
-Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout (query mode silently, conversation mode after a spoken check-in), and the post-wake timeout when no first turn ever arrives. See `ARCHITECTURE.md` §5.1.
+Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout (silently, or after a spoken check-in, per the active profile's `idle_*` keys), and the post-wake timeout when no first turn ever arrives. See `ARCHITECTURE.md` §5.1.
 
 Both silence windows live in `meeko/orchestrator/idle.py` (`IdleController`), not in `main.py`. They don't end the session themselves — they set the `SessionManager` end flag and post `IDLE_TIMEOUT_SENTINEL` to the turn queue, and `TurnWorker` (`meeko/orchestrator/turn_worker.py`) runs the normal post-turn handling without a Claude/TTS round-trip.
 

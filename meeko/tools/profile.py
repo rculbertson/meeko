@@ -111,19 +111,23 @@ class ProfileManager:
 def get_tool_definitions(profiles: dict[str, Profile]) -> list[ToolDefinition]:
     profile_names = sorted(profiles)
     names_list = ", ".join(profile_names)
+    profile_lines = "\n".join(
+        f"- {name}: {profiles[name].description}"
+        if profiles[name].description
+        else f"- {name}"
+        for name in profile_names
+    )
     return [
         {
             "name": "switch_profile",
             "description": (
-                "Switch the assistant to a different profile/persona. "
-                f"Available profiles: {names_list}. "
-                "The profile name is also the conversation mode (query — "
-                "auto-closes after a short silence; conversation — stays "
-                "open for long, in-depth talks). When the user asks to "
-                "switch modes (e.g. 'switch to conversation mode', "
-                "'let's have a long conversation', 'switch back to query "
-                "mode', 'just quick questions from now on'), call this "
-                "tool with the matching profile name."
+                "Switch the assistant to a different profile. Each profile "
+                "is a persona with its own voice and its own behavior when "
+                "the user goes quiet; users also call them modes. Call this "
+                "when the user asks to switch profile or mode by name, or "
+                "asks for the kind of interaction a profile below is "
+                "described as being for. Available profiles:\n"
+                f"{profile_lines}"
             ),
             "input_schema": {
                 "type": "object",
