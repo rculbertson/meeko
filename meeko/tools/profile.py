@@ -98,7 +98,7 @@ class ProfileManager:
             self._speaker.set_profile(profile)
         self._active = profile_name
         logger.info("Switched to profile: %s", profile_name)
-        return f"Switched to {profile_name} mode."
+        return f"Switched to the {profile_name} profile."
 
     def list_profiles(self) -> str:
         lines = []

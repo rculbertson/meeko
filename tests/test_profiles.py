@@ -207,7 +207,7 @@ async def test_switch_profile():
 
     result = await mgr.switch_profile("conversation")
 
-    assert result == "Switched to conversation mode."
+    assert result == "Switched to the conversation profile."
     claude.set_system_prompt.assert_called_once_with("You are a thinking partner.")
     assert mgr.active_profile.name == "conversation"
 
