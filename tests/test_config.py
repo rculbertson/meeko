@@ -29,22 +29,25 @@ def test_defaults_match_historical_env_defaults(tmp_path: Path):
     documented defaults (regression guard against accidental drift)."""
     cfg = load_config(tmp_path / "missing.toml")
 
-    assert cfg.log_level == "DEBUG"
-    assert cfg.log_target is None
+    expected = {
+        "log_level": "DEBUG",
+        "log_target": None,
+        "led_disabled": False,
+        "input_channels": 2,
+        "output_channels": 2,
+        "input_device_index": None,
+        "output_device_index": None,
+        "mute_mic_while_speaking": False,
+        "wake_word_model": Path("models/hey_meeko.onnx"),
+        "wake_word_threshold": 0.96,
+        "wake_word_disabled": False,
+        "compaction_trigger_tokens": 150000,
+        "web_search_enabled": True,
+        "web_search_max_uses": 2,
+    }
+    assert {k: getattr(cfg, k) for k in expected} == expected
     assert cfg.db_path.name == "meeko.db"
     assert cfg.db_path.parent.name == "meeko"
-    assert cfg.led_disabled is False
-    assert cfg.input_channels == 2
-    assert cfg.output_channels == 2
-    assert cfg.input_device_index is None
-    assert cfg.output_device_index is None
-    assert cfg.mute_mic_while_speaking is False
-    assert cfg.wake_word_model == Path("models/hey_meeko.onnx")
-    assert cfg.wake_word_threshold == 0.96
-    assert cfg.wake_word_disabled is False
-    assert cfg.compaction_trigger_tokens == 150000
-    assert cfg.web_search_enabled is True
-    assert cfg.web_search_max_uses == 2
 
 
 def test_loads_values_from_toml(tmp_path: Path):
