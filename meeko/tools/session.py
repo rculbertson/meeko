@@ -15,7 +15,7 @@ Provides four tools:
   post-turn hook swaps the in-memory message array and rebinds to the
   target session's SQLite row, then stays in LISTENING.
 
-The post-turn hook is ``_apply_post_turn_session_change``, which
+The post-turn hook is ``apply_post_turn_session_change``, which
 ``TurnWorker`` calls once each turn's speech has finished.
 
 The end/new flags are mutually exclusive. Load is independent — the
@@ -40,7 +40,7 @@ logger = logging.getLogger("meeko")
 
 class SessionManager:
     """Shared state between the session-tool handlers and the post-turn
-    hook, ``_apply_post_turn_session_change``.
+    hook, ``apply_post_turn_session_change``.
 
     Handlers only set flags — they do NOT tear down state directly.
     ``TurnWorker`` drains Sonnet's acknowledgement via TTS first and
