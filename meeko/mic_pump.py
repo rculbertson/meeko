@@ -71,7 +71,19 @@ class MicPump:
     async def route_chunk(self, data: bytes, stt_session) -> None:
         """Send one mic chunk wherever the current state says it goes."""
         if self._state.state == State.IDLE:
-            assert self._wake_detector is not None
+            if self._wake_detector is None:
+                # Unreachable today: IDLE is only ever entered with the wake
+                # word enabled (_create_wake_detector and
+                # _apply_post_turn_session_change in meeko/main.py). An
+                # explicit raise rather than an assert, because `python -O`
+                # strips asserts, and because this propagates to
+                # STTSupervisor, which logs str(exc) on every retry: an
+                # AssertionError's empty message would read as an
+                # unexplained STT failure.
+                raise RuntimeError(
+                    "Mic pump reached IDLE with no wake-word detector; IDLE "
+                    "requires the wake word to be enabled"
+                )
             if self._wake_detector.process(data):
                 self._state.set(State.LISTENING)
                 logger.info("Wake word accepted; entering LISTENING")
