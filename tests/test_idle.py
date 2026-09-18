@@ -1,14 +1,14 @@
-"""Tests for the post-turn idle monitor (query and conversation modes)."""
+"""Tests for meeko.idle: the idle windows and the controller that arms them."""
 
 import asyncio
 
 import pytest
 
 from meeko.config import Profile
-from meeko.main import (
+from meeko.idle import (
     CONVERSATION_CLOSE_TEXT,
     CONVERSATION_PROMPT_TEXT,
-    _idle_monitor,
+    run_idle_window,
 )
 
 
@@ -52,7 +52,7 @@ async def test_query_mode_fires_after_timeout():
     def on_timeout() -> None:
         fired.append(True)
 
-    await _idle_monitor(_query_profile(timeout=0.02), on_timeout)
+    await run_idle_window(_query_profile(timeout=0.02), on_timeout)
 
     assert fired == [True]
 
@@ -64,7 +64,9 @@ async def test_query_mode_cancellation_does_not_fire():
     def on_timeout() -> None:
         fired.append(True)
 
-    task = asyncio.create_task(_idle_monitor(_query_profile(timeout=10.0), on_timeout))
+    task = asyncio.create_task(
+        run_idle_window(_query_profile(timeout=10.0), on_timeout)
+    )
     await asyncio.sleep(0.01)
     task.cancel()
 
@@ -81,7 +83,7 @@ async def test_query_mode_disabled_when_timeout_non_positive():
     def on_timeout() -> None:
         fired.append(True)
 
-    await _idle_monitor(_query_profile(timeout=0), on_timeout)
+    await run_idle_window(_query_profile(timeout=0), on_timeout)
 
     assert fired == []
 
@@ -99,7 +101,7 @@ async def test_conversation_mode_full_flow():
     def on_timeout() -> None:
         fired.append(True)
 
-    await _idle_monitor(
+    await run_idle_window(
         _conversation_profile(idle=0.02, close=0.02),
         on_timeout,
         speak=speak,
@@ -118,7 +120,7 @@ async def test_conversation_mode_cancel_during_idle_wait():
         fired.append(True)
 
     task = asyncio.create_task(
-        _idle_monitor(
+        run_idle_window(
             _conversation_profile(idle=10.0, close=10.0),
             on_timeout,
             speak=speak,
@@ -142,7 +144,7 @@ async def test_conversation_mode_cancel_during_close_window():
         fired.append(True)
 
     task = asyncio.create_task(
-        _idle_monitor(
+        run_idle_window(
             _conversation_profile(idle=0.01, close=10.0),
             on_timeout,
             speak=speak,
@@ -174,7 +176,7 @@ async def test_conversation_mode_cancel_during_prompt_speak():
         fired.append(True)
 
     task = asyncio.create_task(
-        _idle_monitor(
+        run_idle_window(
             _conversation_profile(idle=0.01, close=0.5),
             on_timeout,
             speak=slow_speak,
@@ -197,7 +199,7 @@ async def test_conversation_mode_disabled_when_idle_non_positive():
     def on_timeout() -> None:
         fired.append(True)
 
-    await _idle_monitor(
+    await run_idle_window(
         _conversation_profile(idle=0, close=10.0),
         on_timeout,
         speak=speak,
@@ -225,7 +227,7 @@ async def test_conversation_mode_close_window_runs_after_prompt_finishes():
 
     loop = asyncio.get_running_loop()
     t_start = loop.time()
-    await _idle_monitor(
+    await run_idle_window(
         _conversation_profile(idle=0.01, close=close_window),
         on_timeout,
         speak=slow_speak,
