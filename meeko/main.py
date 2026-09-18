@@ -29,7 +29,6 @@ from collections.abc import Callable
 
 import anthropic
 from dotenv import load_dotenv
-from websockets.exceptions import ConnectionClosed
 
 from meeko.audio_io import AudioIO
 from meeko.claude_client import ClaudeClient
@@ -44,12 +43,13 @@ from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
 from meeko.idle import IDLE_TIMEOUT_SENTINEL, IdleController
 from meeko.leds import LedController
+from meeko.mic_pump import MicPump
 from meeko.session_summary import summarize_session
 from meeko.sessions import SessionStore
 from meeko.speaker import Speaker
 from meeko.state import State, StateManager
 from meeko.stt_events import SttEventRouter
-from meeko.stt_supervisor import KEEPALIVE_INTERVAL_S, STTSupervisor
+from meeko.stt_supervisor import STTSupervisor, keepalive_pump
 from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.profile import ProfileManager
 from meeko.tools.profile import get_tool_definitions as profile_tools
@@ -449,42 +449,6 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     profile_manager.set_speaker(speaker)
     timer_manager.set_speak_callback(speaker.speak)
 
-    async def pump_mic(stt_session):
-        """Forward mic chunks to STT.
-
-        While in IDLE, chunks are fed to the wake-word detector instead
-        of STT. On detection the session transitions to LISTENING so
-        subsequent mic audio (including any question the user spoke
-        right after the wake word) flows to Deepgram. With
-        MEEKO_MUTE_MIC_WHILE_SPEAKING set, chunks are dropped while the
-        assistant is SPEAKING (Mac / no-AEC dev path). Otherwise the
-        pump stays on and we rely on hardware AEC to suppress echo."""
-        while not stop_event.is_set():
-            try:
-                data = await asyncio.wait_for(audio.mic_queue.get(), timeout=0.1)
-            except TimeoutError:
-                continue
-            if state_manager.state == State.IDLE:
-                assert wake_detector is not None
-                if wake_detector.process(data):
-                    state_manager.set(State.LISTENING)
-                    logger.info("Wake word accepted; entering LISTENING")
-                    idle.start_post_wake()
-                continue
-            if config.mute_mic_while_speaking and state_manager.state == State.SPEAKING:
-                continue
-            await stt_session.send_audio(data)
-
-    async def keepalive_pump(stt_session):
-        """Send a Deepgram KeepAlive every few seconds so the session
-        stays open when we're not streaming audio."""
-        while not stop_event.is_set():
-            try:
-                await asyncio.sleep(KEEPALIVE_INTERVAL_S)
-                await stt_session.send_keepalive()
-            except ConnectionClosed:
-                return
-
     # Queue of user-turn transcripts handed from the STT puller to the
     # turn-driving worker. Decouples the (always-fast) STT recv loop
     # from the (slow) Claude+TTS path so the websockets recv queue
@@ -543,6 +507,16 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             logger.info("Barge-in: cancelling in-flight reply")
             barge_in_requested = True
             current_speak_task.cancel()
+
+    # Drains the mic queue into the wake detector or the STT session.
+    mic_pump = MicPump(
+        audio=audio,
+        state_manager=state_manager,
+        idle=idle,
+        wake_detector=wake_detector,
+        stop_event=stop_event,
+        mute_mic_while_speaking=config.mute_mic_while_speaking,
+    )
 
     # Routes STT turn events into state changes and queued user turns.
     # Constructed here because it needs request_barge_in above.
@@ -642,9 +616,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # lose the in-flight turn. The session-scoped tasks are the
         # ones that legitimately need the live stt_session handle.
         session_tasks = [
-            asyncio.create_task(pump_mic(stt_session)),
+            asyncio.create_task(mic_pump.run(stt_session)),
             asyncio.create_task(stt_router.run(stt_session)),
-            asyncio.create_task(keepalive_pump(stt_session)),
+            asyncio.create_task(keepalive_pump(stt_session, stop_event)),
         ]
         try:
             done, pending = await asyncio.wait(

@@ -148,6 +148,8 @@ See the post-turn block in [meeko/main.py](meeko/main.py).
 
 On startup Meeko sits in `IDLE` with the mic open, but audio is fed to an [openWakeWord](https://github.com/dscripka/openWakeWord) detector running on-device (ONNX) instead of Deepgram STT. Saying "Hey Meeko" transitions the session to `LISTENING`, after which mic audio flows to Deepgram normally — the gate is **one-shot per session**, follow-up turns do not require re-waking. After `end_session`, the detector is reset and the session returns to `IDLE`.
 
+The gate is enforced in `MicPump` ([meeko/mic_pump.py](meeko/mic_pump.py)), which decides per 50ms chunk whether it goes to the detector or to Deepgram. Nothing is streamed off-device before the wake word fires, and the chunk that fires it isn't forwarded either — it holds the wake phrase, not the question. The same pump implements the `mute_mic_while_speaking` drop (§4.1) for hosts without hardware AEC.
+
 Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/hey_meeko.onnx`, threshold `0.96`. First run downloads openWakeWord's melspectrogram, embedding and VAD models (~6.7 MB; its six bundled wake words are suppressed, see `models/README.md`); for offline deploys, run `uv run python -m meeko.wake_word` on a network-connected host first to pre-populate the cache.
 
 ### 4.7 Profiles and idle behavior
