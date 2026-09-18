@@ -1975,6 +1975,8 @@ class _LoadSessionClaudeClient(_SessionToolClaudeClient):
 class _EndThenLoadSessionClaudeClient(_FakeClaudeClient):
     """Simulates Sonnet chaining end_session + load_session in one turn.
 
+    Lazily creates and persists the current session first (like the real
+    client), so there is an abandoned session for the summary to cover.
     Used to verify that the summary fires for the current session before
     history is swapped to the target."""
 
@@ -1990,15 +1992,17 @@ class _EndThenLoadSessionClaudeClient(_FakeClaudeClient):
         target_id = self.target_session_id
         ack = self.ACK
         store = self.store
-        sid = self.session_id
+        create_fn = self._create_session_fn
 
         async def _gen():
-            if store is not None and sid is not None:
-                await store.persist_turn(sid, "user", text)
+            if store is not None and self.session_id is None and create_fn is not None:
+                self.session_id = await create_fn()
+            if store is not None and self.session_id is not None:
+                await store.persist_turn(self.session_id, "user", text)
             yield ack
-            if store is not None and sid is not None:
+            if store is not None and self.session_id is not None:
                 await store.persist_turn(
-                    sid, "assistant", [{"type": "text", "text": ack}]
+                    self.session_id, "assistant", [{"type": "text", "text": ack}]
                 )
             await dispatcher.dispatch("end_session", {})
             await dispatcher.dispatch("load_session", {"id": target_id})
@@ -2178,19 +2182,25 @@ async def test_end_then_load_session_fires_summary_for_current_session(
                 await real_sleep(0.01)
             fake_stt.ready.set()
 
-            # Capture original_sid before the swap, then wait for claude
-            # to be rebound to the target session.
+            # Wait for claude to be rebound to the target session.
             for _ in range(500):
                 c = fake_claude_holder.get("client")
-                if c is not None:
-                    if original_sid is None:
-                        original_sid = c.session_id
-                    if c.session_id == target_id:
-                        break
+                if c is not None and c.session_id == target_id:
+                    break
                 await real_sleep(0.01)
 
+            # The abandoned session is the only non-target row: lazy
+            # creation wrote it, then load_session swapped the binding.
+            rows_check = SessionStore.open(db_path)
+            try:
+                all_rows = await rows_check.list_sessions()
+            finally:
+                await rows_check.close()
+            non_target = [r["id"] for r in all_rows if r["id"] != target_id]
+            assert non_target, "lazy creation never fired — no non-target session row"
+            original_sid = non_target[0]
+
             # Give the background summary task time to write.
-            assert original_sid is not None
             for _ in range(200):
                 store_check = SessionStore.open(db_path)
                 try:
