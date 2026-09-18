@@ -103,7 +103,7 @@ class _FakeSTTSession:
             yield ev
         # Hold open so the session doesn't tear down once we run out of
         # canned events — pull_stt_events returning would otherwise let
-        # on_session's FIRST_COMPLETED cancel an in-flight drive_turns
+        # on_session's FIRST_COMPLETED cancel an in-flight turn
         # before its TTS chunk reaches the speaker. asyncio.sleep can't
         # be used here because tests patch meeko.main.asyncio.sleep
         # (which is the global asyncio.sleep) to short-circuit long
@@ -2413,7 +2413,7 @@ async def test_puller_keeps_draining_events_while_worker_is_in_tts(
     monkeypatch, fake_profiles, tmp_path
 ):
     """Regression test for the queue-backpressure bug. While
-    drive_turns is parked awaiting TTS, pull_stt_events must keep
+    the turn worker is parked awaiting TTS, pull_stt_events must keep
     consuming events from stt_session.events() so the underlying
     websockets recv queue doesn't fill and starve pong frames."""
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
@@ -2430,7 +2430,7 @@ async def test_puller_keeps_draining_events_while_worker_is_in_tts(
     fake_stt = _QueueDrivenSTTClient("dg-test")
 
     # TTS that yields one chunk and then blocks until the test releases
-    # it — keeps drive_turns parked in speak_stream.
+    # it — keeps the turn worker parked in speak_stream.
     release_tts = asyncio.Event()
 
     class _SlowTTS:
@@ -2484,11 +2484,11 @@ async def test_puller_keeps_draining_events_while_worker_is_in_tts(
                 SimpleNamespace(event="EndOfTurn", transcript="hello")
             )
 
-            # Wait until drive_turns has actually entered TTS — the
+            # Wait until the turn worker has actually entered TTS — the
             # first chunk reaching the speaker proves it.
             await asyncio.wait_for(first_write.wait(), timeout=5)
 
-            # While drive_turns is parked awaiting `release_tts`, push a
+            # While the turn worker is parked awaiting `release_tts`, push a
             # batch of events. If pull_stt_events were parked too (the
             # old behavior), `observed` would not grow; the queue would
             # fill and block on `put`. With the fix, all events are
@@ -2504,7 +2504,7 @@ async def test_puller_keeps_draining_events_while_worker_is_in_tts(
             )
             assert len(session.observed) >= baseline + 50
 
-            # drive_turns must still be in TTS (not advanced past it).
+            # The turn worker must still be in TTS (not advanced past it).
             assert fake_claude_holder["client"].turns == ["hello"]
         finally:
             release_tts.set()
@@ -2681,7 +2681,7 @@ async def test_endofturn_while_idle_does_not_drive_a_turn(
             )
             await _wait_until(lambda: len(session.observed) >= 1, real_sleep=real_sleep)
 
-            # Give drive_turns a few scheduling cycles to be wrong if it
+            # Give the turn worker a few scheduling cycles to be wrong if it
             # were going to. It shouldn't run — turn was filtered.
             for _ in range(20):
                 await real_sleep(0.001)
@@ -2920,7 +2920,7 @@ async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
     monkeypatch, fake_profiles, tmp_path, caplog
 ):
     """An EndOfTurn arriving before the barge-in cancel has propagated
-    through drive_turns must still be processed as a real turn, not
+    through the turn worker must still be processed as a real turn, not
     dropped as `[echo?]`. request_barge_in() flips state to LISTENING
     synchronously so pull_stt_events sees the right state when it drains
     the EndOfTurn that follows StartOfTurn."""

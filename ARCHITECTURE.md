@@ -142,7 +142,7 @@ Session-management intents — end, new, list, and load (resume) — are exposed
 2. After Sonnet's verbal confirmation/wrap-up is fully spoken (SPEAKING ends), fires the abandoned session's summary in the background, calls `store.load_turns(target_id)`, swaps the in-memory message array via `claude.load_history`, and `claude.rebind_session(target_id)`.
 3. Subsequent turns hit the cache with the injected history (one-time cache-write cost on the first post-load turn).
 
-See the post-turn block in [meeko/main.py](meeko/main.py).
+See `_apply_post_turn_session_change` in [meeko/main.py](meeko/main.py), which `TurnWorker` ([meeko/turn_worker.py](meeko/turn_worker.py)) calls once each turn's speech has finished.
 
 ### 4.6 Wake-word gating
 
@@ -247,6 +247,8 @@ Responsible for storing and retrieving sessions. See §6 for the full data model
 The PROCESSING case matters as much as the SPEAKING one: the window between `EndOfTurn` and the first audio byte (Claude TTFT + Deepgram TTS first-byte synthesis) is often over a second, and `Speaker` deliberately defers entering SPEAKING until that first chunk arrives so the LEDs don't claim to be talking before there's audio. A user who changes their mind during that gap is barging in on a reply that exists but isn't audible yet, and is handled identically.
 
 Hardware AEC (on the XVF3800) ensures Deepgram STT does not hear speaker audio as user speech. `StartOfTurn` events during TTS playback are therefore genuine barge-ins, not echo artifacts. On hardware without AEC, software mic-muting (`mute_mic_while_speaking = true`) provides the equivalent guarantee at the cost of disallowing barge-in.
+
+Barge-in is implemented in `TurnWorker` ([meeko/turn_worker.py](meeko/turn_worker.py)), the long-lived consumer of the turn queue. Each Claude+TTS turn runs as its own sub-task, so `request_barge_in()` can cancel that turn without stopping the worker. The worker lives at `run()` scope, outside the per-STT-session workers, so an STT reconnect mid-reply doesn't cut TTS off. A barge-in cancel and a shutdown cancel both reach the worker as a `CancelledError` from the turn. The first must leave the worker running and the second must propagate, and a flag set by `request_barge_in()` before it cancels is the only thing that tells them apart. `stop_event` can't be used, because asyncio's shutdown cancels the worker before `run()`'s `finally` sets it. `request_barge_in()` also switches to LISTENING synchronously, with or without a turn to cancel, because `SttEventRouter` handles the `EndOfTurn` that follows without yielding, and in SPEAKING that transcript would be dropped as echo.
 
 ---
 
