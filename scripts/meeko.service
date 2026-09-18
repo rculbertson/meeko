@@ -16,6 +16,13 @@ RestartSec=5
 # Give Meeko time to drain TTS and finalize the session on stop.
 TimeoutStopSec=20
 KillSignal=SIGINT
+# Signal only the main process (uv), which forwards SIGINT to Python once.
+# With the default KillMode=control-group, systemd also signals Python
+# directly, so it gets SIGINT twice: the first triggers the clean
+# shutdown, the second lands after the handler is gone and kills it,
+# and the unit reports "failed" (exit 130) after every normal stop.
+# Anything still alive at TimeoutStopSec is SIGKILLed as before.
+KillMode=mixed
 
 [Install]
 WantedBy=default.target
