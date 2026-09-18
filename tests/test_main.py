@@ -136,7 +136,23 @@ class _FakeTTSClient:
 
 
 class _FakeClaudeClient:
-    def __init__(self, api_key, system_prompt, dispatcher, **kwargs):
+    """Stands in for ClaudeClient. Each turn replies with `reply`, then
+    dispatches `tool_calls` (``(name, args)`` pairs) in order, the way Sonnet
+    acknowledges before a session tool fires. With `persist=False` the turn
+    skips lazy session creation and persistence, as if Sonnet called the
+    tools before any turn was saved. `_tool_calling_claude` builds these."""
+
+    def __init__(
+        self,
+        api_key,
+        system_prompt,
+        dispatcher,
+        *,
+        reply="Hi.",
+        tool_calls=(),
+        persist=True,
+        **kwargs,
+    ):
         self.api_key = api_key
         self.system_prompt = system_prompt
         self.dispatcher = dispatcher
@@ -146,28 +162,31 @@ class _FakeClaudeClient:
         self.turns: list[str] = []
         self.loaded_history: list[dict] | None = None
         self.reset_count = 0  # incremented each time reset_session() is called
+        self._reply = reply
+        self._tool_calls = tool_calls
+        self._persist = persist
 
     def stream_turn(self, text):
         self.turns.append(text)
-        store = self.store
-        create_fn = self._create_session_fn
+        return self._turn(text)
 
-        async def _gen():
-            # Mirror the real ClaudeClient's lazy session creation + persistence
-            # so downstream consumers (end-of-session summarization) see a
-            # turn log and tests cover the lazy-create path.
-            if store is not None:
-                if self.session_id is None and create_fn is not None:
-                    self.session_id = await create_fn()
-                if self.session_id is not None:
-                    await store.persist_turn(self.session_id, "user", text)
-            yield "Hi."
-            if store is not None and self.session_id is not None:
-                await store.persist_turn(
-                    self.session_id, "assistant", [{"type": "text", "text": "Hi."}]
-                )
-
-        return _gen()
+    async def _turn(self, text):
+        # Mirror the real ClaudeClient's lazy session creation + persistence
+        # so downstream consumers (end-of-session summarization) see a
+        # turn log and tests cover the lazy-create path.
+        store = self.store if self._persist else None
+        if store is not None:
+            if self.session_id is None and self._create_session_fn is not None:
+                self.session_id = await self._create_session_fn()
+            if self.session_id is not None:
+                await store.persist_turn(self.session_id, "user", text)
+        yield self._reply
+        if store is not None and self.session_id is not None:
+            await store.persist_turn(
+                self.session_id, "assistant", [{"type": "text", "text": self._reply}]
+            )
+        for name, args in self._tool_calls:
+            await self.dispatcher.dispatch(name, args)
 
     def load_history(self, messages):
         self.loaded_history = list(messages)
@@ -182,6 +201,17 @@ class _FakeClaudeClient:
 
     def set_system_prompt(self, prompt):
         self.system_prompt = prompt
+
+
+def _tool_calling_claude(reply, *tool_calls, persist=True):
+    """A `claude=` factory for `_running_meeko` whose turn replies with
+    `reply` and then dispatches each ``(name, args)`` in `tool_calls`."""
+    return functools.partial(
+        _FakeClaudeClient, reply=reply, tool_calls=tool_calls, persist=persist
+    )
+
+
+_END_SESSION = _tool_calling_claude("Goodnight!", ("end_session", {}))
 
 
 @pytest.fixture(autouse=True)
@@ -922,77 +952,6 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
         assert tts.calls == []
 
 
-class _SessionToolClaudeClient(_FakeClaudeClient):
-    """Simulates Sonnet calling a session-management tool mid-turn: yields a
-    brief acknowledgement AND dispatches the named tool. Mirrors the real
-    flow where the assistant acknowledges verbally before the tool fires.
-
-    Subclasses override ``TOOL_NAME`` / ``ACK`` to pick which tool to call.
-    """
-
-    TOOL_NAME = "end_session"
-    ACK = "Goodnight!"
-
-    def stream_turn(self, text):
-        self.turns.append(text)
-        dispatcher = self.dispatcher
-        tool_name = self.TOOL_NAME
-        ack = self.ACK
-        store = self.store
-        create_fn = self._create_session_fn
-
-        async def _gen():
-            if store is not None:
-                if self.session_id is None and create_fn is not None:
-                    self.session_id = await create_fn()
-                if self.session_id is not None:
-                    await store.persist_turn(self.session_id, "user", text)
-            yield ack
-            if store is not None and self.session_id is not None:
-                await store.persist_turn(
-                    self.session_id, "assistant", [{"type": "text", "text": ack}]
-                )
-            await dispatcher.dispatch(tool_name, {})
-
-        return _gen()
-
-
-class _EndSessionClaudeClient(_SessionToolClaudeClient):
-    TOOL_NAME = "end_session"
-    ACK = "Goodnight!"
-
-
-class _NewSessionClaudeClient(_SessionToolClaudeClient):
-    TOOL_NAME = "new_session"
-    ACK = "Starting fresh."
-
-
-class _SwitchThenNewSessionClaudeClient(_FakeClaudeClient):
-    """Simulates Sonnet dispatching `switch_profile` and then
-    `new_session` in a single turn. Used to verify the fresh SQLite row
-    records the switched profile, not the original one."""
-
-    SWITCH_TO = "pirate"
-
-    def stream_turn(self, text):
-        self.turns.append(text)
-        dispatcher = self.dispatcher
-        switch_to = self.SWITCH_TO
-        store = self.store
-        create_fn = self._create_session_fn
-
-        async def _gen():
-            if store is not None and self.session_id is None and create_fn is not None:
-                self.session_id = await create_fn()
-            if store is not None and self.session_id is not None:
-                await store.persist_turn(self.session_id, "user", text)
-            yield "Okay, switching and starting fresh."
-            await dispatcher.dispatch("switch_profile", {"profile_name": switch_to})
-            await dispatcher.dispatch("new_session", {})
-
-        return _gen()
-
-
 class _HoldingSTTClient:
     """Holds a single EndOfTurn until a `ready` event is set, then blocks
     the events() generator until the test cancels the task. Prevents
@@ -1050,7 +1009,7 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
     async with _running_meeko(
         {"query": _profile()},
         stt=stt,
-        claude=_EndSessionClaudeClient,
+        claude=_END_SESSION,
         detector=_FakeDetector,
     ) as h:
         # Drive: the first mic chunk fires the wake detector → LISTENING.
@@ -1123,9 +1082,7 @@ async def test_end_session_without_wake_word_transitions_to_listening(
     stt = _HoldingSTTClient("dg-test")
     stt.transcript = "stop"
 
-    async with _running_meeko(
-        fake_profiles, stt=stt, claude=_EndSessionClaudeClient
-    ) as h:
+    async with _running_meeko(fake_profiles, stt=stt, claude=_END_SESSION) as h:
         # Wake word disabled → state starts in LISTENING, so we can
         # release the EndOfTurn immediately.
         await h.stt_session()
@@ -1151,7 +1108,7 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
     async with _running_meeko(
         {"query": _profile()},
         stt=stt,
-        claude=_NewSessionClaudeClient,
+        claude=_tool_calling_claude("Starting fresh.", ("new_session", {})),
         detector=_FakeDetector,
     ) as h:
         await h.wake()
@@ -1180,9 +1137,7 @@ async def test_end_session_fires_background_summary_for_finalized_session(
     stt = _HoldingSTTClient("dg-test")
     stt.transcript = "stop"
 
-    async with _running_meeko(
-        fake_profiles, stt=stt, claude=_EndSessionClaudeClient
-    ) as h:
+    async with _running_meeko(fake_profiles, stt=stt, claude=_END_SESSION) as h:
         await h.stt_session()
         stt.ready.set()
         await h.claude_reset()
@@ -1229,7 +1184,13 @@ async def test_new_session_after_profile_switch_records_active_profile(
     stt.transcript = "switch to pirate and start fresh"
 
     async with _running_meeko(
-        two_profiles, stt=stt, claude=_SwitchThenNewSessionClaudeClient
+        two_profiles,
+        stt=stt,
+        claude=_tool_calling_claude(
+            "Okay, switching and starting fresh.",
+            ("switch_profile", {"profile_name": "pirate"}),
+            ("new_session", {}),
+        ),
     ) as h:
         await h.stt_session()
         stt.ready.set()
@@ -1249,136 +1210,17 @@ async def test_new_session_after_profile_switch_records_active_profile(
     )
 
 
-class _EndSessionNoTurnClaudeClient(_FakeClaudeClient):
-    """Dispatches end_session without creating a session row first.
-
-    Simulates Sonnet ending the session before any user turn is persisted
-    (lazy creation never fires). Used to verify fire_summary no-ops on None."""
-
-    def stream_turn(self, text):
-        self.turns.append(text)
-        dispatcher = self.dispatcher
-
-        async def _gen():
-            yield "Goodbye."
-            await dispatcher.dispatch("end_session", {})
-
-        return _gen()
-
-
-class _LoadSessionWithTurnClaudeClient(_FakeClaudeClient):
-    """Lazily creates a session, persists a turn, then dispatches load_session.
-
-    Ensures session_id is non-None when the post-turn hook runs so the
-    `if session_id is not None: logger.info(...)` branch in
-    apply_post_turn_session_change is exercised."""
-
-    def __init__(self, *args, target_session_id="", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.target_session_id = target_session_id
-
-    def stream_turn(self, text):
-        self.turns.append(text)
-        dispatcher = self.dispatcher
-        target_id = self.target_session_id
-        store = self.store
-        create_fn = self._create_session_fn
-
-        async def _gen():
-            if store is not None and self.session_id is None and create_fn is not None:
-                self.session_id = await create_fn()
-            if store is not None and self.session_id is not None:
-                await store.persist_turn(self.session_id, "user", text)
-            yield "Let me pull that up."
-            if store is not None and self.session_id is not None:
-                await store.persist_turn(
-                    self.session_id,
-                    "assistant",
-                    [{"type": "text", "text": "Let me pull that up."}],
-                )
-            await dispatcher.dispatch("load_session", {"id": target_id})
-
-        return _gen()
-
-
-class _LoadSessionClaudeClient(_SessionToolClaudeClient):
-    """Simulates Sonnet calling load_session with a specific target id.
-
-    The target session_id must be set on the instance before use."""
-
-    TOOL_NAME = "load_session"
-    ACK = "Picking up where we left off."
-
-    def __init__(self, *args, target_session_id="", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.target_session_id = target_session_id
-
-    def stream_turn(self, text):
-        self.turns.append(text)
-        dispatcher = self.dispatcher
-        target_id = self.target_session_id
-        ack = self.ACK
-        store = self.store
-        sid = self.session_id
-
-        async def _gen():
-            if store is not None and sid is not None:
-                await store.persist_turn(sid, "user", text)
-            yield ack
-            if store is not None and sid is not None:
-                await store.persist_turn(
-                    sid, "assistant", [{"type": "text", "text": ack}]
-                )
-            await dispatcher.dispatch("load_session", {"id": target_id})
-
-        return _gen()
-
-
-class _EndThenLoadSessionClaudeClient(_FakeClaudeClient):
-    """Simulates Sonnet chaining end_session + load_session in one turn.
-
-    Lazily creates and persists the current session first (like the real
-    client), so there is an abandoned session for the summary to cover.
-    Used to verify that the summary fires for the current session before
-    history is swapped to the target."""
-
-    ACK = "Wrapping up and switching over."
-
-    def __init__(self, *args, target_session_id="", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.target_session_id = target_session_id
-
-    def stream_turn(self, text):
-        self.turns.append(text)
-        dispatcher = self.dispatcher
-        target_id = self.target_session_id
-        ack = self.ACK
-        store = self.store
-        create_fn = self._create_session_fn
-
-        async def _gen():
-            if store is not None and self.session_id is None and create_fn is not None:
-                self.session_id = await create_fn()
-            if store is not None and self.session_id is not None:
-                await store.persist_turn(self.session_id, "user", text)
-            yield ack
-            if store is not None and self.session_id is not None:
-                await store.persist_turn(
-                    self.session_id, "assistant", [{"type": "text", "text": ack}]
-                )
-            await dispatcher.dispatch("end_session", {})
-            await dispatcher.dispatch("load_session", {"id": target_id})
-
-        return _gen()
-
-
 async def test_load_session_tool_swaps_history_and_stays_listening(
     monkeypatch, fake_profiles, tmp_path
 ):
     """User says 'go back to the todo session' → Sonnet calls load_session →
     after SPEAKING, claude.load_history is populated from the target session's
     turns, the client is rebound to target's session_id, and the abandoned
-    session is summarized in the background so it stays in the recall index."""
+    session is summarized in the background so it stays in the recall index.
+
+    The abandoned session already has turns, so session_id is non-None when
+    the post-turn hook runs: this also covers the summary log branch in
+    apply_post_turn_session_change."""
     db_path = _set_env(monkeypatch, tmp_path)
     target_id = await _seed_session(
         db_path,
@@ -1394,14 +1236,19 @@ async def test_load_session_tool_swaps_history_and_stays_listening(
     async with _running_meeko(
         fake_profiles,
         stt=stt,
-        claude=functools.partial(_LoadSessionClaudeClient, target_session_id=target_id),
+        claude=_tool_calling_claude(
+            "Picking up where we left off.", ("load_session", {"id": target_id})
+        ),
     ) as h:
         await h.stt_session()
         stt.ready.set()
         await _wait_until(
             lambda: h.claude is not None and h.claude.session_id == target_id
         )
+        original_sid = await _abandoned_session(db_path, target_id)
+        title = await _wait_for_title(db_path, original_sid)
 
+    assert title == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
     assert h.claude.session_id == target_id
     assert h.claude.loaded_history == [
         {"role": "user", "content": "let's plan a todo app"},
@@ -1429,8 +1276,10 @@ async def test_end_then_load_session_fires_summary_for_current_session(
     async with _running_meeko(
         fake_profiles,
         stt=stt,
-        claude=functools.partial(
-            _EndThenLoadSessionClaudeClient, target_session_id=target_id
+        claude=_tool_calling_claude(
+            "Wrapping up and switching over.",
+            ("end_session", {}),
+            ("load_session", {"id": target_id}),
         ),
     ) as h:
         await h.stt_session()
@@ -1766,7 +1615,9 @@ async def test_end_session_before_any_turn_fire_summary_is_noop(
     stt.transcript = "stop"
 
     async with _running_meeko(
-        fake_profiles, stt=stt, claude=_EndSessionNoTurnClaudeClient
+        fake_profiles,
+        stt=stt,
+        claude=_tool_calling_claude("Goodbye.", ("end_session", {}), persist=False),
     ) as h:
         await h.stt_session()
         stt.ready.set()
@@ -1775,39 +1626,3 @@ async def test_end_session_before_any_turn_fire_summary_is_noop(
     # No session row was created — lazy creation never fired and
     # fire_summary(None) was a no-op rather than crashing.
     assert await _list_sessions(db_path) == []
-
-
-async def test_load_session_when_current_session_has_turns_fires_summary(
-    monkeypatch, fake_profiles, tmp_path
-):
-    """load_session fires after the current session already has turns.
-    session_id is non-None so the summary log branch (in
-    apply_post_turn_session_change) and fire_summary are both exercised."""
-    db_path = _set_env(monkeypatch, tmp_path)
-    target_id = await _seed_session(
-        db_path,
-        title="Prior session",
-        summary="We discussed things.",
-        transcript="USER: prior question\nASSISTANT: prior answer",
-    )
-    stt = _HoldingSTTClient("dg-test")
-    stt.transcript = "go back to the prior session"
-
-    async with _running_meeko(
-        fake_profiles,
-        stt=stt,
-        claude=functools.partial(
-            _LoadSessionWithTurnClaudeClient, target_session_id=target_id
-        ),
-    ) as h:
-        await h.stt_session()
-        stt.ready.set()
-        await _wait_until(
-            lambda: h.claude is not None and h.claude.session_id == target_id
-        )
-        original_sid = await _abandoned_session(db_path, target_id)
-        # The original (non-target) session is summarized by fire_summary.
-        title = await _wait_for_title(db_path, original_sid)
-
-    assert title == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
-    assert h.claude.session_id == target_id
