@@ -32,7 +32,7 @@ from meeko.tools.session import SessionManager
 logger = logging.getLogger("meeko")
 
 # Sentinel posted to the turn queue by the idle-timeout monitor to wake
-# drive_turns and run post-turn session handling (which finalizes the
+# the turn worker and run post-turn session handling (which finalizes the
 # session) without spending a Claude/TTS round-trip first.
 IDLE_TIMEOUT_SENTINEL: object = object()
 

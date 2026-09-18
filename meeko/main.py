@@ -24,7 +24,6 @@ import logging.handlers
 import os
 import signal
 import sys
-import time
 from collections.abc import Callable
 from datetime import datetime
 
@@ -42,7 +41,7 @@ from meeko.config import (
 )
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
-from meeko.idle import IDLE_TIMEOUT_SENTINEL, IdleController
+from meeko.idle import IdleController
 from meeko.leds import LedController
 from meeko.mic_pump import MicPump
 from meeko.session_summary import SummaryScheduler
@@ -68,6 +67,7 @@ from meeko.tools.timer import timer_manager
 from meeko.tools.weather import get_tool_definitions as weather_tools
 from meeko.tools.weather import handle as weather_handle
 from meeko.tools.weather import weather_client
+from meeko.turn_worker import TurnWorker
 from meeko.wake_word import WakeWordDetector
 
 LOG_FILE = "meeko.log"
@@ -444,7 +444,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     # Unbounded: payloads are short transcript strings, and a long
     # backlog would only happen if Claude fell catastrophically behind,
     # which is a separate problem. Also carries IDLE_TIMEOUT_SENTINEL
-    # from the idle monitor to ask drive_turns to run post-turn session
+    # from the idle monitor to ask the turn worker to run post-turn session
     # handling without a Claude round-trip.
     turn_queue: asyncio.Queue[str | object] = asyncio.Queue()
 
@@ -459,40 +459,29 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         speak=speaker.speak,
     )
 
-    # Set in drive_turns while a Claude+TTS turn is running so
-    # request_barge_in() can cancel just that turn without tearing down
-    # the long-lived drive_turns worker.
-    current_speak_task: asyncio.Task | None = None
-    # Set by request_barge_in() so drive_turns can tell the difference
-    # between a real barge-in (continue worker) and a shutdown cancel
-    # (re-raise). Checking stop_event isn't reliable because asyncio
-    # shutdown cancels drive_turns_task directly, before run()'s finally
-    # has a chance to set stop_event.
-    barge_in_requested = False
+    async def apply_session_change() -> State:
+        return await _apply_post_turn_session_change(
+            session_manager=session_manager,
+            profile_manager=profile_manager,
+            claude=claude,
+            store=store,
+            wake_detector=wake_detector,
+            session_id=claude.session_id,
+            fire_summary=summaries.fire,
+        )
 
-    def request_barge_in() -> None:
-        """Cancel the in-flight speak task, if any. Called from
-        SttEventRouter when StartOfTurn fires during SPEAKING (the
-        assistant is talking) or PROCESSING (the assistant's reply is
-        still being generated; user has changed their mind)."""
-        nonlocal barge_in_requested
-        # Flip state synchronously so any EndOfTurn arriving before the
-        # cancel propagates through drive_turns isn't dropped as echo
-        # by the router. This must happen even when there's no
-        # current_speak_task (e.g. a timer chime is playing via
-        # speaker.speak() — that path enters SPEAKING but is not
-        # cancellable from here): the chime keeps playing, but the
-        # user's interruption is at least captured into turn_queue
-        # instead of silently dropped. drive_turns and speak_stream's
-        # exit_speaking will re-assert LISTENING when they unwind; the
-        # brief PROCESSING window in between is harmless (PROCESSING-
-        # state EndOfTurns are queued normally).
-        idle.cancel()
-        state_manager.set(State.LISTENING)
-        if current_speak_task is not None and not current_speak_task.done():
-            logger.info("Barge-in: cancelling in-flight reply")
-            barge_in_requested = True
-            current_speak_task.cancel()
+    # Drives Claude + TTS for queued user turns and owns barge-in: its
+    # request_barge_in cancels just the in-flight turn. See
+    # meeko/turn_worker.py.
+    turn_worker = TurnWorker(
+        turn_queue=turn_queue,
+        state_manager=state_manager,
+        idle=idle,
+        leds=leds,
+        start_turn=lambda text: speaker.speak_stream(claude.stream_turn(text)),
+        apply_session_change=apply_session_change,
+        stop_event=stop_event,
+    )
 
     # Drains the mic queue into the wake detector or the STT session.
     mic_pump = MicPump(
@@ -505,98 +494,17 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     )
 
     # Routes STT turn events into state changes and queued user turns.
-    # Constructed here because it needs request_barge_in above.
+    # Constructed here because it needs turn_worker above.
     stt_router = SttEventRouter(
         state_manager=state_manager,
         idle=idle,
         turn_queue=turn_queue,
-        request_barge_in=request_barge_in,
+        request_barge_in=turn_worker.request_barge_in,
         stop_event=stop_event,
     )
 
-    async def drive_turns():
-        """Drive Claude + TTS for queued user turns, one at a time."""
-        nonlocal current_speak_task, barge_in_requested
-        while not stop_event.is_set():
-            item = await turn_queue.get()
-            idle.cancel()
-            if item is IDLE_TIMEOUT_SENTINEL:
-                # Idle window expired without user activity; IdleController
-                # already set session_manager.request_end(). Run the
-                # post-turn block to finalize and (with wake word) return
-                # to IDLE. No Claude/TTS round-trip on this path, so we
-                # do not start a fresh idle window after.
-                new_state = await _apply_post_turn_session_change(
-                    session_manager=session_manager,
-                    profile_manager=profile_manager,
-                    claude=claude,
-                    store=store,
-                    wake_detector=wake_detector,
-                    session_id=claude.session_id,
-                    fire_summary=summaries.fire,
-                )
-                state_manager.set(new_state)
-                continue
-            text = item
-            assert isinstance(text, str)
-            logger.info("[user] %s", text)
-            state_manager.set(State.PROCESSING)
-            t_turn = time.perf_counter()
-            # Run the turn as a sub-task so request_barge_in() can
-            # cancel just this turn without tearing down drive_turns.
-            current_speak_task = asyncio.create_task(
-                speaker.speak_stream(claude.stream_turn(text))
-            )
-            try:
-                await current_speak_task
-            except asyncio.CancelledError:
-                # speak_stream's finally already flushed TTS subtasks
-                # and exit_speaking() restored state. Distinguish a real
-                # barge-in (continue worker) from a shutdown cancel
-                # (re-raise) by the explicit flag — stop_event is racy
-                # because asyncio's shutdown cancels drive_turns_task
-                # before run()'s finally has set it.
-                state_manager.set(State.LISTENING)
-                current_speak_task = None
-                if not barge_in_requested:
-                    raise
-                barge_in_requested = False
-                logger.info("Barge-in: turn cancelled, returning to LISTENING")
-                continue
-            except Exception:
-                logger.exception("Claude turn failed")
-                # Set state first so the worker applies LISTENING before
-                # the error animation, and the post-flash restore picks
-                # up LISTENING as _current_state. Reversing the order
-                # makes _sleep_or_interrupt see the queued state action
-                # and abort the breath immediately.
-                state_manager.set(State.LISTENING)
-                leds.error()
-                current_speak_task = None
-                continue
-            current_speak_task = None
-            logger.debug(
-                "[timing] turn_total_eot_to_speak_done=%dms",
-                int((time.perf_counter() - t_turn) * 1000),
-            )
-            new_state = await _apply_post_turn_session_change(
-                session_manager=session_manager,
-                profile_manager=profile_manager,
-                claude=claude,
-                store=store,
-                wake_detector=wake_detector,
-                session_id=claude.session_id,
-                fire_summary=summaries.fire,
-            )
-            # Start the post-turn idle window. Only when state is
-            # LISTENING — IDLE means the session already ended and the
-            # next interaction needs the wake word.
-            if new_state == State.LISTENING:
-                idle.start_post_turn()
-            state_manager.set(new_state)
-
     async def on_session(stt_session) -> None:
-        # drive_turns is intentionally NOT in this group — it lives at
+        # The turn worker is intentionally NOT in this group — it lives at
         # run() scope and outlives individual STT sessions, so an STT
         # blip mid-reply doesn't cut TTS off mid-sentence and doesn't
         # lose the in-flight turn. The session-scoped workers are the
@@ -620,7 +528,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     # Long-lived turn worker — survives STT reconnects so a connection
     # blip mid-reply doesn't truncate TTS or lose the in-flight turn.
-    drive_turns_task = asyncio.create_task(drive_turns())
+    turn_worker_task = asyncio.create_task(turn_worker.run())
 
     try:
         await supervisor.run()
@@ -629,9 +537,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     finally:
         stop_event.set()
         await idle.aclose()
-        drive_turns_task.cancel()
+        turn_worker_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
-            await drive_turns_task
+            await turn_worker_task
         timer_manager.cancel_all_timers()
         # Before store.close(): an in-flight summary would otherwise write
         # into a closed SQLite connection.
