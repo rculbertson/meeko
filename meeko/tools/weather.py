@@ -21,7 +21,9 @@ Two modes, selected by the `hourly` flag:
 """
 
 import logging
+from collections.abc import Awaitable, Iterable, Iterator
 from datetime import UTC, date, datetime, timedelta
+from itertools import islice
 from typing import Any
 
 import httpx
@@ -133,6 +135,47 @@ def _now_hour_local(forecast: dict[str, Any], is_today: bool) -> int | None:
     return _now_local(forecast).hour
 
 
+def _hourly_series(
+    hourly: dict[str, Any], *keys: str
+) -> Iterator[tuple[datetime, tuple[Any, ...]]]:
+    """Walk Open-Meteo's parallel hourly arrays row by row.
+
+    Yields `(timestamp, values)` with one value per key, in order. Rows whose
+    timestamp doesn't parse are skipped; a value array shorter than `time`
+    yields `None` past its end rather than raising.
+    """
+    times = hourly.get("time") or []
+    series = [hourly.get(k) or [] for k in keys]
+    for i, t in enumerate(times):
+        try:
+            dt = datetime.fromisoformat(t)
+        except TypeError, ValueError:
+            continue
+        yield dt, tuple(s[i] if i < len(s) else None for s in series)
+
+
+def _is_wet(prob: Any, amt: Any) -> bool:
+    """Probability decides when present; otherwise any measurable amount."""
+    if prob is not None:
+        return prob >= _PRECIP_PROB_THRESHOLD
+    return amt is not None and amt > 0
+
+
+def _wet_runs(hours: Iterable[tuple[datetime, bool]]) -> list[list[datetime]]:
+    """Group consecutive wet hours into runs; a dry hour ends a run."""
+    runs: list[list[datetime]] = []
+    run: list[datetime] = []
+    for dt, wet in hours:
+        if wet:
+            run.append(dt)
+        elif run:
+            runs.append(run)
+            run = []
+    if run:
+        runs.append(run)
+    return runs
+
+
 def _precip_window(hourly: dict[str, Any], *, now_hour: int | None) -> str:
     """Scan one day of hourly data and describe when precipitation is likely.
 
@@ -142,36 +185,61 @@ def _precip_window(hourly: dict[str, Any], *, now_hour: int | None) -> str:
     skipped so we don't report rain that supposedly happened this morning.
     Pass `None` for a future day, where every hour is still ahead.
     """
-    times = hourly.get("time") or []
-    probs = hourly.get("precipitation_probability") or []
-    amts = hourly.get("precipitation") or []
+    hours = (
+        (dt, _is_wet(prob, amt))
+        for dt, (prob, amt) in _hourly_series(
+            hourly, "precipitation_probability", "precipitation"
+        )
+        if now_hour is None or dt.hour >= now_hour
+    )
+    return " and ".join(_fmt_run(r) for r in _wet_runs(hours))
 
-    runs: list[list[datetime]] = []
-    run: list[datetime] = []
-    for i, t in enumerate(times):
-        try:
-            dt = datetime.fromisoformat(t)
-        except TypeError, ValueError:
-            continue
-        if now_hour is not None and dt.hour < now_hour:
-            continue
-        prob = probs[i] if i < len(probs) else None
-        amt = amts[i] if i < len(amts) else None
-        if prob is not None:
-            wet = prob >= _PRECIP_PROB_THRESHOLD
-        else:
-            wet = amt is not None and amt > 0
-        if wet:
-            run.append(dt)
-        elif run:
-            runs.append(run)
-            run = []
-    if run:
-        runs.append(run)
 
-    if not runs:
-        return ""
-    return " and ".join(_fmt_run(r) for r in runs)
+class _FriendlyError(Exception):
+    """A friendly message to hand back to Sonnet in place of a forecast.
+
+    `get_weather` catches it and returns the message, so the tool never raises
+    and the tool-use turn stays intact.
+    """
+
+
+def _resolve_date(date_str: str | None, today: date) -> date:
+    """The requested forecast day: today by default, else up to
+    `_MAX_FORECAST_DAYS` ahead."""
+    if date_str is None:
+        return today
+    try:
+        req_date = date.fromisoformat(date_str)
+    except TypeError, ValueError:
+        raise _FriendlyError(
+            "I didn't understand that date. Try asking for a specific day."
+        ) from None
+    delta = (req_date - today).days
+    if delta < 0:
+        raise _FriendlyError(
+            "I can only look ahead, not back — try today or a day to come."
+        )
+    if delta > _MAX_FORECAST_DAYS:
+        raise _FriendlyError("I can only forecast about two weeks ahead.")
+    return req_date
+
+
+async def _fetch_guarded(kind: str, fetch: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+    """Await an Open-Meteo fetch, turning network/parse failures into a
+    logged warning and a `_FriendlyError`."""
+    try:
+        return await fetch
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "Weather %s fetch failed (%s): %s",
+            kind,
+            type(exc).__name__,
+            exc or "(no message)",
+            exc_info=True,
+        )
+        raise _FriendlyError(
+            "Sorry, I couldn't reach the weather service right now."
+        ) from None
 
 
 class WeatherClient:
@@ -225,67 +293,49 @@ class WeatherClient:
         date_str: str | None = None,
         hourly: bool = False,
     ) -> str:
-        supplied = [v is not None for v in (latitude, longitude, place_label)]
-        if any(supplied) and not all(supplied):
-            return (
+        try:
+            lat, lon, label = self._resolve_location(latitude, longitude, place_label)
+            today = datetime.now().astimezone().date()
+
+            if hourly:
+                # The window is always "the next 48 hours from now" — any
+                # `date` Sonnet happened to pass alongside is ignored.
+                forecast = await _fetch_guarded("hourly", self._fetch_hourly(lat, lon))
+                return _format_hourly(label, forecast, self._temp_symbol)
+
+            req_date = _resolve_date(date_str, today)
+            forecast = await _fetch_guarded(
+                "forecast", self._fetch_forecast(lat, lon, req_date)
+            )
+            return _format_forecast(label, forecast, req_date, today, self._temp_symbol)
+        except _FriendlyError as exc:
+            return str(exc)
+
+    def _resolve_location(
+        self,
+        latitude: float | None,
+        longitude: float | None,
+        place_label: str | None,
+    ) -> tuple[float, float, str]:
+        """Caller-supplied place if all three args are given, home if none."""
+        supplied = (latitude, longitude, place_label)
+        if supplied == (None, None, None):
+            return self._home_location()
+        if latitude is None or longitude is None or place_label is None:
+            raise _FriendlyError(
                 "To look up a specific place, please supply latitude, "
                 "longitude, and a place label all together."
             )
+        if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
+            raise _FriendlyError("Those coordinates look out of range.")
+        return latitude, longitude, place_label or "there"
 
-        if all(supplied):
-            assert latitude is not None and longitude is not None
-            if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
-                return "Those coordinates look out of range."
-            label = place_label or "there"
-        elif self._latitude is not None and self._longitude is not None:
-            latitude = self._latitude
-            longitude = self._longitude
-            label = "Home"
-        else:
-            return "No home location is configured. Try asking for a specific city."
-
-        today = datetime.now().astimezone().date()
-
-        if hourly:
-            # The window is always "the next 48 hours from now" — any `date`
-            # Sonnet happened to pass alongside is ignored.
-            try:
-                forecast = await self._fetch_hourly(latitude, longitude)
-            except (httpx.HTTPError, ValueError) as exc:
-                logger.warning(
-                    "Weather hourly fetch failed (%s): %s",
-                    type(exc).__name__,
-                    exc or "(no message)",
-                    exc_info=True,
-                )
-                return "Sorry, I couldn't reach the weather service right now."
-            return _format_hourly(label, forecast, self._temp_symbol)
-
-        if date_str is None:
-            req_date = today
-        else:
-            try:
-                req_date = date.fromisoformat(date_str)
-            except TypeError, ValueError:
-                return "I didn't understand that date. Try asking for a specific day."
-            delta = (req_date - today).days
-            if delta < 0:
-                return "I can only look ahead, not back — try today or a day to come."
-            if delta > _MAX_FORECAST_DAYS:
-                return "I can only forecast about two weeks ahead."
-
-        try:
-            forecast = await self._fetch_forecast(latitude, longitude, req_date)
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning(
-                "Weather forecast fetch failed (%s): %s",
-                type(exc).__name__,
-                exc or "(no message)",
-                exc_info=True,
+    def _home_location(self) -> tuple[float, float, str]:
+        if self._latitude is None or self._longitude is None:
+            raise _FriendlyError(
+                "No home location is configured. Try asking for a specific city."
             )
-            return "Sorry, I couldn't reach the weather service right now."
-
-        return _format_forecast(label, forecast, req_date, today, self._temp_symbol)
+        return self._latitude, self._longitude, "Home"
 
     async def _fetch_forecast(
         self, lat: float, lon: float, req_date: date
@@ -405,46 +455,48 @@ def _format_forecast(
 def _format_hourly(place: str, forecast: dict[str, Any], temp_sym: str) -> str:
     """Render up to `_HOURLY_HOURS` rows, one per hour, starting at the current
     hour at the forecast location."""
-    current = forecast.get("current") or {}
     hourly = forecast.get("hourly") or {}
-
-    times = hourly.get("time") or []
-    temps = hourly.get("temperature_2m") or []
-    codes = hourly.get("weather_code") or []
-    probs = hourly.get("precipitation_probability") or []
 
     # Truncate to the hour so the row covering the current hour is included.
     cutoff = _now_local(forecast).replace(minute=0, second=0, microsecond=0)
 
-    rows: list[str] = []
-    for i, t in enumerate(times):
-        try:
-            dt = datetime.fromisoformat(t)
-        except TypeError, ValueError:
-            continue
-        if dt < cutoff:
-            continue
-        temp = _round(temps[i] if i < len(temps) else None)
-        phrase = _wmo_phrase(codes[i] if i < len(codes) else None)
-        row = f"{dt.strftime('%a')} {_fmt_hour(dt)}  {temp}{temp_sym}  {phrase}"
-        prob = probs[i] if i < len(probs) else None
-        if prob is not None:
-            row += f"  {int(prob)}%"
-        rows.append(row)
-        if len(rows) == _HOURLY_HOURS:
-            break
+    series = _hourly_series(
+        hourly, "temperature_2m", "weather_code", "precipitation_probability"
+    )
+    upcoming = ((dt, vals) for dt, vals in series if dt >= cutoff)
+    rows = [
+        _hourly_row(dt, *vals, temp_sym=temp_sym)
+        for dt, vals in islice(upcoming, _HOURLY_HOURS)
+    ]
 
     if not rows:
         return "Sorry, I couldn't get an hourly forecast for there right now."
 
-    header = f"{place}, next {len(rows)} hours"
+    current = forecast.get("current") or {}
+    header = _hourly_header(place, current, len(rows), temp_sym)
+    return header + ":\n" + "\n".join(rows)
+
+
+def _hourly_row(dt: datetime, temp: Any, code: Any, prob: Any, *, temp_sym: str) -> str:
+    """One hourly line, e.g. 'Mon 3 PM  54°F  rain  90%'."""
+    row = f"{dt.strftime('%a')} {_fmt_hour(dt)}  {_round(temp)}{temp_sym}  "
+    row += _wmo_phrase(code)
+    if prob is not None:
+        row += f"  {int(prob)}%"
+    return row
+
+
+def _hourly_header(
+    place: str, current: dict[str, Any], n_rows: int, temp_sym: str
+) -> str:
+    header = f"{place}, next {n_rows} hours"
     cur_temp = current.get("temperature_2m")
     if cur_temp is not None:
         header += (
             f". Currently {_round(cur_temp)}{temp_sym}, "
             f"{_wmo_phrase(current.get('weather_code'))}"
         )
-    return header + ":\n" + "\n".join(rows)
+    return header
 
 
 # Singleton instance. meeko/main.py calls `configure()` on startup.
