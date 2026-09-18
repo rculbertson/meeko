@@ -9,10 +9,12 @@ The state machine itself lives in `meeko/orchestrator/state.py` — see test_sta
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import logging.handlers
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -243,72 +245,312 @@ def fake_profiles():
     }
 
 
-async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles, tmp_path):
+_REAL_SLEEP = asyncio.sleep
+# One stereo int16 frame, as the PyAudio mic callback delivers it.
+_FRAME = b"\x00\x00\x00\x00"
+
+
+async def _fast_sleep(delay, *a, **kw):
+    """Stand-in for `asyncio.sleep` in run(): collapses the long waits (the
+    1s tail drain, reconnect holds) to a yield and keeps short ones real."""
+    if delay >= 1.0:
+        return await _REAL_SLEEP(0)
+    return await _REAL_SLEEP(delay, *a, **kw)
+
+
+async def _wait_until(predicate, *, timeout=5.0, msg="predicate never became true"):
+    """Poll until predicate() is true, or raise TimeoutError(msg). Uses the
+    real asyncio.sleep, so it keeps working while run()'s is patched."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            raise TimeoutError(msg)
+        await _REAL_SLEEP(0.005)
+
+
+def _set_env(monkeypatch, tmp_path, *, wake_word=False) -> Path:
+    """Set the API keys and DB path run() needs; return the DB path.
+    `wake_word=True` undoes the autouse fixture that disables the gate."""
+    db_path = tmp_path / "meeko.db"
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+    if wake_word:
+        monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
+    return db_path
+
+
+def _profile(name="query", **overrides) -> Profile:
+    """A profile with both silence windows off, so the patched asyncio.sleep
+    can't fire them early."""
+    fields = {
+        "name": name,
+        "wake_word": "meeko",
+        "prompt": "system",
+        "voice": None,
+        "idle_timeout_seconds": 0,
+        "post_wake_timeout_seconds": 0,
+    }
+    return Profile(**(fields | overrides))
+
+
+class _FakeDetector:
+    """Wake-word detector that fires on every chunk. Counts `process()` and
+    `reset()` calls; subclasses override `_fires` to change when it fires."""
+
+    def __init__(self, *a, **kw):
+        self.calls = 0
+        self.resets = 0
+
+    def process(self, pcm: bytes) -> bool:
+        self.calls += 1
+        return self._fires()
+
+    def _fires(self) -> bool:
+        return True
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+class _FireOnceDetector(_FakeDetector):
+    def _fires(self) -> bool:
+        return self.calls == 1
+
+
+class _NeverFiresDetector(_FakeDetector):
+    def _fires(self) -> bool:
+        return False
+
+
+class _BlockingTTSClient:
+    """Yields one chunk, then blocks until `release` is set: holds the turn
+    worker in SPEAKING for as long as the test needs."""
+
+    def __init__(self, api_key="dg-test"):
+        self.calls: list[tuple[str, str]] = []
+        self.release = asyncio.Event()
+
+    async def stream(self, text, voice):
+        self.calls.append((text, voice))
+        yield b"\x01\x02\x03\x04"
+        await self.release.wait()
+
+
+class _SignalingSTTClient(_FakeSTTClient):
+    """`_FakeSTTClient` with no canned events that sets `entered` once a
+    session is open, i.e. once run() has finished starting up."""
+
+    def __init__(self, api_key="dg-test"):
+        super().__init__(api_key)
+        self.events = []
+        self.entered = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def session(self):
+        async with super().session() as s:
+            self.entered.set()
+            yield s
+
+
+class _Harness:
+    """What `_running_meeko` hands a test: the run() task, the PyAudio mocks,
+    and the fakes run() was built with (`claude` and `detector` are filled in
+    when run() constructs them)."""
+
+    def __init__(self, stt, tts):
+        self.stt = stt
+        self.tts = tts
+        self.task: asyncio.Task | None = None
+        self.claude = None
+        self.detector = None
+        self.mic_cb = None
+        self.pa = MagicMock()
+        self.mic = MagicMock()
+        self.speaker = MagicMock()
+        self.first_write = asyncio.Event()
+        self.speaker.write.side_effect = lambda data: self.first_write.set()
+        self.pa.open.side_effect = self._open_stream
+
+    def _open_stream(self, **kwargs):
+        if kwargs.get("input"):
+            self.mic_cb = kwargs["stream_callback"]
+            return self.mic
+        return self.speaker
+
+    def push_mic(self, frame=_FRAME) -> None:
+        """Deliver one chunk the way PyAudio's callback thread would."""
+        self.mic_cb(frame, 1, None, 0)
+
+    async def stt_session(self):
+        await _wait_until(
+            lambda: self.stt.session_obj is not None, msg="STT session never opened"
+        )
+        return self.stt.session_obj
+
+    async def wake(self) -> None:
+        """Push one mic chunk once the mic and detector are up, and wait for
+        the detector to see it: with a firing detector, state is LISTENING."""
+        await _wait_until(
+            lambda: self.mic_cb is not None and self.detector is not None,
+            msg="mic stream or wake detector never came up",
+        )
+        self.push_mic()
+        await _wait_until(lambda: self.detector.calls >= 1)
+
+    async def claude_reset(self) -> None:
+        """Wait for a session tool to reset the Claude client (the stable
+        signal that the post-turn session change ran)."""
+        await _wait_until(
+            lambda: self.claude is not None and self.claude.reset_count >= 1,
+            msg="session change never called reset_session",
+        )
+
+
+@contextlib.asynccontextmanager
+async def _running_meeko(
+    profiles,
+    *,
+    stt,
+    tts=None,
+    claude=_FakeClaudeClient,
+    detector=None,
+    sleep=_fast_sleep,
+    extra_patches=(),
+    **run_kwargs,
+):
+    """Run `meeko_main.run(**run_kwargs)` as a task with every external
+    service faked, yield a `_Harness`, and cancel the task on exit.
+
+    `claude` and `detector` are called the way run() calls ClaudeClient and
+    WakeWordDetector; `detector=None` leaves the detector unpatched (fine
+    while the autouse fixture disables the gate). `sleep` replaces
+    `asyncio.sleep` inside run(); None leaves it alone.
+    """
+    h = _Harness(stt, tts if tts is not None else _FakeTTSClient("dg-test"))
+
+    def make_claude(*a, **kw):
+        h.claude = claude(*a, **kw)
+        return h.claude
+
+    def make_detector(*a, **kw):
+        h.detector = detector(*a, **kw)
+        return h.detector
+
+    with contextlib.ExitStack() as stack:
+        for p in (
+            patch("meeko.audio_io.pyaudio.PyAudio", return_value=h.pa),
+            patch("meeko.main.load_profiles", return_value=(profiles, "query")),
+            patch("meeko.main.load_dotenv"),
+            patch("meeko.main.DeepgramSTT", return_value=h.stt),
+            patch("meeko.main.DeepgramTTS", return_value=h.tts),
+            patch("meeko.main.ClaudeClient", side_effect=make_claude),
+            patch("meeko.main.setup_logging"),  # avoid mutating the real logger
+            *extra_patches,
+        ):
+            stack.enter_context(p)
+        if detector is not None:
+            stack.enter_context(
+                patch("meeko.main.WakeWordDetector", side_effect=make_detector)
+            )
+        if sleep is not None:
+            stack.enter_context(patch("meeko.main.asyncio.sleep", new=sleep))
+
+        h.task = asyncio.create_task(meeko_main.run(**run_kwargs))
+        try:
+            yield h
+        finally:
+            h.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await h.task
+
+
+async def _seed_session(
+    db_path, user="prior question", assistant="prior answer", **metadata
+) -> str:
+    """Write a two-turn session (plus summary metadata, if given) and return
+    its id."""
+    from meeko.sessions import SessionStore
+
+    store = SessionStore.open(db_path)
+    try:
+        sid = await store.create_session("query")
+        await store.persist_turn(sid, "user", user)
+        await store.persist_turn(
+            sid, "assistant", [{"type": "text", "text": assistant}]
+        )
+        if metadata:
+            await store.update_session_metadata(sid, **metadata)
+    finally:
+        await store.close()
+    return sid
+
+
+async def _list_sessions(db_path) -> list[dict]:
+    from meeko.sessions import SessionStore
+
+    store = SessionStore.open(db_path)
+    try:
+        return await store.list_sessions()
+    finally:
+        await store.close()
+
+
+async def _abandoned_session(db_path, target_id) -> str:
+    """After a load_session swap, the session the user abandoned is the only
+    row that isn't the target: lazy creation wrote it, then the load
+    rebound the client to `target_id`."""
+    others = [r["id"] for r in await _list_sessions(db_path) if r["id"] != target_id]
+    assert others, "lazy creation never fired — no non-target session row"
+    return others[0]
+
+
+async def _get_session(db_path, sid) -> dict | None:
+    from meeko.sessions import SessionStore
+
+    store = SessionStore.open(db_path)
+    try:
+        return await store.get_session(sid)
+    finally:
+        await store.close()
+
+
+async def _wait_for_title(db_path, sid, *, timeout=5.0) -> str:
+    """Poll until the background summary has titled `sid`; return the title."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        row = await _get_session(db_path, sid)
+        if row is not None and row["title"] is not None:
+            return row["title"]
+        if loop.time() >= deadline:
+            raise TimeoutError(f"session {sid} was never summarized")
+        await _REAL_SLEEP(0.01)
+
+
+async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles, tmp_path):
+    _set_env(monkeypatch, tmp_path)
+    tts = _FakeTTSClient("dg-test")
 
     # Mic callback is never exercised here; mic_queue stays empty and
     # MicPump just spins on its 100ms timeout.
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
+    async with _running_meeko(
+        fake_profiles, stt=_FakeSTTClient("dg-test"), tts=tts
+    ) as h:
+        await asyncio.wait_for(h.first_write.wait(), timeout=5)
 
-    first_write = asyncio.Event()
-
-    def on_speaker_write(data):
-        first_write.set()
-
-    speaker_stream.write.side_effect = on_speaker_write
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    fake_stt = _FakeSTTClient("dg-test")
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    # Short-circuit the 1s tail-drain so the test doesn't drag.
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),  # avoid mutating the real logger
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await asyncio.wait_for(first_write.wait(), timeout=5)
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    claude = fake_claude_holder["client"]
-    assert claude.turns == ["hello"]
-    assert fake_tts.calls == [("Hi.", "asteria")]
+    assert h.claude.turns == ["hello"]
+    assert tts.calls == [("Hi.", "asteria")]
     # Speaker.write receives the TTS chunk duplicated into stereo
     # (L/R from the mono TTS sample).
-    speaker_stream.write.assert_any_call(b"\x01\x02\x01\x02\x03\x04\x03\x04")
+    h.speaker.write.assert_any_call(b"\x01\x02\x01\x02\x03\x04\x03\x04")
     # Cleanup was executed in run()'s finally block.
-    mic_stream.stop_stream.assert_called()
-    mic_stream.close.assert_called()
-    speaker_stream.stop_stream.assert_called()
-    speaker_stream.close.assert_called()
-    pa_instance.terminate.assert_called()
+    h.mic.stop_stream.assert_called()
+    h.mic.close.assert_called()
+    h.speaker.stop_stream.assert_called()
+    h.speaker.close.assert_called()
+    h.pa.terminate.assert_called()
 
 
 async def test_mute_mic_while_speaking_drops_chunks_during_speaking(
@@ -316,83 +558,24 @@ async def test_mute_mic_while_speaking_drops_chunks_during_speaking(
 ):
     """With MEEKO_MUTE_MIC_WHILE_SPEAKING=1, mic audio captured while
     the assistant is SPEAKING must not reach the STT session."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+    _set_env(monkeypatch, tmp_path)
     monkeypatch.setenv("MEEKO_MUTE_MIC_WHILE_SPEAKING", "1")
+    stt = _FakeSTTClient("dg-test")
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    captured_cb: dict = {}
-
-    def open_stream(**kwargs):
-        if kwargs.get("input"):
-            captured_cb["cb"] = kwargs["stream_callback"]
-            return mic_stream
-        return speaker_stream
-
-    pa_instance.open.side_effect = open_stream
-
-    first_speaker_write = asyncio.Event()
-    release_tts = asyncio.Event()
-    speaker_stream.write.side_effect = lambda data: first_speaker_write.set()
-
-    fake_stt = _FakeSTTClient("dg-test")
-
-    class _SlowTTS:
-        """Yield one chunk, then block until the test releases us —
-        keeps the state machine in SPEAKING while we push mic audio."""
-
-        def __init__(self, api_key):
-            self.calls: list[tuple[str, str]] = []
-
-        async def stream(self, text, voice):
-            self.calls.append((text, voice))
-            yield b"\x01\x02\x03\x04"
-            await release_tts.wait()
-
-    fake_tts = _SlowTTS("dg-test")
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await asyncio.wait_for(first_speaker_write.wait(), timeout=5)
-            # We're now inside SPEAKING. Snapshot STT send count, then
-            # push mic chunks via the captured PyAudio callback and
-            # give MicPump a chance to see them.
-            session = fake_stt.session_obj
-            baseline = session.sent_audio_count
-            # 4 bytes = one stereo int16 frame, matches audio_io callback.
-            for _ in range(5):
-                captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
-            for _ in range(50):
-                await real_sleep(0)
-            assert session.sent_audio_count == baseline
-        finally:
-            release_tts.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+    # The blocking TTS keeps the state machine in SPEAKING while we push
+    # mic audio.
+    async with _running_meeko(fake_profiles, stt=stt, tts=_BlockingTTSClient()) as h:
+        await asyncio.wait_for(h.first_write.wait(), timeout=5)
+        # We're now inside SPEAKING. Snapshot STT send count, then
+        # push mic chunks via the captured PyAudio callback and
+        # give MicPump a chance to see them.
+        session = stt.session_obj
+        baseline = session.sent_audio_count
+        for _ in range(5):
+            h.push_mic()
+        for _ in range(50):
+            await _REAL_SLEEP(0)
+        assert session.sent_audio_count == baseline
 
 
 class _ReconnectSTTClient:
@@ -434,51 +617,14 @@ class _ReconnectSTTSession:
 async def test_run_reconnects_stt_after_connection_closed(
     monkeypatch, fake_profiles, tmp_path
 ):
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+    _set_env(monkeypatch, tmp_path)
+    stt = _ReconnectSTTClient("dg-test")
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-
-    first_write = asyncio.Event()
-    speaker_stream.write.side_effect = lambda data: first_write.set()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    fake_stt = _ReconnectSTTClient("dg-test")
-    fake_tts = _FakeTTSClient("dg-test")
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await asyncio.wait_for(first_write.wait(), timeout=5)
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+    async with _running_meeko(fake_profiles, stt=stt) as h:
+        await asyncio.wait_for(h.first_write.wait(), timeout=5)
 
     # Session was re-established after the ConnectionClosed on the first.
-    assert fake_stt.session_count >= 2
+    assert stt.session_count >= 2
 
 
 async def test_run_backs_off_on_repeated_stt_failures(
@@ -486,12 +632,7 @@ async def test_run_backs_off_on_repeated_stt_failures(
 ):
     """Repeated connect failures should sleep with increasing delays
     (0.5, 1, 2, ...) and only log a full traceback on the first failure."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    pa_instance.open.side_effect = [MagicMock(), MagicMock()]
+    _set_env(monkeypatch, tmp_path)
 
     class _AlwaysFailSTT:
         def __init__(self, api_key):
@@ -503,44 +644,19 @@ async def test_run_backs_off_on_repeated_stt_failures(
             raise OSError("dns down")
             yield  # pragma: no cover
 
-    fake_stt = _AlwaysFailSTT("dg-test")
+    stt = _AlwaysFailSTT("dg-test")
     sleep_calls: list[float] = []
-    real_sleep = asyncio.sleep
 
     async def recording_sleep(delay, *a, **kw):
         sleep_calls.append(delay)
         # collapse real sleep so the test finishes quickly
-        return await real_sleep(0)
+        return await _REAL_SLEEP(0)
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
-        patch(
-            "meeko.main.ClaudeClient",
-            side_effect=lambda api_key, system_prompt, dispatcher, **kw: (
-                _FakeClaudeClient(api_key, system_prompt, dispatcher, **kw)
-            ),
-        ),
-        patch("meeko.main.asyncio.sleep", new=recording_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        # Let the loop churn through several reconnect attempts. Use a
-        # small real sleep (not sleep(0)) so a slow CI runner gets enough
-        # scheduling time to advance run() past the retry branch.
-        for _ in range(200):
-            if fake_stt.attempts >= 4:
-                break
-            await real_sleep(0.01)
-        assert fake_stt.attempts >= 4, (
-            f"run() did not reach 4 reconnect attempts (got {fake_stt.attempts})"
+    async with _running_meeko(fake_profiles, stt=stt, sleep=recording_sleep):
+        # Let the loop churn through several reconnect attempts.
+        await _wait_until(
+            lambda: stt.attempts >= 4, msg="run() did not reach 4 reconnect attempts"
         )
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
 
     # Reconnect delays grow: 0.5, 1, 2, 4, ... (exclude the grace-cutoff
     # task's 10s sleep, which also goes through asyncio.sleep).
@@ -556,14 +672,7 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
     """After RECONNECT_GRACE_S of failed reconnects the mic is stopped
     and mic_queue is drained; a subsequent successful session restarts
     the mic."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    _set_env(monkeypatch, tmp_path)
 
     class _FailThenSucceedSTT:
         def __init__(self, api_key):
@@ -577,200 +686,74 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
             yield _FakeSTTSession([])
             await asyncio.sleep(10)
 
-    fake_stt = _FailThenSucceedSTT("dg-test")
-    real_sleep = asyncio.sleep
+    stt = _FailThenSucceedSTT("dg-test")
 
-    async def fast_sleep(delay, *a, **kw):
+    async def zero_sleep(delay, *a, **kw):
         # Collapse every real asyncio.sleep so the grace task fires
         # immediately after a disconnect.
-        return await real_sleep(0)
+        return await _REAL_SLEEP(0)
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
-        patch(
-            "meeko.main.ClaudeClient",
-            side_effect=lambda api_key, system_prompt, dispatcher, **kw: (
-                _FakeClaudeClient(api_key, system_prompt, dispatcher, **kw)
-            ),
-        ),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        # Prime the mic_queue with buffered PCM so we can assert it
-        # gets drained by the grace cutoff.
-        task = asyncio.create_task(meeko_main.run())
-        for _ in range(200):
-            if fake_stt.attempts >= 6:
-                break
-            await real_sleep(0.01)
-        assert fake_stt.attempts >= 6, (
-            f"run() did not reach 6 reconnect attempts (got {fake_stt.attempts})"
+    async with _running_meeko(fake_profiles, stt=stt, sleep=zero_sleep) as h:
+        await _wait_until(
+            lambda: stt.attempts >= 6, msg="run() did not reach 6 reconnect attempts"
         )
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
 
     # mic_stream was stopped during the outage and restarted after
     # reconnect — so start_stream() was called at least twice (initial
     # + post-cutoff resume) and stop_stream() at least twice (grace
     # cutoff + shutdown).
-    assert mic_stream.start_stream.call_count >= 2
-    assert mic_stream.stop_stream.call_count >= 2
+    assert h.mic.start_stream.call_count >= 2
+    assert h.mic.stop_stream.call_count >= 2
 
 
 async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_path):
     """If mic_callback can't enqueue because the queue is at MIC_QUEUE_MAX,
     it logs and sets stop_event so run() exits cleanly."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+    _set_env(monkeypatch, tmp_path)
+    stt = _FakeSTTClient("dg-test")
+    # No events, so the session just holds open and MicPump never drains.
+    stt.events = []
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    captured_cb: dict = {}
-
-    def open_stream(**kwargs):
-        if kwargs.get("input"):
-            captured_cb["cb"] = kwargs["stream_callback"]
-            return mic_stream
-        return speaker_stream
-
-    pa_instance.open.side_effect = open_stream
-
-    fake_stt = _FakeSTTClient("dg-test")
-    # Make the only event a long sleep so MicPump never drains.
-    fake_stt.events = []
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=_FakeTTSClient("x")),
-        patch(
-            "meeko.main.ClaudeClient",
-            side_effect=lambda api_key, system_prompt, dispatcher, **kw: (
-                _FakeClaudeClient(api_key, system_prompt, dispatcher, **kw)
-            ),
-        ),
-        patch("meeko.audio_io.MIC_QUEUE_MAX", 2),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        # Wait until mic_callback has been captured. Use a small real
-        # sleep (not sleep(0)) so a slow CI runner gets enough
-        # scheduling time to actually open the mic stream.
-        for _ in range(200):
-            if "cb" in captured_cb:
-                break
-            await asyncio.sleep(0.01)
-        assert "cb" in captured_cb, "mic stream was never opened"
+    async with _running_meeko(
+        fake_profiles,
+        stt=stt,
+        sleep=None,
+        extra_patches=[patch("meeko.audio_io.MIC_QUEUE_MAX", 2)],
+    ) as h:
+        await _wait_until(
+            lambda: h.mic_cb is not None, msg="mic stream was never opened"
+        )
         # Overflow the queue from the "PyAudio thread" side.
         for _ in range(10):
-            captured_cb["cb"](b"\x00\x00", 1, None, 0)
+            h.push_mic(b"\x00\x00")
             await asyncio.sleep(0)
         # run() should exit on its own because stop_event was set.
         try:
-            await asyncio.wait_for(task, timeout=3)
+            await asyncio.wait_for(h.task, timeout=3)
         except TimeoutError:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
             pytest.fail("run() did not exit after mic_queue overflow")
 
 
 async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path):
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path)
+    session_id = await _seed_session(db_path, assistant="prior reply")
+    stt = _SignalingSTTClient()  # no turns needed — we just need run() to start up
+    tts = _FakeTTSClient("dg-test")
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+    async with _running_meeko(
+        {"query": _profile()}, stt=stt, tts=tts, resume=session_id
+    ) as h:
+        await asyncio.wait_for(stt.entered.wait(), timeout=5)
 
-    # Seed a session with two prior turns.
-    seed = SessionStore.open(db_path)
-    try:
-        session_id = await seed.create_session("query")
-        await seed.persist_turn(session_id, "user", "prior question")
-        await seed.persist_turn(
-            session_id, "assistant", [{"type": "text", "text": "prior reply"}]
-        )
-    finally:
-        await seed.close()
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    session_entered = asyncio.Event()
-
-    class _SignalingSTTClient(_FakeSTTClient):
-        @contextlib.asynccontextmanager
-        async def session(self):
-            async with super().session() as s:
-                session_entered.set()
-                yield s
-
-    fake_stt = _SignalingSTTClient("dg-test")
-    fake_stt.events = []  # no turns needed — we just need run() to start up
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    resume_profiles = {
-        "query": Profile(
-            name="query",
-            wake_word="meeko",
-            prompt="system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0,
-        )
-    }
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(resume_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run(resume=session_id))
-        await asyncio.wait_for(session_entered.wait(), timeout=5)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-
-    claude = fake_claude_holder["client"]
-    assert claude.session_id == session_id
-    assert claude.loaded_history == [
+    assert h.claude.session_id == session_id
+    assert h.claude.loaded_history == [
         {"role": "user", "content": "prior question"},
         {
             "role": "assistant",
             "content": [{"type": "text", "text": "prior reply"}],
         },
     ]
-    assert fake_tts.calls == []
+    assert tts.calls == []
 
 
 async def test_run_resume_unknown_id_exits(monkeypatch, fake_profiles, tmp_path):
@@ -854,90 +837,19 @@ async def test_run_backfills_untitled_sessions_on_startup(
     """A session left untitled-but-non-empty by a prior killed run should
     be summarized at the next startup, so `list_sessions` stops reading
     it back as '(no title)'."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path)
+    untitled_sid = await _seed_session(
+        db_path, user="leftover question", assistant="leftover answer"
+    )
+    stt = _SignalingSTTClient()
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
+    async with _running_meeko(fake_profiles, stt=stt):
+        await asyncio.wait_for(stt.entered.wait(), timeout=5)
+        # Backfill is fire-and-forget — poll the DB until the title appears.
+        title = await _wait_for_title(db_path, untitled_sid)
 
-    seed = SessionStore.open(db_path)
-    try:
-        untitled_sid = await seed.create_session("query")
-        await seed.persist_turn(untitled_sid, "user", "leftover question")
-        await seed.persist_turn(
-            untitled_sid,
-            "assistant",
-            [{"type": "text", "text": "leftover answer"}],
-        )
-    finally:
-        await seed.close()
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    session_entered = asyncio.Event()
-
-    class _SignalingSTTClient(_FakeSTTClient):
-        @contextlib.asynccontextmanager
-        async def session(self):
-            async with super().session() as s:
-                session_entered.set()
-                yield s
-
-    fake_stt = _SignalingSTTClient("dg-test")
-    fake_stt.events = []
-    fake_tts = _FakeTTSClient("dg-test")
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await asyncio.wait_for(session_entered.wait(), timeout=5)
-            # Backfill is fire-and-forget — poll the DB until the title
-            # appears or we give up.
-            for _ in range(200):
-                check = SessionStore.open(db_path)
-                try:
-                    row = await check.get_session(untitled_sid)
-                finally:
-                    await check.close()
-                if row is not None and row.get("title") is not None:
-                    break
-                await real_sleep(0.01)
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    store = SessionStore.open(db_path)
-    try:
-        row = await store.get_session(untitled_sid)
-    finally:
-        await store.close()
-    assert row is not None
     # _StubAsyncAnthropic returns "stub title" for any summary call.
-    assert row["title"] == "stub title"
+    assert title == "stub title"
 
 
 async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
@@ -945,136 +857,69 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
     audio back from STT until the detector fires. After the detector
     fires, mic audio flows to STT (so a question spoken right after
     the wake word is transcribed) and no greeting TTS is emitted."""
-    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    captured_cb: dict = {}
-
-    def open_stream(**kwargs):
-        if kwargs.get("input"):
-            captured_cb["cb"] = kwargs["stream_callback"]
-            return mic_stream
-        return speaker_stream
-
-    pa_instance.open.side_effect = open_stream
-    speaker_stream.write.side_effect = lambda data: None
-
-    wake_profiles = {
-        "query": Profile(
-            name="query",
-            wake_word="meeko",
-            prompt="system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0,
-        )
-    }
-
-    # Fake detector: records every process() call. The first call also
-    # captures the idle-state snapshot (STT count, TTS calls) so the
-    # test can assert those on the pre-wake path without racing the
-    # event loop. The second call fires the wake word.
-    class _FakeDetector:
-        def __init__(self, *a, **kw):
-            self.calls = 0
-            self.fired = asyncio.Event()
-            self.first_call_snapshot: dict | None = None
-
-        def process(self, pcm: bytes) -> bool:
-            self.calls += 1
-            if self.calls == 1:
-                self.first_call_snapshot = {
-                    "stt": fake_stt.session_obj.sent_audio_count,
-                    "tts": list(fake_tts.calls),
-                }
-                return False
-            self.fired.set()
-            return True
-
-    detector_holder: dict = {}
-
-    def make_detector(*a, **kw):
-        d = _FakeDetector()
-        detector_holder["d"] = d
-        return d
+    _set_env(monkeypatch, tmp_path, wake_word=True)
 
     # Use a holding STT client so the session stays open while the test
     # pushes post-wake chunks — otherwise the empty events list combined
     # with fast_sleep-patched asyncio.sleep causes the supervisor to
     # churn through reconnects and drop the mic chunks mid-cycle.
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_tts = _FakeTTSClient("dg-test")
+    stt = _HoldingSTTClient("dg-test")
+    tts = _FakeTTSClient("dg-test")
 
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
+    # The first process() call captures the idle-state snapshot (STT
+    # count, TTS calls) so the test can assert those on the pre-wake path
+    # without racing the event loop. The second call fires the wake word.
+    class _SnapshotDetector(_FakeDetector):
+        def __init__(self, *a, **kw):
+            super().__init__()
+            self.fired = asyncio.Event()
+            self.first_call_snapshot: dict | None = None
 
-    real_sleep = asyncio.sleep
+        def _fires(self) -> bool:
+            if self.calls == 1:
+                self.first_call_snapshot = {
+                    "stt": stt.session_obj.sent_audio_count,
+                    "tts": list(tts.calls),
+                }
+                return False
+            self.fired.set()
+            return True
 
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
+    async with _running_meeko(
+        {"query": _profile()}, stt=stt, tts=tts, detector=_SnapshotDetector
+    ) as h:
+        # Wait for detector + mic callback + STT session to be live.
+        await _wait_until(
+            lambda: (
+                h.mic_cb is not None
+                and h.detector is not None
+                and stt.session_obj is not None
+            )
+        )
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            # Wait for detector + mic callback + STT session to be live.
-            for _ in range(500):
-                if (
-                    "cb" in captured_cb
-                    and "d" in detector_holder
-                    and fake_stt.session_obj is not None
-                ):
-                    break
-                await real_sleep(0.01)
-            assert "cb" in captured_cb
-            assert "d" in detector_holder
-            detector = detector_holder["d"]
+        # Push chunks until the detector fires on the second call. A small
+        # amount of real time keeps MicPump ticking under load.
+        for _ in range(20):
+            if h.detector.fired.is_set():
+                break
+            h.push_mic()
+            await _REAL_SLEEP(0.02)
+        await asyncio.wait_for(h.detector.fired.wait(), timeout=5)
 
-            # Push chunks until the detector fires on the second call.
-            # A small amount of real time keeps MicPump ticking under
-            # load.
-            for _ in range(20):
-                if detector.fired.is_set():
-                    break
-                captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
-                await real_sleep(0.02)
+        # First call happened while IDLE — snapshot proves STT and
+        # TTS were both untouched up to that point.
+        assert h.detector.first_call_snapshot == {"stt": 0, "tts": []}
 
-            await asyncio.wait_for(detector.fired.wait(), timeout=5)
-
-            # First call happened while IDLE — snapshot proves STT and
-            # TTS were both untouched up to that point.
-            assert detector.first_call_snapshot == {"stt": 0, "tts": []}
-
-            # After the wake word fires, mic chunks should flow through
-            # to STT so a question spoken right after "Hey Meeko" gets
-            # transcribed. No greeting TTS should be emitted.
-            for _ in range(50):
-                captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
-                await real_sleep(0.02)
-                if fake_stt.session_obj.sent_audio_count > 0:
-                    break
-            assert fake_stt.session_obj.sent_audio_count > 0
-            assert fake_tts.calls == []
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # After the wake word fires, mic chunks should flow through
+        # to STT so a question spoken right after "Hey Meeko" gets
+        # transcribed. No greeting TTS should be emitted.
+        for _ in range(50):
+            h.push_mic()
+            await _REAL_SLEEP(0.02)
+            if stt.session_obj.sent_audio_count > 0:
+                break
+        assert stt.session_obj.sent_audio_count > 0
+        assert tts.calls == []
 
 
 class _SessionToolClaudeClient(_FakeClaudeClient):
@@ -1198,137 +1043,37 @@ async def test_end_session_tool_returns_to_idle_with_fresh_session(
     """User says 'stop' → fake Claude dispatches end_session → after
     SPEAKING completes, state returns to IDLE, a fresh SQLite session is
     created, and the Claude client's in-memory history is dropped."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path, wake_word=True)
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "Meeko stop"
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    captured_cb: dict = {}
-
-    def open_stream(**kwargs):
-        if kwargs.get("input"):
-            captured_cb["cb"] = kwargs["stream_callback"]
-            return mic_stream
-        return speaker_stream
-
-    pa_instance.open.side_effect = open_stream
-    speaker_stream.write.side_effect = lambda data: None
-
-    wake_profiles = {
-        "query": Profile(
-            name="query",
-            wake_word="meeko",
-            prompt="system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0,
+    async with _running_meeko(
+        {"query": _profile()},
+        stt=stt,
+        claude=_EndSessionClaudeClient,
+        detector=_FakeDetector,
+    ) as h:
+        # Drive: the first mic chunk fires the wake detector → LISTENING.
+        # Only then release the EndOfTurn from the fake STT; otherwise it'd
+        # arrive while still in IDLE and get discarded by the safety belt.
+        await h.wake()
+        stt.ready.set()
+        # EndOfTurn("Meeko stop") fires end_session; the detector being
+        # reset is our signal that the IDLE transition ran.
+        await _wait_until(
+            lambda: h.detector.resets >= 1, msg="wake detector was never reset"
         )
-    }
-
-    # Wake detector fires on the first process() call so we get into
-    # LISTENING quickly, then never looked at again until we re-enter
-    # IDLE after end_session.
-    class _FakeDetector:
-        def __init__(self, *a, **kw):
-            self.calls = 0
-            self.resets = 0
-
-        def process(self, pcm: bytes) -> bool:
-            self.calls += 1
-            return True  # fire on first chunk
-
-        def reset(self) -> None:
-            self.resets += 1
-
-    detector_holder: dict = {}
-
-    def make_detector(*a, **kw):
-        d = _FakeDetector()
-        detector_holder["d"] = d
-        return d
-
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "Meeko stop"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _EndSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            # Drive: first mic chunk fires the wake detector → LISTENING;
-            # EndOfTurn("Meeko stop") fires end_session; we then wait for
-            # the detector to be reset (our signal that the IDLE
-            # transition ran).
-            for _ in range(500):
-                if "cb" in captured_cb and "d" in detector_holder:
-                    break
-                await real_sleep(0.01)
-            assert "cb" in captured_cb
-            # Push a mic frame so the wake detector fires → state
-            # transitions to LISTENING. Only then do we release the
-            # EndOfTurn from the fake STT; otherwise it'd arrive while
-            # still in IDLE and get discarded by the safety belt.
-            captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
-            for _ in range(200):
-                if detector_holder["d"].calls >= 1:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            detector = detector_holder["d"]
-            for _ in range(500):
-                if detector.resets >= 1:
-                    break
-                await real_sleep(0.01)
-            assert detector.resets >= 1, "wake detector was never reset"
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
 
     # Claude fake got the user's stop message and its session_id was
     # cleared by reset_session (lazy creation: the next user turn would
     # create a fresh row; none happens in this test).
-    claude = fake_claude_holder["client"]
-    assert claude.turns == ["Meeko stop"]
-    assert claude.session_id is None
+    assert h.claude.turns == ["Meeko stop"]
+    assert h.claude.session_id is None
 
     # Only the original session row exists — the one the user spoke into.
     # No empty stub for the "fresh" post-rotation session under lazy
     # creation.
-    store = SessionStore.open(db_path)
-    try:
-        rows = await store.list_sessions()
-    finally:
-        await store.close()
+    rows = await _list_sessions(db_path)
     assert len(rows) == 1
     assert rows[0]["turn_count"] >= 1
 
@@ -1340,120 +1085,33 @@ async def test_post_wake_timeout_returns_to_idle_without_session_row(
     post-wake monitor expires, ends the session silently (no TTS), and
     returns to IDLE (detector reset). Since no turn happened, lazy row
     creation never fires, so no session row is written to the DB."""
-    from meeko.sessions import SessionStore
-
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    captured_cb: dict = {}
-
-    def open_stream(**kwargs):
-        if kwargs.get("input"):
-            captured_cb["cb"] = kwargs["stream_callback"]
-            return mic_stream
-        return speaker_stream
-
-    pa_instance.open.side_effect = open_stream
-    speaker_stream.write.side_effect = lambda data: None
+    db_path = _set_env(monkeypatch, tmp_path, wake_word=True)
+    tts = _FakeTTSClient("dg-test")
 
     # Short post-wake window; idle monitor disabled so only the
-    # post-wake path can end the (turn-less) session.
-    wake_profiles = {
-        "query": Profile(
-            name="query",
-            wake_word="meeko",
-            prompt="system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0.05,
+    # post-wake path can end the (turn-less) session. The user never
+    # speaks: the holding STT's `ready` is never set, so no EndOfTurn.
+    async with _running_meeko(
+        {"query": _profile(post_wake_timeout_seconds=0.05)},
+        stt=_HoldingSTTClient("dg-test"),
+        tts=tts,
+        detector=_FireOnceDetector,
+    ) as h:
+        # One mic frame fires the wake detector → LISTENING + arms the
+        # post-wake monitor. We push no further frames, so the user
+        # "says nothing".
+        await h.wake()
+        # Post-wake monitor expires → end_session → IDLE → detector reset.
+        await _wait_until(
+            lambda: h.detector.resets >= 1,
+            msg="post-wake timeout never ended the session",
         )
-    }
-
-    class _FakeDetector:
-        def __init__(self, *a, **kw):
-            self.calls = 0
-            self.resets = 0
-
-        def process(self, pcm: bytes) -> bool:
-            self.calls += 1
-            return self.calls == 1  # fire once, then stay quiet
-
-        def reset(self) -> None:
-            self.resets += 1
-
-    detector_holder: dict = {}
-
-    def make_detector(*a, **kw):
-        d = _FakeDetector()
-        detector_holder["d"] = d
-        return d
-
-    # User never speaks: ready is never set, so no EndOfTurn fires.
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_tts = _FakeTTSClient("dg-test")
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        return _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            for _ in range(500):
-                if "cb" in captured_cb and "d" in detector_holder:
-                    break
-                await real_sleep(0.01)
-            assert "cb" in captured_cb
-            # One mic frame fires the wake detector → LISTENING + arms
-            # the post-wake monitor. We push no further frames, so the
-            # user "says nothing".
-            captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
-
-            detector = detector_holder["d"]
-            # Post-wake monitor expires → end_session → IDLE → detector
-            # reset.
-            for _ in range(500):
-                if detector.resets >= 1:
-                    break
-                await real_sleep(0.01)
-            assert detector.resets >= 1, "post-wake timeout never ended the session"
-            # No TTS: the silent close speaks nothing.
-            assert fake_tts.calls == []
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # No TTS: the silent close speaks nothing.
+        assert tts.calls == []
 
     # No turn ever happened, so lazy row creation never fired: the DB
     # has no session row.
-    store = SessionStore.open(db_path)
-    try:
-        rows = await store.list_sessions()
-    finally:
-        await store.close()
-    assert rows == []
+    assert await _list_sessions(db_path) == []
 
 
 async def test_end_session_without_wake_word_transitions_to_listening(
@@ -1461,80 +1119,22 @@ async def test_end_session_without_wake_word_transitions_to_listening(
 ):
     """MEEKO_WAKE_WORD_DISABLED=1: end_session still resets the session
     but state transitions to LISTENING (no wake gate to re-arm)."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path)  # autouse fixture disables the gate
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "stop"
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-    # Autouse fixture already sets MEEKO_WAKE_WORD_DISABLED=1.
+    async with _running_meeko(
+        fake_profiles, stt=stt, claude=_EndSessionClaudeClient
+    ) as h:
+        # Wake word disabled → state starts in LISTENING, so we can
+        # release the EndOfTurn immediately.
+        await h.stt_session()
+        stt.ready.set()
+        await h.claude_reset()
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
-
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "stop"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _EndSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            # Wake word disabled → state starts in LISTENING, so we can
-            # release the EndOfTurn immediately.
-            for _ in range(500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            # Wait for end_session to run: stable signal is reset_count
-            # incrementing, which happens after the turn completes.
-            claude = None
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.reset_count >= 1:
-                    claude = c
-                    break
-                await real_sleep(0.01)
-            assert claude is not None, "end_session never called reset_session"
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    store = SessionStore.open(db_path)
-    try:
-        rows = await store.list_sessions()
-    finally:
-        await store.close()
     # Only the original (user-spoken) session row exists. Lazy creation
     # means the post-rotation session has no row until the next user turn.
-    assert len(rows) == 1
+    assert len(await _list_sessions(db_path)) == 1
 
 
 async def test_new_session_tool_rotates_session_and_stays_listening(
@@ -1544,128 +1144,28 @@ async def test_new_session_tool_rotates_session_and_stays_listening(
     after SPEAKING completes, a fresh SQLite session is created, claude
     client rebinds to it, and state stays in LISTENING (wake detector is
     NOT reset — Meeko keeps listening without requiring the wake word)."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path, wake_word=True)
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "let's start fresh"
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    captured_cb: dict = {}
-
-    def open_stream(**kwargs):
-        if kwargs.get("input"):
-            captured_cb["cb"] = kwargs["stream_callback"]
-            return mic_stream
-        return speaker_stream
-
-    pa_instance.open.side_effect = open_stream
-    speaker_stream.write.side_effect = lambda data: None
-
-    wake_profiles = {
-        "query": Profile(
-            name="query",
-            wake_word="meeko",
-            prompt="system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0,
-        )
-    }
-
-    class _FakeDetector:
-        def __init__(self, *a, **kw):
-            self.calls = 0
-            self.resets = 0
-
-        def process(self, pcm: bytes) -> bool:
-            self.calls += 1
-            return True  # fire on first chunk
-
-        def reset(self) -> None:
-            self.resets += 1
-
-    detector_holder: dict = {}
-
-    def make_detector(*a, **kw):
-        d = _FakeDetector()
-        detector_holder["d"] = d
-        return d
-
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "let's start fresh"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _NewSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.WakeWordDetector", side_effect=make_detector),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            for _ in range(500):
-                if "cb" in captured_cb and "d" in detector_holder:
-                    break
-                await real_sleep(0.01)
-            assert "cb" in captured_cb
-            captured_cb["cb"](b"\x00\x00\x00\x00", 1, None, 0)
-            for _ in range(200):
-                if detector_holder["d"].calls >= 1:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            # Wait for new_session to run: stable signal is reset_count
-            # incrementing after the turn completes.
-            claude = None
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.reset_count >= 1:
-                    claude = c
-                    break
-                await real_sleep(0.01)
-            assert claude is not None, "new_session never called reset_session"
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+    async with _running_meeko(
+        {"query": _profile()},
+        stt=stt,
+        claude=_NewSessionClaudeClient,
+        detector=_FakeDetector,
+    ) as h:
+        await h.wake()
+        stt.ready.set()
+        await h.claude_reset()
 
     # Wake detector must NOT have been reset — new_session stays in
     # LISTENING, not IDLE.
-    assert detector_holder["d"].resets == 0
+    assert h.detector.resets == 0
 
     # Only the original (user-spoken) session row exists. Lazy creation
     # means the rotated session has no row until the next user turn.
-    store = SessionStore.open(db_path)
-    try:
-        rows = await store.list_sessions()
-    finally:
-        await store.close()
-    assert len(rows) == 1
-    assert claude.session_id is None
+    assert len(await _list_sessions(db_path)) == 1
+    assert h.claude.session_id is None
 
 
 async def test_end_session_fires_background_summary_for_finalized_session(
@@ -1676,91 +1176,26 @@ async def test_end_session_fires_background_summary_for_finalized_session(
     session (not the freshly-created one)."""
     from meeko.sessions import SessionStore
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-    # Autouse fixture already sets MEEKO_WAKE_WORD_DISABLED=1.
+    db_path = _set_env(monkeypatch, tmp_path)  # autouse fixture disables the gate
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "stop"
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
+    async with _running_meeko(
+        fake_profiles, stt=stt, claude=_EndSessionClaudeClient
+    ) as h:
+        await h.stt_session()
+        stt.ready.set()
+        await h.claude_reset()
 
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "stop"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
+        # The finalized row is the only session in the DB at this point
+        # (lazy creation means nothing else was written).
+        rows = await _list_sessions(db_path)
+        assert len(rows) == 1, "expected exactly one finalized session row"
+        original_sid = rows[0]["id"]
 
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _EndSessionClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            for _ in range(500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            # Wait for end_session to run via the stable reset_count signal,
-            # then read the finalized session id from the DB (lazy creation
-            # means it's the only row that was written).
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.reset_count >= 1:
-                    break
-                await real_sleep(0.01)
-            assert c.reset_count >= 1, "end_session never called reset_session"
-
-            # The finalized row is the only session in the DB at this point.
-            check = SessionStore.open(db_path)
-            try:
-                rows = await check.list_sessions()
-            finally:
-                await check.close()
-            assert len(rows) == 1, "expected exactly one finalized session row"
-            original_sid = rows[0]["id"]
-
-            # Give the detached summary task a chance to complete.
-            # The background summarize_session call awaits the stubbed
-            # anthropic client (immediate) and then writes SQLite.
-            for _ in range(200):
-                store_check = SessionStore.open(db_path)
-                try:
-                    row = store_check._conn.execute(
-                        "SELECT title, summary FROM sessions WHERE id = ?",
-                        (original_sid,),
-                    ).fetchone()
-                finally:
-                    await store_check.close()
-                if row is not None and row[0] is not None:
-                    break
-                await real_sleep(0.01)
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # The detached summary task awaits the stubbed anthropic client
+        # (immediate) and then writes SQLite.
+        await _wait_for_title(db_path, original_sid)
 
     store = SessionStore.open(db_path)
     try:
@@ -1785,101 +1220,28 @@ async def test_new_session_after_profile_switch_records_active_profile(
     turn, the fresh SQLite row must carry the switched profile — not the
     one active at startup. This is the regression guard for using
     `profile_manager.active_profile.name` in the post-SPEAKING hook."""
-    from meeko.sessions import SessionStore
-
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-    # Autouse fixture already sets MEEKO_WAKE_WORD_DISABLED=1.
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
-
+    db_path = _set_env(monkeypatch, tmp_path)  # autouse fixture disables the gate
     two_profiles = {
-        "query": Profile(
-            name="query",
-            wake_word="meeko",
-            prompt="default system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0,
-        ),
-        "pirate": Profile(
-            name="pirate",
-            wake_word="meeko",
-            prompt="pirate system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0,
-        ),
+        "query": _profile(prompt="default system"),
+        "pirate": _profile("pirate", prompt="pirate system"),
     }
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "switch to pirate and start fresh"
 
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "switch to pirate and start fresh"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
+    async with _running_meeko(
+        two_profiles, stt=stt, claude=_SwitchThenNewSessionClaudeClient
+    ) as h:
+        await h.stt_session()
+        stt.ready.set()
+        await h.claude_reset()
 
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _SwitchThenNewSessionClaudeClient(
-            api_key, system_prompt, dispatcher, **kwargs
-        )
-        fake_claude_holder["client"] = c
-        return c
+        # Drive a second lazy creation by invoking the create_session_fn
+        # the orchestrator wired up. After switch_profile + new_session,
+        # the next user-turn's lazy create must use the *switched*
+        # profile.
+        new_sid = await h.claude._create_session_fn()
 
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(two_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            for _ in range(500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            # Wait for new_session to run via the stable reset_count signal.
-            claude = None
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.reset_count >= 1:
-                    claude = c
-                    break
-                await real_sleep(0.01)
-            assert claude is not None, "new_session never called reset_session"
-
-            # Drive a second lazy creation by invoking the create_session_fn
-            # the orchestrator wired up. After switch_profile + new_session,
-            # the next user-turn's lazy create must use the *switched*
-            # profile.
-            new_sid = await claude._create_session_fn()
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    store = SessionStore.open(db_path)
-    try:
-        row = await store.get_session(new_sid)
-    finally:
-        await store.close()
+    row = await _get_session(db_path, new_sid)
     assert row is not None
     assert row["profile_name"] == "pirate", (
         f"fresh session recorded stale profile {row['profile_name']!r}; "
@@ -2017,92 +1379,31 @@ async def test_load_session_tool_swaps_history_and_stays_listening(
     after SPEAKING, claude.load_history is populated from the target session's
     turns, the client is rebound to target's session_id, and the abandoned
     session is summarized in the background so it stays in the recall index."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path)
+    target_id = await _seed_session(
+        db_path,
+        user="let's plan a todo app",
+        assistant="Sure, let's start!",
+        title="Todo app planning",
+        summary="Discussed architecture options.",
+        transcript="USER: let's plan a todo app\nASSISTANT: Sure, let's start!",
+    )
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "go back to the todo session"
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    seed = SessionStore.open(db_path)
-    target_id = None
-    try:
-        target_id = await seed.create_session("query")
-        await seed.persist_turn(target_id, "user", "let's plan a todo app")
-        await seed.persist_turn(
-            target_id, "assistant", [{"type": "text", "text": "Sure, let's start!"}]
+    async with _running_meeko(
+        fake_profiles,
+        stt=stt,
+        claude=functools.partial(_LoadSessionClaudeClient, target_session_id=target_id),
+    ) as h:
+        await h.stt_session()
+        stt.ready.set()
+        await _wait_until(
+            lambda: h.claude is not None and h.claude.session_id == target_id
         )
-        await seed.update_session_metadata(
-            target_id,
-            title="Todo app planning",
-            summary="Discussed architecture options.",
-            transcript="USER: let's plan a todo app\nASSISTANT: Sure, let's start!",
-        )
-    finally:
-        await seed.close()
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
-
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "go back to the todo session"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _LoadSessionClaudeClient(
-            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
-        )
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            for _ in range(500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            # Wait for claude to be rebound to the target session.
-            original_sid = None
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None:
-                    if original_sid is None:
-                        original_sid = c.session_id
-                    if c.session_id == target_id:
-                        break
-                await real_sleep(0.01)
-            assert fake_claude_holder.get("client") is not None
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    claude = fake_claude_holder["client"]
-    assert claude.session_id == target_id
-    assert claude.loaded_history == [
+    assert h.claude.session_id == target_id
+    assert h.claude.loaded_history == [
         {"role": "user", "content": "let's plan a todo app"},
         {
             "role": "assistant",
@@ -2120,120 +1421,33 @@ async def test_end_then_load_session_fires_summary_for_current_session(
     summarizes the abandoned session on load), but the chain must still
     succeed: claude ends up bound to the target session and the original
     session has been summarized in the background."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path)
+    target_id = await _seed_session(db_path)
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "wrap up and go back to the prior session"
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    seed = SessionStore.open(db_path)
-    target_id = None
-    try:
-        target_id = await seed.create_session("query")
-        await seed.persist_turn(target_id, "user", "prior question")
-        await seed.persist_turn(
-            target_id, "assistant", [{"type": "text", "text": "prior answer"}]
+    async with _running_meeko(
+        fake_profiles,
+        stt=stt,
+        claude=functools.partial(
+            _EndThenLoadSessionClaudeClient, target_session_id=target_id
+        ),
+    ) as h:
+        await h.stt_session()
+        stt.ready.set()
+        await _wait_until(
+            lambda: h.claude is not None and h.claude.session_id == target_id
         )
-    finally:
-        await seed.close()
+        # The original session (not target) gets a summary from the stub.
+        original_sid = await _abandoned_session(db_path, target_id)
+        title = await _wait_for_title(db_path, original_sid)
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
-
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "wrap up and go back to the prior session"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _EndThenLoadSessionClaudeClient(
-            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
-        )
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        original_sid = None
-        try:
-            for _ in range(500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            # Wait for claude to be rebound to the target session.
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.session_id == target_id:
-                    break
-                await real_sleep(0.01)
-
-            # The abandoned session is the only non-target row: lazy
-            # creation wrote it, then load_session swapped the binding.
-            rows_check = SessionStore.open(db_path)
-            try:
-                all_rows = await rows_check.list_sessions()
-            finally:
-                await rows_check.close()
-            non_target = [r["id"] for r in all_rows if r["id"] != target_id]
-            assert non_target, "lazy creation never fired — no non-target session row"
-            original_sid = non_target[0]
-
-            # Give the background summary task time to write.
-            for _ in range(200):
-                store_check = SessionStore.open(db_path)
-                try:
-                    row = store_check._conn.execute(
-                        "SELECT title FROM sessions WHERE id = ?",
-                        (original_sid,),
-                    ).fetchone()
-                finally:
-                    await store_check.close()
-                if row is not None and row[0] is not None:
-                    break
-                await real_sleep(0.01)
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    claude = fake_claude_holder["client"]
-    assert claude.session_id == target_id
-    assert claude.loaded_history == [
+    assert h.claude.session_id == target_id
+    assert h.claude.loaded_history == [
         {"role": "user", "content": "prior question"},
         {"role": "assistant", "content": [{"type": "text", "text": "prior answer"}]},
     ]
-
-    # The original session (not target) got a summary from the stub.
-    store = SessionStore.open(db_path)
-    try:
-        row = store._conn.execute(
-            "SELECT title FROM sessions WHERE id = ?", (original_sid,)
-        ).fetchone()
-    finally:
-        await store.close()
-    assert row is not None and row[0] == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
+    assert title == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
 
 
 # --------------------------------------------------------------------------
@@ -2275,16 +1489,12 @@ class _QueueDrivenSTTClient:
         yield self.session_obj
 
 
-async def _wait_until(predicate, *, timeout=5.0, real_sleep=None):
-    """Poll until predicate() is true, or raise TimeoutError. Bypasses
-    any monkeypatched asyncio.sleep so it works alongside fast_sleep."""
-    sleep = real_sleep if real_sleep is not None else asyncio.sleep
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while not predicate():
-        if loop.time() >= deadline:
-            raise TimeoutError("predicate never became true")
-        await sleep(0.005)
+def _stt_event(event, transcript=""):
+    return SimpleNamespace(event=event, transcript=transcript)
+
+
+def _logged(caplog, text) -> bool:
+    return any(text in rec.getMessage() for rec in caplog.records)
 
 
 async def test_puller_keeps_draining_events_while_worker_is_in_tts(
@@ -2294,101 +1504,34 @@ async def test_puller_keeps_draining_events_while_worker_is_in_tts(
     the turn worker is parked awaiting TTS, pull_stt_events must keep
     consuming events from stt_session.events() so the underlying
     websockets recv queue doesn't fill and starve pong frames."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+    _set_env(monkeypatch, tmp_path)
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    first_write = asyncio.Event()
-    speaker_stream.write.side_effect = lambda data: first_write.set()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    # The blocking TTS keeps the turn worker parked in speak_stream.
+    async with _running_meeko(
+        fake_profiles, stt=_QueueDrivenSTTClient("dg-test"), tts=_BlockingTTSClient()
+    ) as h:
+        session = await h.stt_session()
 
-    fake_stt = _QueueDrivenSTTClient("dg-test")
+        # Drive a turn.
+        await session.event_queue.put(_stt_event("StartOfTurn"))
+        await session.event_queue.put(_stt_event("EndOfTurn", "hello"))
 
-    # TTS that yields one chunk and then blocks until the test releases
-    # it — keeps the turn worker parked in speak_stream.
-    release_tts = asyncio.Event()
+        # Wait until the turn worker has actually entered TTS — the
+        # first chunk reaching the speaker proves it.
+        await asyncio.wait_for(h.first_write.wait(), timeout=5)
 
-    class _SlowTTS:
-        def __init__(self, api_key):
-            self.calls: list[tuple[str, str]] = []
+        # While the turn worker is parked awaiting `release`, push a
+        # batch of events. If pull_stt_events were parked too (the
+        # old behavior), `observed` would not grow; the queue would
+        # fill and block on `put`. With the fix, all events are
+        # consumed promptly.
+        baseline = len(session.observed)
+        for _ in range(50):
+            await session.event_queue.put(_stt_event("Update", "..."))
+        await _wait_until(lambda: len(session.observed) >= baseline + 50)
 
-        async def stream(self, text, voice):
-            self.calls.append((text, voice))
-            yield b"\x01\x02\x03\x04"
-            await release_tts.wait()
-
-    fake_tts = _SlowTTS("dg-test")
-
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            # Wait until the session is up.
-            await _wait_until(
-                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
-            )
-            session = fake_stt.session_obj
-
-            # Drive a turn.
-            await session.event_queue.put(
-                SimpleNamespace(event="StartOfTurn", transcript="")
-            )
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="hello")
-            )
-
-            # Wait until the turn worker has actually entered TTS — the
-            # first chunk reaching the speaker proves it.
-            await asyncio.wait_for(first_write.wait(), timeout=5)
-
-            # While the turn worker is parked awaiting `release_tts`, push a
-            # batch of events. If pull_stt_events were parked too (the
-            # old behavior), `observed` would not grow; the queue would
-            # fill and block on `put`. With the fix, all events are
-            # consumed promptly.
-            baseline = len(session.observed)
-            for _ in range(50):
-                await session.event_queue.put(
-                    SimpleNamespace(event="Update", transcript="...")
-                )
-            await _wait_until(
-                lambda: len(session.observed) >= baseline + 50,
-                real_sleep=real_sleep,
-            )
-            assert len(session.observed) >= baseline + 50
-
-            # The turn worker must still be in TTS (not advanced past it).
-            assert fake_claude_holder["client"].turns == ["hello"]
-        finally:
-            release_tts.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # The turn worker must still be in TTS (not advanced past it).
+        assert h.claude.turns == ["hello"]
 
 
 async def test_endofturn_during_speaking_is_logged_as_echo(
@@ -2398,89 +1541,27 @@ async def test_endofturn_during_speaking_is_logged_as_echo(
     `[echo?]` and NOT drive a second Claude turn (AEC observation
     mode). The check lives in the puller — decided synchronously at
     observation time so it can't race with the worker."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    first_write = asyncio.Event()
-    speaker_stream.write.side_effect = lambda data: first_write.set()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    fake_stt = _QueueDrivenSTTClient("dg-test")
-
-    release_tts = asyncio.Event()
-
-    class _SlowTTS:
-        def __init__(self, api_key):
-            self.calls: list[tuple[str, str]] = []
-
-        async def stream(self, text, voice):
-            self.calls.append((text, voice))
-            yield b"\x01\x02\x03\x04"
-            await release_tts.wait()
-
-    fake_tts = _SlowTTS("dg-test")
-
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
+    _set_env(monkeypatch, tmp_path)
     caplog.set_level(logging.INFO, logger="meeko")
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await _wait_until(
-                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
-            )
-            session = fake_stt.session_obj
+    async with _running_meeko(
+        fake_profiles, stt=_QueueDrivenSTTClient("dg-test"), tts=_BlockingTTSClient()
+    ) as h:
+        session = await h.stt_session()
+        await session.event_queue.put(_stt_event("EndOfTurn", "hello"))
 
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="hello")
-            )
+        # Wait until SPEAKING (first TTS chunk reached the speaker).
+        await asyncio.wait_for(h.first_write.wait(), timeout=5)
 
-            # Wait until SPEAKING (first TTS chunk reached the speaker).
-            await asyncio.wait_for(first_write.wait(), timeout=5)
+        # Now fire a second EndOfTurn — should be suppressed as echo.
+        await session.event_queue.put(_stt_event("EndOfTurn", "echo leakage"))
+        await _wait_until(lambda: len(session.observed) >= 2)
 
-            # Now fire a second EndOfTurn — should be suppressed as echo.
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="echo leakage")
-            )
-            await _wait_until(lambda: len(session.observed) >= 2, real_sleep=real_sleep)
-
-            # Echo turn must be logged as such, never reach Claude.
-            echo_logged = any(
-                "[echo?] echo leakage" in rec.getMessage() for rec in caplog.records
-            )
-            assert echo_logged, "echo EndOfTurn was not logged as [echo?]"
-            assert fake_claude_holder["client"].turns == ["hello"]
-        finally:
-            release_tts.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # Echo turn must be logged as such, never reach Claude.
+        assert _logged(caplog, "[echo?] echo leakage"), (
+            "echo EndOfTurn was not logged as [echo?]"
+        )
+        assert h.claude.turns == ["hello"]
 
 
 async def test_endofturn_while_idle_does_not_drive_a_turn(
@@ -2489,87 +1570,27 @@ async def test_endofturn_while_idle_does_not_drive_a_turn(
     """When the wake-word gate has not fired (state==IDLE), any
     EndOfTurn that somehow arrives must not drive a Claude turn — the
     puller's IDLE safety belt drops it."""
-    monkeypatch.delenv("MEEKO_WAKE_WORD_DISABLED", raising=False)
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
+    _set_env(monkeypatch, tmp_path, wake_word=True)
+    tts = _FakeTTSClient("dg-test")
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
+    # The detector never fires, which keeps state pinned at IDLE.
+    async with _running_meeko(
+        {"query": _profile()},
+        stt=_QueueDrivenSTTClient("dg-test"),
+        tts=tts,
+        detector=_NeverFiresDetector,
+    ) as h:
+        session = await h.stt_session()
+        await session.event_queue.put(_stt_event("EndOfTurn", "ignored while idle"))
+        await _wait_until(lambda: len(session.observed) >= 1)
 
-    wake_profiles = {
-        "query": Profile(
-            name="query",
-            wake_word="meeko",
-            prompt="system",
-            voice=None,
-            idle_timeout_seconds=0,
-            post_wake_timeout_seconds=0,
-        )
-    }
+        # Give the turn worker a few scheduling cycles to be wrong if it
+        # were going to. It shouldn't run — turn was filtered.
+        for _ in range(20):
+            await _REAL_SLEEP(0.001)
 
-    # Detector that never fires — keeps state pinned at IDLE.
-    class _NeverFires:
-        def __init__(self, *a, **kw):
-            self.calls = 0
-
-        def process(self, pcm: bytes) -> bool:
-            self.calls += 1
-            return False
-
-    fake_stt = _QueueDrivenSTTClient("dg-test")
-    fake_tts = _FakeTTSClient("dg-test")
-
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(wake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.WakeWordDetector", side_effect=_NeverFires),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await _wait_until(
-                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
-            )
-            session = fake_stt.session_obj
-
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="ignored while idle")
-            )
-            await _wait_until(lambda: len(session.observed) >= 1, real_sleep=real_sleep)
-
-            # Give the turn worker a few scheduling cycles to be wrong if it
-            # were going to. It shouldn't run — turn was filtered.
-            for _ in range(20):
-                await real_sleep(0.001)
-
-            assert fake_claude_holder["client"].turns == []
-            assert fake_tts.calls == []
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        assert h.claude.turns == []
+        assert tts.calls == []
 
 
 async def test_start_of_turn_during_speaking_triggers_barge_in(
@@ -2578,110 +1599,38 @@ async def test_start_of_turn_during_speaking_triggers_barge_in(
     """A StartOfTurn observed while state==SPEAKING must cancel the
     in-flight speak task, flush the speaker buffer, and return the
     session to LISTENING. A subsequent EndOfTurn drives a fresh turn."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    first_write = asyncio.Event()
-    speaker_stream.write.side_effect = lambda data: first_write.set()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    fake_stt = _QueueDrivenSTTClient("dg-test")
-
-    release_tts = asyncio.Event()
-
-    class _SlowTTS:
-        def __init__(self, api_key):
-            self.calls: list[tuple[str, str]] = []
-
-        async def stream(self, text, voice):
-            self.calls.append((text, voice))
-            yield b"\x01\x02\x03\x04"
-            await release_tts.wait()
-
-    fake_tts = _SlowTTS("dg-test")
-
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
+    _set_env(monkeypatch, tmp_path)
     caplog.set_level(logging.INFO, logger="meeko")
+    tts = _BlockingTTSClient()
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await _wait_until(
-                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
-            )
-            session = fake_stt.session_obj
+    async with _running_meeko(
+        fake_profiles, stt=_QueueDrivenSTTClient("dg-test"), tts=tts
+    ) as h:
+        session = await h.stt_session()
 
-            # Drive the first turn into SPEAKING.
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="hello")
-            )
-            await asyncio.wait_for(first_write.wait(), timeout=5)
+        # Drive the first turn into SPEAKING.
+        await session.event_queue.put(_stt_event("EndOfTurn", "hello"))
+        await asyncio.wait_for(h.first_write.wait(), timeout=5)
 
-            # User barges in: StartOfTurn while SPEAKING. The speak task
-            # should be cancelled even though release_tts is still
-            # blocking the TTS stream.
-            await session.event_queue.put(
-                SimpleNamespace(event="StartOfTurn", transcript="")
-            )
-            await _wait_until(
-                lambda: any(
-                    "Barge-in: turn cancelled" in rec.getMessage()
-                    for rec in caplog.records
-                ),
-                real_sleep=real_sleep,
-            )
+        # User barges in: StartOfTurn while SPEAKING. The speak task
+        # should be cancelled even though the TTS stream is still
+        # blocked on `release`.
+        await session.event_queue.put(_stt_event("StartOfTurn"))
+        await _wait_until(lambda: _logged(caplog, "Barge-in: turn cancelled"))
 
-            # Barge-in mutes further writes via the audio_io flag rather
-            # than touching the PortAudio stream — stop_stream from the
-            # asyncio thread races a blocking write_stream still running
-            # in the to_thread executor and corrupts the stream on ALSA.
-            assert not speaker_stream.stop_stream.called
-            assert not speaker_stream.start_stream.called
+        # Barge-in mutes further writes via the audio_io flag rather
+        # than touching the PortAudio stream — stop_stream from the
+        # asyncio thread races a blocking write_stream still running
+        # in the to_thread executor and corrupts the stream on ALSA.
+        assert not h.speaker.stop_stream.called
+        assert not h.speaker.start_stream.called
 
-            # Now the user finishes their interruption. The EndOfTurn
-            # arrives in LISTENING (not SPEAKING) and drives a fresh turn —
-            # the barge-in utterance is the new instruction and reaches Claude.
-            release_tts.set()  # unblock any residual TTS so new turn can run
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="wait, actually")
-            )
-            await _wait_until(
-                lambda: (
-                    fake_claude_holder["client"].turns == ["hello", "wait, actually"]
-                ),
-                real_sleep=real_sleep,
-            )
-        finally:
-            release_tts.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # Now the user finishes their interruption. The EndOfTurn
+        # arrives in LISTENING (not SPEAKING) and drives a fresh turn —
+        # the barge-in utterance is the new instruction and reaches Claude.
+        tts.release.set()  # unblock any residual TTS so new turn can run
+        await session.event_queue.put(_stt_event("EndOfTurn", "wait, actually"))
+        await _wait_until(lambda: h.claude.turns == ["hello", "wait, actually"])
 
 
 async def test_start_of_turn_during_processing_triggers_barge_in(
@@ -2692,17 +1641,8 @@ async def test_start_of_turn_during_processing_triggers_barge_in(
     Deepgram TTS first-byte synthesis) must cancel the in-flight turn
     and return the session to LISTENING so the user's interruption is
     captured rather than silently dropped."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    fake_stt = _QueueDrivenSTTClient("dg-test")
-    fake_tts = _FakeTTSClient("dg-test")
+    _set_env(monkeypatch, tmp_path)
+    caplog.set_level(logging.INFO, logger="meeko")
 
     # Block Claude before it yields any text — keeps the turn in
     # PROCESSING (no TTS first-byte → no SPEAKING transition).
@@ -2720,78 +1660,28 @@ async def test_start_of_turn_during_processing_triggers_barge_in(
 
             return _gen()
 
-    fake_claude_holder: dict = {}
+    async with _running_meeko(
+        fake_profiles, stt=_QueueDrivenSTTClient("dg-test"), claude=_SlowClaude
+    ) as h:
+        session = await h.stt_session()
 
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _SlowClaude(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
+        # Drive the first turn into PROCESSING.
+        await session.event_queue.put(_stt_event("EndOfTurn", "hello"))
+        await asyncio.wait_for(claude_called.wait(), timeout=5)
 
-    real_sleep = asyncio.sleep
+        # No audio has played — state is still PROCESSING. User
+        # barges in: StartOfTurn must cancel the in-flight turn.
+        await session.event_queue.put(_stt_event("StartOfTurn"))
+        await _wait_until(lambda: _logged(caplog, "Barge-in: turn cancelled"))
 
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
+        # Release Claude in case any partial cleanup is awaiting it.
+        release_claude.set()
 
-    caplog.set_level(logging.INFO, logger="meeko")
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await _wait_until(
-                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
-            )
-            session = fake_stt.session_obj
-
-            # Drive the first turn into PROCESSING.
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="hello")
-            )
-            await asyncio.wait_for(claude_called.wait(), timeout=5)
-
-            # No audio has played — state is still PROCESSING. User
-            # barges in: StartOfTurn must cancel the in-flight turn.
-            await session.event_queue.put(
-                SimpleNamespace(event="StartOfTurn", transcript="")
-            )
-            await _wait_until(
-                lambda: any(
-                    "Barge-in: turn cancelled" in rec.getMessage()
-                    for rec in caplog.records
-                ),
-                real_sleep=real_sleep,
-            )
-
-            # Release Claude in case any partial cleanup is awaiting it.
-            release_claude.set()
-
-            # The user finishes their interruption. The EndOfTurn arrives
-            # in LISTENING (not PROCESSING/SPEAKING) and drives a fresh turn
-            # — the user's change-of-mind was captured, not silently dropped.
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="wait, actually")
-            )
-            await _wait_until(
-                lambda: (
-                    fake_claude_holder["client"].turns == ["hello", "wait, actually"]
-                ),
-                real_sleep=real_sleep,
-            )
-        finally:
-            release_claude.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # The user finishes their interruption. The EndOfTurn arrives
+        # in LISTENING (not PROCESSING/SPEAKING) and drives a fresh turn
+        # — the user's change-of-mind was captured, not silently dropped.
+        await session.event_queue.put(_stt_event("EndOfTurn", "wait, actually"))
+        await _wait_until(lambda: h.claude.turns == ["hello", "wait, actually"])
 
 
 async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
@@ -2802,98 +1692,34 @@ async def test_end_of_turn_immediately_after_barge_in_is_not_dropped(
     dropped as `[echo?]`. request_barge_in() flips state to LISTENING
     synchronously so pull_stt_events sees the right state when it drains
     the EndOfTurn that follows StartOfTurn."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    first_write = asyncio.Event()
-    speaker_stream.write.side_effect = lambda data: first_write.set()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    fake_stt = _QueueDrivenSTTClient("dg-test")
-
-    release_tts = asyncio.Event()
-
-    class _SlowTTS:
-        def __init__(self, api_key):
-            self.calls: list[tuple[str, str]] = []
-
-        async def stream(self, text, voice):
-            self.calls.append((text, voice))
-            yield b"\x01\x02\x03\x04"
-            await release_tts.wait()
-
-    fake_tts = _SlowTTS("dg-test")
-
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
+    _set_env(monkeypatch, tmp_path)
     caplog.set_level(logging.INFO, logger="meeko")
+    tts = _BlockingTTSClient()
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await _wait_until(
-                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
-            )
-            session = fake_stt.session_obj
+    async with _running_meeko(
+        fake_profiles, stt=_QueueDrivenSTTClient("dg-test"), tts=tts
+    ) as h:
+        session = await h.stt_session()
 
-            # Drive into SPEAKING.
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="hello")
-            )
-            await asyncio.wait_for(first_write.wait(), timeout=5)
+        # Drive into SPEAKING.
+        await session.event_queue.put(_stt_event("EndOfTurn", "hello"))
+        await asyncio.wait_for(h.first_write.wait(), timeout=5)
 
-            # Queue StartOfTurn and EndOfTurn back-to-back so the
-            # EndOfTurn is available the moment pull_stt_events finishes
-            # handling the StartOfTurn. Without the synchronous state
-            # flip in request_barge_in, the EndOfTurn would be processed
-            # while state is still SPEAKING and dropped as `[echo?]`.
-            await session.event_queue.put(
-                SimpleNamespace(event="StartOfTurn", transcript="")
-            )
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="stop")
-            )
-            release_tts.set()  # let the cancelled speak unwind
+        # Queue StartOfTurn and EndOfTurn back-to-back so the
+        # EndOfTurn is available the moment pull_stt_events finishes
+        # handling the StartOfTurn. Without the synchronous state
+        # flip in request_barge_in, the EndOfTurn would be processed
+        # while state is still SPEAKING and dropped as `[echo?]`.
+        await session.event_queue.put(_stt_event("StartOfTurn"))
+        await session.event_queue.put(_stt_event("EndOfTurn", "stop"))
+        tts.release.set()  # let the cancelled speak unwind
 
-            await _wait_until(
-                lambda: fake_claude_holder["client"].turns == ["hello", "stop"],
-                real_sleep=real_sleep,
-            )
+        await _wait_until(lambda: h.claude.turns == ["hello", "stop"])
 
-            # Defensive: ensure the interruption was not logged as echo.
-            assert not any(
-                "[echo?] stop" in rec.getMessage() for rec in caplog.records
-            ), "EndOfTurn that arrived during cancel propagation was dropped as echo"
-        finally:
-            release_tts.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        # Defensive: ensure the interruption was not logged as echo.
+        assert not _logged(caplog, "[echo?] stop"), (
+            "EndOfTurn that arrived during cancel propagation was dropped as echo"
+        )
 
 
 async def test_start_of_turn_while_listening_does_not_cancel(
@@ -2903,69 +1729,19 @@ async def test_start_of_turn_while_listening_does_not_cancel(
     nothing to cancel) and must not log a barge-in line. PROCESSING is
     a separate case — it does trigger barge-in, covered by
     test_start_of_turn_during_processing_triggers_barge_in."""
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-
-    fake_stt = _QueueDrivenSTTClient("dg-test")
-    fake_tts = _FakeTTSClient("dg-test")
-
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _FakeClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
+    _set_env(monkeypatch, tmp_path)
     caplog.set_level(logging.INFO, logger="meeko")
 
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            await _wait_until(
-                lambda: fake_stt.session_obj is not None, real_sleep=real_sleep
-            )
-            session = fake_stt.session_obj
+    async with _running_meeko(fake_profiles, stt=_QueueDrivenSTTClient("dg-test")) as h:
+        session = await h.stt_session()
 
-            # StartOfTurn arriving while LISTENING — no barge-in.
-            await session.event_queue.put(
-                SimpleNamespace(event="StartOfTurn", transcript="")
-            )
-            await session.event_queue.put(
-                SimpleNamespace(event="EndOfTurn", transcript="hi")
-            )
-            await _wait_until(
-                lambda: fake_claude_holder["client"].turns == ["hi"],
-                real_sleep=real_sleep,
-            )
+        # StartOfTurn arriving while LISTENING — no barge-in.
+        await session.event_queue.put(_stt_event("StartOfTurn"))
+        await session.event_queue.put(_stt_event("EndOfTurn", "hi"))
+        await _wait_until(lambda: h.claude.turns == ["hi"])
 
-            assert not any("Barge-in" in rec.getMessage() for rec in caplog.records)
-            assert not speaker_stream.stop_stream.called
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        assert not _logged(caplog, "Barge-in")
+        assert not h.speaker.stop_stream.called
 
 
 async def test_run_missing_api_key_raises(monkeypatch):
@@ -2985,75 +1761,20 @@ async def test_end_session_before_any_turn_fire_summary_is_noop(
     """If end_session fires before any user turn is persisted, session_id
     is None and fire_summary must no-op (lazy creation never ran).
     Covers the `if finalized_sid is None: return` branch in fire_summary."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path)
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "stop"
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
-
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "stop"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _EndSessionNoTurnClaudeClient(api_key, system_prompt, dispatcher, **kwargs)
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        try:
-            for _ in range(500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            claude = None
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.reset_count >= 1:
-                    claude = c
-                    break
-                await real_sleep(0.01)
-            assert claude is not None, "end_session never called reset_session"
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+    async with _running_meeko(
+        fake_profiles, stt=stt, claude=_EndSessionNoTurnClaudeClient
+    ) as h:
+        await h.stt_session()
+        stt.ready.set()
+        await h.claude_reset()
 
     # No session row was created — lazy creation never fired and
     # fire_summary(None) was a no-op rather than crashing.
-    store = SessionStore.open(db_path)
-    try:
-        rows = await store.list_sessions()
-    finally:
-        await store.close()
-    assert len(rows) == 0
+    assert await _list_sessions(db_path) == []
 
 
 async def test_load_session_when_current_session_has_turns_fires_summary(
@@ -3062,118 +1783,31 @@ async def test_load_session_when_current_session_has_turns_fires_summary(
     """load_session fires after the current session already has turns.
     session_id is non-None so the summary log branch (in
     apply_post_turn_session_change) and fire_summary are both exercised."""
-    from meeko.sessions import SessionStore
+    db_path = _set_env(monkeypatch, tmp_path)
+    target_id = await _seed_session(
+        db_path,
+        title="Prior session",
+        summary="We discussed things.",
+        transcript="USER: prior question\nASSISTANT: prior answer",
+    )
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "go back to the prior session"
 
-    db_path = tmp_path / "meeko.db"
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
-    monkeypatch.setenv("MEEKO_DB_PATH", str(db_path))
-
-    seed = SessionStore.open(db_path)
-    target_id = None
-    try:
-        target_id = await seed.create_session("query")
-        await seed.persist_turn(target_id, "user", "prior question")
-        await seed.persist_turn(
-            target_id, "assistant", [{"type": "text", "text": "prior answer"}]
+    async with _running_meeko(
+        fake_profiles,
+        stt=stt,
+        claude=functools.partial(
+            _LoadSessionWithTurnClaudeClient, target_session_id=target_id
+        ),
+    ) as h:
+        await h.stt_session()
+        stt.ready.set()
+        await _wait_until(
+            lambda: h.claude is not None and h.claude.session_id == target_id
         )
-        await seed.update_session_metadata(
-            target_id,
-            title="Prior session",
-            summary="We discussed things.",
-            transcript="USER: prior question\nASSISTANT: prior answer",
-        )
-    finally:
-        await seed.close()
+        original_sid = await _abandoned_session(db_path, target_id)
+        # The original (non-target) session is summarized by fire_summary.
+        title = await _wait_for_title(db_path, original_sid)
 
-    pa_instance = MagicMock()
-    mic_stream = MagicMock()
-    speaker_stream = MagicMock()
-    pa_instance.open.side_effect = [mic_stream, speaker_stream]
-    speaker_stream.write.side_effect = lambda data: None
-
-    fake_stt = _HoldingSTTClient("dg-test")
-    fake_stt.transcript = "go back to the prior session"
-    fake_tts = _FakeTTSClient("dg-test")
-    fake_claude_holder: dict = {}
-
-    def make_claude(api_key, system_prompt, dispatcher, **kwargs):
-        c = _LoadSessionWithTurnClaudeClient(
-            api_key, system_prompt, dispatcher, target_session_id=target_id, **kwargs
-        )
-        fake_claude_holder["client"] = c
-        return c
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay, *a, **kw):
-        if delay >= 1.0:
-            return await real_sleep(0)
-        return await real_sleep(delay, *a, **kw)
-
-    with (
-        patch("meeko.audio_io.pyaudio.PyAudio", return_value=pa_instance),
-        patch("meeko.main.load_profiles", return_value=(fake_profiles, "query")),
-        patch("meeko.main.load_dotenv"),
-        patch("meeko.main.DeepgramSTT", return_value=fake_stt),
-        patch("meeko.main.DeepgramTTS", return_value=fake_tts),
-        patch("meeko.main.ClaudeClient", side_effect=make_claude),
-        patch("meeko.main.asyncio.sleep", new=fast_sleep),
-        patch("meeko.main.setup_logging"),
-    ):
-        task = asyncio.create_task(meeko_main.run())
-        original_sid = None
-        try:
-            for _ in range(500):
-                if fake_stt.session_obj is not None:
-                    break
-                await real_sleep(0.01)
-            fake_stt.ready.set()
-
-            # Wait for claude to be rebound to the target session.
-            for _ in range(500):
-                c = fake_claude_holder.get("client")
-                if c is not None and c.session_id == target_id:
-                    break
-                await real_sleep(0.01)
-
-            # The original session is the only row in the DB that isn't
-            # target_id — lazy creation wrote it, then load_session swapped
-            # the binding to target_id.
-            rows_check = SessionStore.open(db_path)
-            try:
-                all_rows = await rows_check.list_sessions()
-            finally:
-                await rows_check.close()
-            non_target = [r["id"] for r in all_rows if r["id"] != target_id]
-            assert non_target, "lazy creation never fired — no non-target session row"
-            original_sid = non_target[0]
-
-            # Give the background summary task time to write.
-            for _ in range(200):
-                store_check = SessionStore.open(db_path)
-                try:
-                    row = store_check._conn.execute(
-                        "SELECT title FROM sessions WHERE id = ?",
-                        (original_sid,),
-                    ).fetchone()
-                finally:
-                    await store_check.close()
-                if row is not None and row[0] is not None:
-                    break
-                await real_sleep(0.01)
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    # The original (non-target) session was summarized by fire_summary.
-    store = SessionStore.open(db_path)
-    try:
-        row = store._conn.execute(
-            "SELECT title FROM sessions WHERE id = ?", (original_sid,)
-        ).fetchone()
-    finally:
-        await store.close()
-    assert row is not None and row[0] == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
-    assert fake_claude_holder["client"].session_id == target_id
+    assert title == _StubAsyncAnthropic._STUB_SUMMARY_TITLE
+    assert h.claude.session_id == target_id
