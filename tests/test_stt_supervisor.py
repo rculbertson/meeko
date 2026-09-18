@@ -2,9 +2,11 @@
 
 import asyncio
 import contextlib
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
 
 from meeko import stt_supervisor as supervisor_mod
 from meeko.stt_supervisor import STTSupervisor, run_session_workers
@@ -56,15 +58,22 @@ async def test_happy_path_runs_on_session_then_exits_on_stop(audio_mock):
 
 
 class _FailThenSucceedSTT:
-    def __init__(self, fail_count: int):
+    """Fails the first `fail_count` connects with `exc` (calling `on_fail`
+    just before each), then connects."""
+
+    def __init__(self, fail_count: int, exc=None, on_fail=None):
         self.attempts = 0
         self._fail_count = fail_count
+        self._exc = exc
+        self._on_fail = on_fail
 
     @contextlib.asynccontextmanager
     async def session(self):
         self.attempts += 1
         if self.attempts <= self._fail_count:
-            raise OSError("dns")
+            if self._on_fail is not None:
+                self._on_fail()
+            raise self._exc if self._exc is not None else OSError("dns")
         yield MagicMock()
 
 
@@ -186,6 +195,121 @@ async def test_cancellation_propagates(audio_mock):
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+_REAL_SLEEP = asyncio.sleep
+
+
+def _stop_on_session(stop: asyncio.Event):
+    async def on_session(sess):
+        stop.set()
+
+    return on_session
+
+
+def _held_grace_sleep():
+    """An asyncio.sleep stand-in that collapses backoff delays but holds the
+    RECONNECT_GRACE_S sleep until the returned event is set, so a test
+    controls when an uncancelled grace cutoff would fire."""
+    release = asyncio.Event()
+
+    async def sleep(delay, *a, **kw):
+        if delay == supervisor_mod.RECONNECT_GRACE_S:
+            await release.wait()
+        return await _REAL_SLEEP(0)
+
+    return sleep, release
+
+
+async def test_logs_traceback_once_then_one_line_per_retry(audio_mock, caplog):
+    """The first failure in a streak logs a traceback; later ones log one
+    line each, so a long outage doesn't flood the log. A reconnect logs
+    how many attempts it took."""
+    stop = asyncio.Event()
+    stt = _FailThenSucceedSTT(fail_count=3)
+
+    sleep, _ = _held_grace_sleep()  # keep the grace cutoff out of the log
+
+    sup = STTSupervisor(stt, audio_mock, stop, _stop_on_session(stop), lambda: False)
+    caplog.set_level(logging.INFO, logger="meeko")
+    with patch("meeko.stt_supervisor.asyncio.sleep", new=sleep):
+        await asyncio.wait_for(sup.run(), timeout=2)
+
+    records = [
+        r
+        for r in caplog.records
+        if "STT" in r.getMessage() and "Connecting" not in r.getMessage()
+    ]
+    assert [(r.levelno, r.getMessage()) for r in records] == [
+        (logging.ERROR, "STT session failed; reconnecting"),
+        (logging.WARNING, "STT reconnect failed (attempt 2): dns"),
+        (logging.WARNING, "STT reconnect failed (attempt 3): dns"),
+        (logging.INFO, "STT reconnected after 4 attempt(s)"),
+    ]
+    assert records[0].exc_info is not None
+    assert all(r.exc_info is None for r in records[1:])
+
+
+async def test_websocket_close_is_logged_as_such(audio_mock, caplog):
+    stop = asyncio.Event()
+    stt = _FailThenSucceedSTT(fail_count=1, exc=ConnectionClosedError(None, None))
+
+    sleep, _ = _held_grace_sleep()  # keep the grace cutoff out of the log
+
+    sup = STTSupervisor(stt, audio_mock, stop, _stop_on_session(stop), lambda: False)
+    caplog.set_level(logging.INFO, logger="meeko")
+    with patch("meeko.stt_supervisor.asyncio.sleep", new=sleep):
+        await asyncio.wait_for(sup.run(), timeout=2)
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == ["STT websocket closed; reconnecting"]
+
+
+async def _let_grace_fire(release: asyncio.Event) -> None:
+    release.set()
+    for _ in range(10):
+        await _REAL_SLEEP(0)
+
+
+async def test_quick_reconnect_cancels_the_grace_cutoff(audio_mock):
+    """A reconnect inside the grace window cancels the pending cutoff, so
+    the mic isn't stopped out from under the new session."""
+    stop = asyncio.Event()
+    stt = _FailThenSucceedSTT(fail_count=1)
+    sleep, release = _held_grace_sleep()
+
+    async def on_session(sess):
+        # Let the cutoff's sleep finish while the new session is live: only
+        # the reconnect's cancel stands between it and stop_mic(). (After
+        # run() returns, shutdown would cancel it anyway.)
+        await _let_grace_fire(release)
+        stop.set()
+
+    sup = STTSupervisor(stt, audio_mock, stop, on_session, lambda: False)
+    with patch("meeko.stt_supervisor.asyncio.sleep", new=sleep):
+        await asyncio.wait_for(sup.run(), timeout=2)
+
+    audio_mock.stop_mic.assert_not_called()
+    audio_mock.drain_mic_queue.assert_not_called()
+
+
+async def test_shutdown_mid_outage_cancels_the_grace_cutoff(audio_mock):
+    """Stopping while a reconnect is pending cancels the cutoff rather than
+    leaving it to fire after run() has returned."""
+    stop = asyncio.Event()
+    stt = _FailThenSucceedSTT(fail_count=1, on_fail=stop.set)
+    sleep, release = _held_grace_sleep()
+
+    async def on_session(sess):
+        pytest.fail("should stop before reconnecting")
+
+    sup = STTSupervisor(stt, audio_mock, stop, on_session, lambda: False)
+    with patch("meeko.stt_supervisor.asyncio.sleep", new=sleep):
+        await asyncio.wait_for(sup.run(), timeout=2)
+        await _let_grace_fire(release)
+
+    assert stt.attempts == 1
+    audio_mock.stop_mic.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
