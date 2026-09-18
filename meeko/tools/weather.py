@@ -177,7 +177,7 @@ def _precip_window(hourly: dict[str, Any], *, now_hour: int | None) -> str:
 class WeatherClient:
     """Fetches forecasts from Open-Meteo.
 
-    Configured at orchestrator startup via `configure()`. The home
+    Configured at startup in `meeko/main.py` via `configure()`. The home
     location is supplied as explicit lat/lon; ad-hoc per-call locations
     arrive as caller-supplied (lat, lon, label) tuples — Sonnet produces
     them from its own knowledge, no geocoder needed.
@@ -447,7 +447,7 @@ def _format_hourly(place: str, forecast: dict[str, Any], temp_sym: str) -> str:
     return header + ":\n" + "\n".join(rows)
 
 
-# Singleton instance. The orchestrator calls `configure()` on startup.
+# Singleton instance. meeko/main.py calls `configure()` on startup.
 weather_client = WeatherClient()
 
 

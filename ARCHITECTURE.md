@@ -80,6 +80,8 @@ The ReSpeaker XVF3800 deserves a dedicated subsection because of its tight AEC r
 
 ## 4. Component Details
 
+[meeko/main.py](meeko/main.py) is the entry point and composition root: `run()` builds every component and injects its dependencies. The orchestration logic those components drive — the state machine, the mic pump, STT event routing, the idle windows and the turn worker — lives in the [meeko/orchestrator/](meeko/orchestrator/) package. The STT connection lifecycle (reconnect, backoff, keepalive) stays in [meeko/stt_supervisor.py](meeko/stt_supervisor.py), next to the Deepgram client it supervises.
+
 ### 4.1 Mic / speaker layer (and the XVF3800)
 
 Audio I/O is implemented with PyAudio (not `sounddevice`) — PortAudio gives direct control over native channel counts, which we need because PortAudio does not silently rate/channel-convert the way macOS CoreAudio does for system apps. Both streams open at the device's native channel count and mono ↔ stereo conversion happens in Python.
@@ -121,7 +123,7 @@ Used for speech synthesis. Text is streamed to the TTS WebSocket as Claude gener
 
 ### 4.5 Session Management via Claude Tools
 
-Session-management intents — end, new, list, and load (resume) — are exposed to Sonnet as Claude-native tools, not detected by a separate classifier. This mirrors the pattern already used for timers ([meeko/tools/timer.py](meeko/tools/timer.py)) and profile switching ([meeko/tools/profile.py](meeko/tools/profile.py)): tools are registered via `ToolDispatcher`, Sonnet decides when to call them based on the conversation, and the orchestrator executes the side effect when Sonnet emits a `tool_use` block.
+Session-management intents — end, new, list, and load (resume) — are exposed to Sonnet as Claude-native tools, not detected by a separate classifier. This mirrors the pattern already used for timers ([meeko/tools/timer.py](meeko/tools/timer.py)) and profile switching ([meeko/tools/profile.py](meeko/tools/profile.py)): tools are registered via `ToolDispatcher`, Sonnet decides when to call them based on the conversation, and `ClaudeClient`'s tool-use loop dispatches to the tool's handler, which executes the side effect, when Sonnet emits a `tool_use` block.
 
 **Tools exposed to Sonnet:**
 
@@ -136,10 +138,10 @@ Session-management intents — end, new, list, and load (resume) — are exposed
 
 **Cache behavior.** Tool definitions are stable across turns and sit inside the cached prefix. Tool-result blocks are appended to the message array and are themselves cached on subsequent turns. No additional caching hooks required.
 
-**The `load_session` hook.** `load_session` is the one tool whose side effect rewrites Sonnet's own context. When dispatched, the orchestrator:
+**The `load_session` hook.** `load_session` is the one tool whose side effect rewrites Sonnet's own context. When dispatched:
 
-1. Runs the normal tool handler, which sets a `request_load(target_id)` flag and returns the stored transcript metadata.
-2. After Sonnet's verbal confirmation/wrap-up is fully spoken (SPEAKING ends), fires the abandoned session's summary in the background, calls `store.load_turns(target_id)`, swaps the in-memory message array via `claude.load_history`, and `claude.rebind_session(target_id)`.
+1. The normal tool handler runs, sets a `request_load(target_id)` flag, and returns the stored transcript metadata.
+2. After Sonnet's verbal confirmation/wrap-up is fully spoken (SPEAKING ends), the post-turn hook fires the abandoned session's summary in the background, calls `store.load_turns(target_id)`, swaps the in-memory message array via `claude.load_history`, and `claude.rebind_session(target_id)`.
 3. Subsequent turns hit the cache with the injected history (one-time cache-write cost on the first post-load turn).
 
 See `_apply_post_turn_session_change` in [meeko/main.py](meeko/main.py), which `TurnWorker` ([meeko/orchestrator/turn_worker.py](meeko/orchestrator/turn_worker.py)) calls once each turn's speech has finished.
@@ -311,12 +313,12 @@ When a session ends, a separate Claude API call generates a `{title, summary}` p
 Resume is driven by Sonnet calling the `list_sessions` and `load_session` tools — the same flow works whether the request comes on the first utterance after wake or mid-conversation.
 
 1. User expresses resume intent ("let's go back to the todo app", at session start or mid-conversation).
-2. Sonnet calls `list_sessions(query="todo app")`. The orchestrator runs SQLite FTS5 against title + summary + transcript (BM25-weighted so title/summary outrank transcript matches), returns top N matches as the tool result.
+2. Sonnet calls `list_sessions(query="todo app")`. The `list_sessions` handler runs SQLite FTS5 against title + summary + transcript (BM25-weighted so title/summary outrank transcript matches), returns top N matches as the tool result.
 
    `list_sessions` also takes an optional `since`/`until` date range, for "what did we talk about yesterday?" style asks. Sonnet passes local `YYYY-MM-DD` dates (it is told today's local date every turn via the system prompt's date block) and the handler converts them to UTC for comparison against `last_active`. The date-only path deliberately queries the `sessions` table rather than `sessions_fts`, so sessions that haven't been summarized yet still show up — otherwise "what did we discuss today?" would miss the conversation that just ended.
 3. Sonnet asks for confirmation verbally: *"I found the todo app session from Tuesday — shall I load it?"* (one clear match) or reads top 2-3 titles (multiple matches).
-4. On user confirmation, Sonnet calls `load_session(id=...)`. The orchestrator automatically fires end-of-session summarization for the abandoned session in the background, so Sonnet does not need to chain `end_session` first.
-5. The orchestrator's `load_session` dispatch hook (§4.5) loads the full transcript, replaces the in-memory message array, and rebinds `ClaudeClient` to the loaded session's SQLite row before the next user turn triggers a Claude call.
+4. On user confirmation, Sonnet calls `load_session(id=...)`. The post-turn hook (`_apply_post_turn_session_change`) automatically fires end-of-session summarization for the abandoned session in the background, so Sonnet does not need to chain `end_session` first.
+5. The same hook's `load_session` branch (§4.5) loads the full transcript, replaces the in-memory message array, and rebinds `ClaudeClient` to the loaded session's SQLite row before the next user turn triggers a Claude call.
 6. Conversation continues in the loaded session's context.
 
 **Cost note.** Injecting a large transcript on resume incurs a one-time cache write cost on the first turn (~1.25× normal input price). Subsequent turns in that session hit the cache at 10% of normal input price.

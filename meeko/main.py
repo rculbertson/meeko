@@ -1,4 +1,9 @@
-"""Meeko orchestrator: mic → Deepgram STT → Claude → Deepgram TTS → speaker.
+"""Meeko entry point: mic → Deepgram STT → Claude → Deepgram TTS → speaker.
+
+This module is the composition root: `run()` builds every component and
+injects its dependencies. The orchestration logic itself — state machine,
+mic pump, STT event routing, idle windows, turn worker — lives in
+`meeko/orchestrator/`.
 
 This replaces the Deepgram Voice Agent wiring from the prototype. Claude
 is called directly; STT and TTS are Deepgram-only. Audio runs over
