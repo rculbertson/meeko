@@ -10,7 +10,7 @@ clean reconnect.
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed
@@ -46,6 +46,41 @@ async def keepalive_pump(stt_session, stop_event: asyncio.Event) -> None:
             await stt_session.send_keepalive()
         except ConnectionClosed:
             return
+
+
+async def run_session_workers(*workers: Coroutine[Any, Any, None]) -> None:
+    """Run one STT session's workers until the first of them finishes.
+
+    Every worker needs the same live session, so any one ending means
+    the session is over: the others are cancelled and awaited, and then
+    the first finisher's outcome becomes this call's outcome.
+
+    That last part is the contract the supervisor depends on. If the
+    first finisher raised, the exception propagates, and ``run()`` backs
+    off, arms the grace cutoff and reconnects. Swallowing it would turn
+    a dead connection into a normal return, and Meeko would reconnect
+    with no backoff, no failure count and no log explaining why.
+
+    Exceptions raised by the *other* workers while they're being
+    cancelled are discarded, so they can't mask the one that ended the
+    session. If this call is itself cancelled (shutdown), every worker
+    is cancelled and awaited before the CancelledError propagates.
+    """
+    tasks = [asyncio.create_task(w) for w in workers]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for t in done:
+            exc = t.exception()
+            if exc is not None:
+                raise exc
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class STTSupervisor:
