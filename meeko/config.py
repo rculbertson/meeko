@@ -114,8 +114,8 @@ class Profile:
     # The profile name is the mode. "query" auto-closes silently after
     # `idle_timeout_seconds` of silence; "conversation" prompts after
     # `conversation_idle_seconds` then closes after
-    # `conversation_close_seconds` more silence (see meeko/main.py
-    # _idle_monitor).
+    # `conversation_close_seconds` more silence (see meeko/idle.py
+    # run_idle_window).
     #
     # `post_wake_timeout_seconds` is the silence window right after the
     # wake word, before the user's first turn. On expiry the session

@@ -161,14 +161,14 @@ Meeko runs under one of several **profiles** defined in `[profiles.<name>]` tabl
 
 The shipped config provides both: `query` (terse one- to two-sentence replies) and `conversation` (substantive thinking-partner persona).
 
-**Modes** drive post-turn idle behavior in `_idle_monitor` ([meeko/main.py](meeko/main.py)):
+**Modes** drive post-turn idle behavior in `run_idle_window` ([meeko/idle.py](meeko/idle.py)):
 
 | Mode | Behavior |
 |---|---|
 | `query` | After `idle_timeout_seconds` of silence in LISTENING, close the session silently. Optimized for one-shot questions. |
 | `conversation` | After `conversation_idle_seconds`, speak a verbal check-in ("Would you like to continue, or should we end the session now?"). If no response within `conversation_close_seconds` after that, speak a closing line and end the session. Pauses are first-class. |
 
-**Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It is mode-independent: on expiry the session closes silently and returns to IDLE in both modes, requiring a fresh wake word. Non-positive disables it. Armed by `start_post_wake_monitor` and torn down by the same `cancel_idle_monitor` path as the post-turn monitors ([meeko/main.py](meeko/main.py)).
+**Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It is mode-independent: on expiry the session closes silently and returns to IDLE in both modes, requiring a fresh wake word. Non-positive disables it. Both windows are owned by `IdleController` ([meeko/idle.py](meeko/idle.py)), which arms them (`start_post_wake` / `start_post_turn`) and shares one task slot between them, so every teardown path — user activity, barge-in, the next turn, shutdown — is a single `cancel()`.
 
 **Voice-driven mode switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. When the user says "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on", Sonnet calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new mode's idle timings take effect on the next turn. The active profile persists for the rest of the session.
 
