@@ -17,7 +17,7 @@ search index and aren't useful for topic matching).
 
 Model choice: Sonnet (not Haiku). Sessions can grow to 50k-150k tokens
 and the summary drives voice-resume recall — quality matters more than
-the per-call cost at personal-use volumes. See design doc §6.3.
+the per-call cost at personal-use volumes. See ARCHITECTURE.md §6.3.
 """
 
 import json
@@ -33,10 +33,10 @@ logger = logging.getLogger("meeko")
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
 
-# Chunking for very long transcripts is deferred (design §6.3 notes
-# ~150k tokens as the threshold). Today we send the whole thing; if it
-# exceeds Sonnet's context window the API will error and we'll log and
-# skip, which is acceptable for v1 personal-use volumes.
+# Chunking for very long transcripts is deferred (ARCHITECTURE.md §6.3
+# notes ~150k tokens as the threshold). Today we send the whole thing;
+# if it exceeds Sonnet's context window the API will error and we'll log
+# and skip, which is acceptable for v1 personal-use volumes.
 
 _PROMPT = """Summarize this brainstorming conversation for future reference.
 

@@ -35,7 +35,7 @@ It also handles quick everyday tasks (one-shot questions, timers, persona switch
 │   Deepgram STT     │         │    Deepgram TTS       │
 │   Flux model       │         │    Aura-2             │
 │   EndOfTurn events │         │    streamed playback  │
-│   SpeechStarted    │         └──────────────────────┘
+│   StartOfTurn      │         └──────────────────────┘
 └────────────┬───────┘                    ▲
              │ transcript                 │ text
              ▼                            │
@@ -98,7 +98,7 @@ For other hardware (Mac built-in mic, generic USB mics with no hardware AEC), se
 Used for real-time transcription and end-of-turn detection. The Flux model is specifically designed for conversational voice agents — it detects end-of-turn semantically, not just by silence threshold.
 
 **Key events:**
-- `SpeechStarted` — user has begun speaking; used to trigger barge-in if TTS is playing
+- `StartOfTurn` — user has begun speaking; used to trigger barge-in if a reply is being generated or played
 - `EndOfTurn` — user has finished their turn; triggers the Claude API call
 
 ### 4.3 Claude API (direct)
@@ -127,7 +127,7 @@ Session-management intents — end, new, list, and load (resume) — are exposed
 |---|---|
 | `end_session` | Orchestrator finalizes the current SQLite session, returns state to `IDLE`, and re-arms the wake-word detector. |
 | `new_session` | Finalize current session, reset in-memory message array, create a fresh SQLite session row, continue in `LISTENING`. |
-| `list_sessions(query)` | FTS search across `title + summary + transcript` (BM25-weighted so title/summary matches rank above transcript). Returns top N matches as the tool result. |
+| `list_sessions(query, since, until)` | FTS search across `title + summary + transcript` (BM25-weighted so title/summary matches rank above transcript), and/or a `last_active` date range. At least one argument is required. Returns top N matches as the tool result. |
 | `load_session(id)` | Special dispatch semantics — see below. |
 
 **Confirmation UX.** Profiles' system prompts instruct Sonnet to acknowledge verbally before destructive actions. *"I found the todo app session from Tuesday — want to pick that up?"* The confirmation flow is expressed as prompt guidance + the natural turn loop, not as a hard-coded state machine in the orchestrator.
@@ -150,14 +150,16 @@ Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/he
 
 ### 4.7 Profiles and idle behavior
 
-Meeko runs under one of several **profiles** defined in `[profiles.<name>]` tables in `meeko.toml`. A profile is a (persona, mode, voice, idle-timing) bundle:
+Meeko runs under one of several **profiles** defined in `[profiles.<name>]` tables in `meeko.toml`. A profile is a (persona, voice, idle-timing) bundle:
 
-- `prompt` — the system prompt that defines the persona
-- `voice` — Aura-2 voice id
-- `mode` — either `query` or `conversation`
-- `idle_timeout_seconds`, `conversation_idle_seconds`, `conversation_close_seconds`
+- `prompt` — the system prompt that defines the persona (required)
+- `wake_word` — wake-phrase label, advisory only; the ONNX model in `[wake_word]` determines the phrase Meeko actually listens for (required)
+- `voice` — Aura-2 voice id (optional; defaults to `asteria`)
+- `idle_timeout_seconds`, `conversation_idle_seconds`, `conversation_close_seconds`, `post_wake_timeout_seconds`
 
-A `default` profile is required. The shipped config provides two profiles: `default` (query mode, terse one- to two-sentence replies) and `conversation` (conversation mode, substantive thinking-partner persona).
+**The profile name *is* the mode.** There is no separate `mode` key — `Profile.mode` is a property returning `Profile.name` ([meeko/config.py](meeko/config.py)), so a profile must be named either `query` or `conversation`; any other name is rejected at load with a `ValueError`. A top-level `default_profile = "<name>"` key selects which of them a fresh session starts in and is required.
+
+The shipped config provides both: `query` (terse one- to two-sentence replies) and `conversation` (substantive thinking-partner persona).
 
 **Modes** drive post-turn idle behavior in `_idle_monitor` ([meeko/main.py](meeko/main.py)):
 
@@ -165,6 +167,8 @@ A `default` profile is required. The shipped config provides two profiles: `defa
 |---|---|
 | `query` | After `idle_timeout_seconds` of silence in LISTENING, close the session silently. Optimized for one-shot questions. |
 | `conversation` | After `conversation_idle_seconds`, speak a verbal check-in ("Would you like to continue, or should we end the session now?"). If no response within `conversation_close_seconds` after that, speak a closing line and end the session. Pauses are first-class. |
+
+**Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It is mode-independent: on expiry the session closes silently and returns to IDLE in both modes, requiring a fresh wake word. Non-positive disables it. Armed by `start_post_wake_monitor` and torn down by the same `cancel_idle_monitor` path as the post-turn monitors ([meeko/main.py](meeko/main.py)).
 
 **Voice-driven mode switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. When the user says "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on", Sonnet calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new mode's idle timings take effect on the next turn. The active profile persists for the rest of the session.
 
@@ -187,11 +191,15 @@ Responsible for storing and retrieving sessions. See §6 for the full data model
 ```
 ┌─────────────┐
 │   IDLE      │ ◄─── app start, end_session tool call,
-└──────┬──────┘       idle-timeout close
+└──────┬──────┘       idle-timeout close,
+       │              post-wake timeout (no first turn)
        │ wake word detected ("Hey Meeko")
        ▼
 ┌─────────────┐
-│  LISTENING  │ ◄── idle monitor running here (query or conversation mode)
+│  LISTENING  │ ◄── before the first turn: post-wake monitor
+│             │     (post_wake_timeout_seconds → silent close, back to IDLE)
+│             │ ◄── after each turn: idle monitor
+│             │     (query or conversation mode)
 └──────┬──────┘
        │ EndOfTurn fires
        ▼
@@ -206,7 +214,7 @@ Responsible for storing and retrieving sessions. See §6 for the full data model
        │ audio finishes  ──────► back to LISTENING
        │                    OR ─► IDLE if end_session was tool-called
        │
-       │ SpeechStarted fires during SPEAKING
+       │ StartOfTurn fires during PROCESSING or SPEAKING
        ▼
    BARGE-IN: stop playback, cancel Claude request → LISTENING
 ```
@@ -225,14 +233,16 @@ Responsible for storing and retrieving sessions. See §6 for the full data model
 
 ### 5.3 Barge-In
 
-1. `SpeechStarted` fires while state is SPEAKING.
+1. `StartOfTurn` fires while state is SPEAKING **or PROCESSING**.
 2. Immediately stop TTS audio playback.
 3. Cancel in-flight Claude API request if possible.
 4. Discard any partially generated response.
 5. Transition to LISTENING.
 6. Process user's barge-in as a new turn.
 
-Hardware AEC (on the XVF3800) ensures Deepgram STT does not hear speaker audio as user speech. `SpeechStarted` events during TTS playback are therefore genuine barge-ins, not echo artifacts. On hardware without AEC, software mic-muting (`mute_mic_while_speaking = true`) provides the equivalent guarantee at the cost of disallowing barge-in.
+The PROCESSING case matters as much as the SPEAKING one: the window between `EndOfTurn` and the first audio byte (Claude TTFT + Deepgram TTS first-byte synthesis) is often over a second, and `Speaker` deliberately defers entering SPEAKING until that first chunk arrives so the LEDs don't claim to be talking before there's audio. A user who changes their mind during that gap is barging in on a reply that exists but isn't audible yet, and is handled identically.
+
+Hardware AEC (on the XVF3800) ensures Deepgram STT does not hear speaker audio as user speech. `StartOfTurn` events during TTS playback are therefore genuine barge-ins, not echo artifacts. On hardware without AEC, software mic-muting (`mute_mic_while_speaking = true`) provides the equivalent guarantee at the cost of disallowing barge-in.
 
 ---
 
@@ -288,7 +298,7 @@ When a session ends, a separate Claude API call generates a `{title, summary}` p
 
 **Model choice.** Summarization runs on `claude-sonnet-4-6`, not Haiku. Sessions routinely grow to 50k–150k tokens, and summary quality directly drives voice-resume recall — a weak title means the user says *"go back to the todo app"* and FTS misses. The call is once per session and runs in the background, so Haiku's cost/latency advantages don't apply.
 
-For very long transcripts (over ~150k tokens), the summarizer splits into chunks, summarizes each chunk, then summarizes the summaries.
+**Not yet implemented: chunking.** The whole transcript is sent in one call. A transcript that exceeds Sonnet's context window errors, and since summarization is fire-and-forget the failure is logged and skipped — the session simply never gets a title or an FTS row, so it can't be recalled by voice. Splitting into chunks, summarizing each, then summarizing the summaries is the intended fix; at personal-use volumes it hasn't been worth building yet. See the note at the top of [meeko/session_summary.py](meeko/session_summary.py).
 
 ### 6.4 Session Resume Flow
 
@@ -296,6 +306,8 @@ Resume is driven by Sonnet calling the `list_sessions` and `load_session` tools 
 
 1. User expresses resume intent ("let's go back to the todo app", at session start or mid-conversation).
 2. Sonnet calls `list_sessions(query="todo app")`. The orchestrator runs SQLite FTS5 against title + summary + transcript (BM25-weighted so title/summary outrank transcript matches), returns top N matches as the tool result.
+
+   `list_sessions` also takes an optional `since`/`until` date range, for "what did we talk about yesterday?" style asks. Sonnet passes local `YYYY-MM-DD` dates (it is told today's local date every turn via the system prompt's date block) and the handler converts them to UTC for comparison against `last_active`. The date-only path deliberately queries the `sessions` table rather than `sessions_fts`, so sessions that haven't been summarized yet still show up — otherwise "what did we discuss today?" would miss the conversation that just ended.
 3. Sonnet asks for confirmation verbally: *"I found the todo app session from Tuesday — shall I load it?"* (one clear match) or reads top 2-3 titles (multiple matches).
 4. On user confirmation, Sonnet calls `load_session(id=...)`. The orchestrator automatically fires end-of-session summarization for the abandoned session in the background, so Sonnet does not need to chain `end_session` first.
 5. The orchestrator's `load_session` dispatch hook (§4.5) loads the full transcript, replaces the in-memory message array, and rebinds `ClaudeClient` to the loaded session's SQLite row before the next user turn triggers a Claude call.
@@ -353,7 +365,7 @@ The one operational wrinkle — `load_session` replaces Sonnet's own message arr
 
 ### Why the ReSpeaker XVF3800's 3.5mm jack for the speaker?
 
-The XVF3800 performs acoustic echo cancellation using a reference signal — the audio being played through the speaker. For hardware AEC to work, the speaker audio must reach the chip as a reference. Plugging the speaker into the 3.5mm jack on the XVF3800 provides this reference automatically. Without it, the microphones pick up speaker audio as user speech, causing false `SpeechStarted` events and hallucinated transcriptions.
+The XVF3800 performs acoustic echo cancellation using a reference signal — the audio being played through the speaker. For hardware AEC to work, the speaker audio must reach the chip as a reference. Plugging the speaker into the 3.5mm jack on the XVF3800 provides this reference automatically. Without it, the microphones pick up speaker audio as user speech, causing false `StartOfTurn` events and hallucinated transcriptions.
 
 ### Why not use Deepgram's built-in echo cancellation?
 

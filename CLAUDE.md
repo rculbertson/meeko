@@ -46,7 +46,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 ### Audio
 - Read from the **left channel** of the ReSpeaker XVF3800 USB device — this is the AEC-processed output
 - Speaker must route through the XVF3800's **3.5mm jack**, not the Pi's audio output (required for hardware AEC)
-- Barge-in: `SpeechStarted` during SPEAKING state → stop TTS, cancel Claude request, transition to LISTENING
+- Barge-in: `StartOfTurn` during SPEAKING **or PROCESSING** → stop TTS, cancel Claude request, transition to LISTENING. (Deepgram Flux emits `StartOfTurn`, not `SpeechStarted`.)
 - **Device selection** — `[audio]` in `meeko.toml` (env-var overrides in parens, all optional):
   - `input_device_index` / `output_device_index` (env: `MEEKO_INPUT_DEVICE_INDEX` / `MEEKO_OUTPUT_DEVICE_INDEX`) — pin a specific PyAudio device. Unset = OS default. Run `uv run python -m meeko.audio_io` to list indices.
   - `input_channels` / `output_channels` (env: `MEEKO_INPUT_CHANNELS` / `MEEKO_OUTPUT_CHANNELS`) — native channel counts. Default `2` / `2` (ReSpeaker).
@@ -59,10 +59,11 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
   - `model` (env: `MEEKO_WAKE_WORD_MODEL`) — path to the ONNX model. Default `models/hey_meeko.onnx`.
   - `threshold` (env: `MEEKO_WAKE_WORD_THRESHOLD`) — confidence (0–1). Default `0.96`.
   - `disabled = true` (env: `MEEKO_WAKE_WORD_DISABLED=1`) — skip the gate; start directly in `LISTENING`.
+- `post_wake_timeout_seconds` is a **per-profile** key (not `[wake_word]`), default `15.0`: the silence window between the wake word firing and the user's first turn. On expiry the session closes silently and returns to `IDLE` in both modes. Non-positive disables it.
 - First run downloads openWakeWord's melspectrogram, embedding and VAD models (~6.7 MB; its six bundled wake words are suppressed, see `models/README.md`). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
 ### LEDs
-- The XVF3800's WS2812 ring is driven by `meeko/leds.py` to mirror the state machine: IDLE off, LISTENING solid cyan, LISTENING_ACTIVE DoA (cyan indicator on darker cyan) while the user is speaking, PROCESSING blue breath, SPEAKING solid green. Errors get a ~3s red breath.
+- The XVF3800's WS2812 ring is driven by `meeko/leds.py` to mirror the state machine: IDLE off, LISTENING solid cyan, LISTENING_ACTIVE solid brighter cyan while the user is speaking, PROCESSING blue breath, SPEAKING solid green. Errors get a ~3s red breath.
 - We talk to the chip directly over libusb (pyusb vendor control transfers on resid 20) — not via ReSpeaker's `xvf_host.py`.
 - Linux defaults the USB control interface to root-only. Install `scripts/99-meeko-xvf3800.rules` once (see README) so the `plugdev` group can drive it.
 - `[system] led_disabled = true` (env: `MEEKO_LED_DISABLED=1`) — skip LED control entirely. Also auto-disabled if the XVF3800 isn't found or pyusb/libusb is unavailable, so Mac dev runs need no special handling.
@@ -84,6 +85,8 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ### State machine
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.
+
+Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout (query mode silently, conversation mode after a spoken check-in), and the post-wake timeout when no first turn ever arrives. See `ARCHITECTURE.md` §5.1.
 
 ### Debugging
 - Run with `PYTHONASYNCIODEBUG=1` (Python's built-in env var) to enable asyncio debug mode. The loop will then log a WARNING (`Executing <Handle ...> took N.NNN seconds`) whenever a synchronous callback holds it ≥100 ms — useful for diagnosing loop stalls (e.g. STT websocket keepalive timeouts). Off in normal operation; debug mode wraps every coroutine creation with traceback capture and is a real cost on hot paths. Meeko routes asyncio's own warnings through the same logging handler as `meeko.*` logs, so they pick up the timestamp format and land in the rotating log when `MEEKO_LOG_TARGET=file`.
