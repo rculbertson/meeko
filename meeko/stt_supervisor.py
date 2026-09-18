@@ -32,6 +32,22 @@ KEEPALIVE_INTERVAL_S = 5
 RECONNECT_GRACE_S = 10
 
 
+async def keepalive_pump(stt_session, stop_event: asyncio.Event) -> None:
+    """Send a Deepgram KeepAlive every few seconds so the session stays
+    open when we're not streaming audio.
+
+    Returns (rather than raising) on ConnectionClosed: the supervisor's
+    reconnect loop owns that failure, and this pump is one of the
+    session-scoped tasks it tears down and recreates around it.
+    """
+    while not stop_event.is_set():
+        try:
+            await asyncio.sleep(KEEPALIVE_INTERVAL_S)
+            await stt_session.send_keepalive()
+        except ConnectionClosed:
+            return
+
+
 class STTSupervisor:
     def __init__(
         self,
