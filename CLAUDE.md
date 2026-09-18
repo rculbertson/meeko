@@ -47,6 +47,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - Read from the **left channel** of the ReSpeaker XVF3800 USB device — this is the AEC-processed output
 - Speaker must route through the XVF3800's **3.5mm jack**, not the Pi's audio output (required for hardware AEC)
 - Barge-in: `StartOfTurn` during SPEAKING **or PROCESSING** → stop TTS, cancel Claude request, transition to LISTENING. (Deepgram Flux emits `StartOfTurn`, not `SpeechStarted`.)
+- Which STT event does what in which state is decided by `SttEventRouter` in `meeko/stt_events.py`, not in the orchestrator. The state machine it branches on (`State`, `StateManager`) lives in `meeko/state.py`.
 - **Device selection** — `[audio]` in `meeko.toml` (env-var overrides in parens, all optional):
   - `input_device_index` / `output_device_index` (env: `MEEKO_INPUT_DEVICE_INDEX` / `MEEKO_OUTPUT_DEVICE_INDEX`) — pin a specific PyAudio device. Unset = OS default. Run `uv run python -m meeko.audio_io` to list indices.
   - `input_channels` / `output_channels` (env: `MEEKO_INPUT_CHANNELS` / `MEEKO_OUTPUT_CHANNELS`) — native channel counts. Default `2` / `2` (ReSpeaker).

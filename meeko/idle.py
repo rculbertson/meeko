@@ -86,9 +86,15 @@ async def run_idle_window(
 class IdleController:
     """Arms, cancels and fires the two silence windows.
 
-    ``is_listening`` is a callable rather than the orchestrator's
-    ``StateManager`` so this module doesn't import ``meeko.main`` (which
-    imports this one). Same shape as ``STTSupervisor``'s ``is_speaking``.
+    ``is_listening`` is a callable rather than the whole ``StateManager``
+    because one boolean is all the race guard needs — same shape as
+    ``STTSupervisor``'s ``is_speaking``. Contrast ``SttEventRouter``,
+    which branches four ways on ``State`` and drives the LED sub-state,
+    so it takes the manager itself.
+
+    (This started out as cycle avoidance, back when ``State`` lived in
+    ``meeko.main``. It doesn't have to be a callable any more —
+    ``meeko.state`` is importable from here — it just still should be.)
     """
 
     def __init__(
