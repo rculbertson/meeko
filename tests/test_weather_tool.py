@@ -14,9 +14,13 @@ from meeko.tools import weather as weather_mod
 from meeko.tools.weather import (
     _HOURLY_HOURS,
     WeatherClient,
+    _FriendlyError,
+    _hourly_series,
     _now_hour_local,
     _now_local,
     _precip_window,
+    _resolve_date,
+    _wet_runs,
     get_tool_definitions,
     handle,
 )
@@ -247,6 +251,68 @@ def test_precip_window_filters_by_supplied_now_hour():
     # Current hour is kept (14 is not < 14); 17 onward drops the window.
     assert _precip_window(hourly, now_hour=14) == "around 2–4 PM"
     assert _precip_window(hourly, now_hour=17) == ""
+
+
+def test_precip_window_falls_back_to_amount_when_probability_missing():
+    # No probability for 9–10 AM, but a measurable amount → wet. Elsewhere a
+    # missing probability with zero/missing amount stays dry.
+    wet = (9, 10)
+    hourly = {
+        "time": _hourly_times("2026-06-02"),
+        "precipitation_probability": [None if h in wet else 0 for h in range(24)],
+        "precipitation": [0.2 if h in wet else 0.0 for h in range(24)],
+    }
+    assert _precip_window(hourly, now_hour=None) == "around 9–10 AM"
+
+
+def test_precip_window_unparseable_timestamp_does_not_split_run():
+    # A garbled 15:00 row is skipped, not treated as dry, so 14:00 and 16:00
+    # still form one window.
+    times = _hourly_times("2026-06-02")
+    times[15] = "not-a-time"
+    wet = (14, 15, 16)
+    hourly = {
+        "time": times,
+        "precipitation_probability": [90 if h in wet else 0 for h in range(24)],
+    }
+    assert _precip_window(hourly, now_hour=None) == "around 2–4 PM"
+
+
+def test_hourly_series_skips_bad_timestamps_and_pads_short_arrays():
+    hourly = {
+        "time": ["2026-06-02T00:00", None, "garbage", "2026-06-02T03:00"],
+        "a": [1, 2, 3, 4],
+        "b": [10],  # shorter than `time`
+    }
+    rows = list(_hourly_series(hourly, "a", "b", "missing"))
+    assert rows == [
+        (datetime(2026, 6, 2, 0), (1, 10, None)),
+        (datetime(2026, 6, 2, 3), (4, None, None)),
+    ]
+    assert list(_hourly_series({}, "a")) == []
+
+
+def test_wet_runs_groups_consecutive_wet_hours():
+    hours = [datetime(2026, 6, 2, h) for h in range(6)]
+    flags = [True, True, False, False, True, True]  # trailing run must flush
+    runs = _wet_runs(zip(hours, flags, strict=True))
+    assert runs == [hours[0:2], hours[4:6]]
+    assert _wet_runs([]) == []
+    assert _wet_runs([(hours[0], False)]) == []
+
+
+def test_resolve_date_bounds():
+    today = date(2026, 6, 2)
+    assert _resolve_date(None, today) == today
+    assert _resolve_date("2026-06-02", today) == today
+    # today + 13 is the last forecastable day; +14 is refused.
+    assert _resolve_date("2026-06-15", today) == date(2026, 6, 15)
+    with pytest.raises(_FriendlyError, match="two weeks"):
+        _resolve_date("2026-06-16", today)
+    with pytest.raises(_FriendlyError, match="look ahead"):
+        _resolve_date("2026-06-01", today)
+    with pytest.raises(_FriendlyError, match="date"):
+        _resolve_date("next thursday", today)
 
 
 def test_now_hour_local_uses_api_offset_not_server_tz():
