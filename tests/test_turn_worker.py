@@ -305,9 +305,10 @@ async def test_barge_in_flips_to_listening_before_any_await(harnesses):
 async def test_barge_in_with_no_turn_in_flight_still_flips_to_listening(
     harnesses,
 ):
-    """A timer chime enters SPEAKING through speaker.speak(), outside the
-    worker, so there's nothing to cancel. The user's interruption must
-    still be captured rather than dropped as echo."""
+    """A timer's expiry announcement ("The 5 second timer is done!")
+    enters SPEAKING through speaker.speak(), outside the worker, so
+    there's nothing to cancel. The user's interruption must still be
+    captured rather than dropped as echo."""
     h = harnesses(state=State.SPEAKING)
     h.start()
     await _yield()

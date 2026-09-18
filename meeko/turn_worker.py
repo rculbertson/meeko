@@ -74,9 +74,9 @@ class TurnWorker:
         # Flip state synchronously so any EndOfTurn arriving before the
         # cancel propagates through run() isn't dropped as echo
         # by the router. This must happen even when there's no
-        # current speak task (e.g. a timer chime is playing via
-        # speaker.speak() — that path enters SPEAKING but is not
-        # cancellable from here): the chime keeps playing, but the
+        # current speak task (e.g. a timer's expiry announcement is playing
+        # via speaker.speak() — that path enters SPEAKING but is not
+        # cancellable from here): the announcement keeps playing, but the
         # user's interruption is at least captured into turn_queue
         # instead of silently dropped. run() and speak_stream's
         # exit_speaking will re-assert LISTENING when they unwind; the
