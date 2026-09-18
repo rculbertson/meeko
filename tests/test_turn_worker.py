@@ -4,7 +4,7 @@ The turn is a fake coroutine that blocks on an Event, so each test can put
 a cancel exactly where it wants one: mid-turn, between turns, or in the
 window after a turn finishes but before the worker resumes. That makes it
 possible to test the barge-in vs. shutdown distinction directly. In the
-run() drive-throughs in test_orchestrator.py a broken flag mostly shows up
+run() drive-throughs in test_main.py a broken flag mostly shows up
 as a hang or a quietly dead worker.
 
 Uses the real StateManager (with a recording LED stand-in) rather than a

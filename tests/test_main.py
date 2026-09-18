@@ -1,4 +1,4 @@
-"""Tests for the `meeko.main` orchestrator module.
+"""Tests for `meeko.main`, the entry point and composition root.
 
 Covers `setup_logging`, the sync `main()` entrypoint, and a happy-path
 drive-through of `run()` with all external services (PyAudio, Deepgram
