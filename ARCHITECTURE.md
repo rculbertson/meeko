@@ -161,22 +161,25 @@ Meeko runs under one of several **profiles** defined in `[profiles.<name>]` tabl
 - `prompt` — the system prompt that defines the persona (required)
 - `wake_word` — wake-phrase label, advisory only; the ONNX model in `[wake_word]` determines the phrase Meeko actually listens for (required)
 - `voice` — Aura-2 voice id (optional; defaults to `asteria`)
-- `idle_timeout_seconds`, `conversation_idle_seconds`, `conversation_close_seconds`, `post_wake_timeout_seconds`
+- `description` — one line telling Sonnet when to switch to this profile (optional)
+- `idle_timeout_seconds`, `idle_prompt`, `idle_close_seconds`, `idle_close_text`, `post_wake_timeout_seconds`
 
-**The profile name *is* the mode.** There is no separate `mode` key — `Profile.mode` is a property returning `Profile.name` ([meeko/config.py](meeko/config.py)), so a profile must be named either `query` or `conversation`; any other name is rejected at load with a `ValueError`. A top-level `default_profile = "<name>"` key selects which of them a fresh session starts in and is required.
+**Profile names are free-form and carry no behavior.** No code branches on a profile's name; everything that differs between profiles is a key in its table. A top-level `default_profile = "<name>"` key selects which one a fresh session starts in and is required.
 
-The shipped config provides both: `query` (terse one- to two-sentence replies) and `conversation` (substantive thinking-partner persona).
+The shipped config provides two: `query` (terse one- to two-sentence replies, silent close) and `conversation` (substantive thinking-partner persona, spoken check-in). Users call them "modes", and the `switch_profile` tool description tells Sonnet so.
 
-**Modes** drive post-turn idle behavior in `run_idle_window` ([meeko/orchestrator/idle.py](meeko/orchestrator/idle.py)):
+**Post-turn idle behavior** is one code path, `run_idle_window` ([meeko/orchestrator/idle.py](meeko/orchestrator/idle.py)), shaped by four keys. After `idle_timeout_seconds` of silence in LISTENING: if `idle_prompt` is set, speak it and wait `idle_close_seconds` more (timed from when the check-in *finishes*, so Meeko's own talking doesn't eat into the user's response time); then, if `idle_close_text` is set, speak it; then end the session. The two shipped profiles are the two natural points in that space:
 
-| Mode | Behavior |
-|---|---|
-| `query` | After `idle_timeout_seconds` of silence in LISTENING, close the session silently. Optimized for one-shot questions. |
-| `conversation` | After `conversation_idle_seconds`, speak a verbal check-in ("Would you like to continue, or should we end the session now?"). If no response within `conversation_close_seconds` after that, speak a closing line and end the session. Pauses are first-class. |
+| Shipped profile | Keys | Behavior |
+|---|---|---|
+| `query` | defaults only | After 5s of silence, close silently. Optimized for one-shot questions. |
+| `conversation` | all four set | After 60s, "Would you like to continue, or should we end the session now?"; after 20s more, "Okay, ending the session now." and close. Pauses are first-class. |
 
-**Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It is mode-independent: on expiry the session closes silently and returns to IDLE in both modes, requiring a fresh wake word. Non-positive disables it. Both windows are owned by `IdleController` ([meeko/orchestrator/idle.py](meeko/orchestrator/idle.py)), which arms them (`start_post_wake` / `start_post_turn`) and shares one task slot between them, so every teardown path — user activity, barge-in, the next turn, shutdown — is a single `cancel()`.
+This used to be two hardcoded modes selected by the profile name, which is why names were once restricted to `query` and `conversation`. Collapsing the modes into config is what lets a user add a third profile without touching code.
 
-**Voice-driven mode switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. When the user says "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on", Sonnet calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new mode's idle timings take effect on the next turn. The active profile persists for the rest of the session.
+**Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It ignores the `idle_*` keys: on expiry the session always closes silently and returns to IDLE, requiring a fresh wake word. Non-positive disables it. Both windows are owned by `IdleController` ([meeko/orchestrator/idle.py](meeko/orchestrator/idle.py)), which arms them (`start_post_wake` / `start_post_turn`) and shares one task slot between them, so every teardown path — user activity, barge-in, the next turn, shutdown — is a single `cancel()`.
+
+**Voice-driven profile switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. The `switch_profile` description is built from the loaded profiles — one line per profile, from its `description` key ([meeko/tools/profile.py](meeko/tools/profile.py)) — so Sonnet can match both "switch to conversation mode" and indirect asks like "let's have a long conversation" to a profile, including user-added ones. It calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new profile's idle behavior takes effect on the next turn. The active profile persists for the rest of the session.
 
 ### 4.8 Session Manager
 
@@ -205,7 +208,7 @@ Responsible for storing and retrieving sessions. See §6 for the full data model
 │  LISTENING  │ ◄── before the first turn: post-wake monitor
 │             │     (post_wake_timeout_seconds → silent close, back to IDLE)
 │             │ ◄── after each turn: idle monitor
-│             │     (query or conversation mode)
+│             │     (active profile's idle_* keys)
 └──────┬──────┘
        │ EndOfTurn fires
        ▼

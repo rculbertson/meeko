@@ -25,13 +25,19 @@ default_profile = "query"
 # Env override: MEEKO_WEATHER_UNITS
 units = "imperial"
 
+# Each [profiles.<name>] table is a persona: its own system prompt, voice,
+# and behavior when you go quiet. The table name is free-form — add a third
+# profile by adding another block, and switch to it by voice ("switch to
+# <name> mode").
 [profiles.query]
-# The profile name is the conversation mode, so a profile must be named
-# either "query" or "conversation" — any other name is rejected at startup.
 wake_word = "meeko"
 voice = "mars"
-# Idle timings. Both are optional; the values shown are the defaults.
-# Silence in LISTENING after a turn before the session closes silently:
+# Tells Claude when to switch to this profile. Optional.
+description = "Quick questions. Short replies; closes after a few seconds of silence."
+# Idle behavior. All optional; the values shown are the defaults.
+# Silence in LISTENING after a turn before the session closes. With no
+# idle_prompt / idle_close_text (see [profiles.conversation]) it closes
+# silently. Non-positive disables it:
 # idle_timeout_seconds = 5.0
 # Silence between the wake word and your first turn ("Hey Meeko" with no
 # follow-up). On expiry the session closes silently and returns to IDLE,
@@ -80,12 +86,17 @@ conversation in the background before swapping to the loaded one.\
 [profiles.conversation]
 wake_word = "meeko"
 voice = "mars"
-# Idle timings. All optional; the values shown are the defaults.
-# Silence in LISTENING before Meeko speaks a verbal check-in
-# ("Would you like to continue, or should we end the session now?"):
-# conversation_idle_seconds = 60.0
-# Further silence after that check-in before Meeko closes the session:
-# conversation_close_seconds = 20.0
+description = "Long, in-depth conversations and brainstorming. Stays open through pauses."
+# Idle behavior. Unlike [profiles.query], this profile checks in before
+# closing, so these are set explicitly rather than left at the defaults.
+# Silence in LISTENING before Meeko acts:
+idle_timeout_seconds = 60.0
+# Spoken check-in after that silence. Unset = skip straight to closing:
+idle_prompt = "Would you like to continue, or should we end the session now?"
+# Further silence after the check-in before Meeko closes the session:
+idle_close_seconds = 20.0
+# Spoken just before the session closes. Unset = close silently:
+idle_close_text = "Okay, ending the session now."
 # Silence between the wake word and your first turn — same meaning as in
 # [profiles.query]. Non-positive disables it.
 # post_wake_timeout_seconds = 15.0

@@ -89,8 +89,8 @@ def test_load_profiles_default_profile_unknown(tmp_path: Path):
         load_profiles(toml_file)
 
 
-def test_load_profiles_invalid_name(tmp_path: Path):
-    """A profile whose name is not a valid mode raises ValueError."""
+def test_load_profiles_custom_name_with_idle_keys(tmp_path: Path):
+    """Profile names are free-form, and every idle key round-trips."""
     toml_file = tmp_path / "profiles.toml"
     toml_file.write_text(
         textwrap.dedent("""\
@@ -99,11 +99,83 @@ def test_load_profiles_invalid_name(tmp_path: Path):
         [profiles.pirate]
         wake_word = "ahoy"
         prompt = "You are a pirate."
+        description = "Talk like a pirate."
+        idle_timeout_seconds = 30
+        idle_prompt = "Still aboard?"
+        idle_close_seconds = 7.5
+        idle_close_text = "Fair winds."
     """)
     )
 
-    with pytest.raises(ValueError, match="not a valid mode"):
+    profiles, default_name = load_profiles(toml_file)
+
+    assert default_name == "pirate"
+    assert profiles["pirate"] == Profile(
+        name="pirate",
+        wake_word="ahoy",
+        prompt="You are a pirate.",
+        description="Talk like a pirate.",
+        idle_timeout_seconds=30.0,
+        idle_prompt="Still aboard?",
+        idle_close_seconds=7.5,
+        idle_close_text="Fair winds.",
+    )
+
+
+def test_load_profiles_idle_keys_default_to_a_silent_close(tmp_path: Path):
+    """No idle keys at all → the silent 5s close, whatever the name.
+
+    In particular a profile *named* conversation no longer inherits the
+    spoken check-in; that must now be configured."""
+    toml_file = tmp_path / "profiles.toml"
+    toml_file.write_text(
+        textwrap.dedent("""\
+        default_profile = "conversation"
+
+        [profiles.conversation]
+        wake_word = "meeko"
+        prompt = "p"
+    """)
+    )
+
+    profile = load_profiles(toml_file)[0]["conversation"]
+
+    assert profile.idle_timeout_seconds == 5.0
+    assert profile.idle_prompt is None
+    assert profile.idle_close_text is None
+    assert profile.description is None
+
+
+@pytest.mark.parametrize(
+    ("old_key", "new_key"),
+    [
+        ("conversation_idle_seconds", "idle_timeout_seconds"),
+        ("conversation_close_seconds", "idle_close_seconds"),
+    ],
+)
+def test_load_profiles_rejects_renamed_idle_keys(tmp_path: Path, old_key, new_key):
+    """An un-migrated config fails loudly rather than silently running on
+    default timings."""
+    toml_file = tmp_path / "profiles.toml"
+    toml_file.write_text(
+        textwrap.dedent(f"""\
+        default_profile = "conversation"
+
+        [profiles.conversation]
+        wake_word = "meeko"
+        prompt = "p"
+        {old_key} = 60
+    """)
+    )
+
+    with pytest.raises(ValueError) as excinfo:
         load_profiles(toml_file)
+
+    message = str(excinfo.value)
+    assert "[profiles.conversation]" in message
+    assert old_key in message
+    assert new_key in message
+    assert "idle_prompt" in message
 
 
 def test_load_profiles_empty(tmp_path: Path):
@@ -135,7 +207,7 @@ async def test_switch_profile():
 
     result = await mgr.switch_profile("conversation")
 
-    assert result == "Switched to conversation mode."
+    assert result == "Switched to the conversation profile."
     claude.set_system_prompt.assert_called_once_with("You are a thinking partner.")
     assert mgr.active_profile.name == "conversation"
 
@@ -272,3 +344,24 @@ def test_tool_definitions_include_profile_names():
     switch_def = next(d for d in defs if d["name"] == "switch_profile")
     assert "query" in switch_def["description"]
     assert "conversation" in switch_def["description"]
+
+
+def test_switch_profile_description_is_built_from_profile_descriptions():
+    """Sonnet learns when to pick a profile from its configured
+    description, so a custom profile is as discoverable as a shipped one.
+    A profile with no description is still listed by name."""
+    profiles = {
+        "pirate": Profile("pirate", "meeko", "p", description="Talk like a pirate."),
+        "plain": Profile("plain", "meeko", "p"),
+    }
+
+    switch_def = next(
+        d for d in get_tool_definitions(profiles) if d["name"] == "switch_profile"
+    )
+
+    assert "- pirate: Talk like a pirate." in switch_def["description"]
+    assert "- plain\n" in switch_def["description"] + "\n"
+    assert switch_def["input_schema"]["properties"]["profile_name"]["enum"] == [
+        "pirate",
+        "plain",
+    ]

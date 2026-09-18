@@ -166,7 +166,19 @@ async def _init_session_state(
     if resumed_row is not None:
         session_id = str(resumed_row["id"])
         stored_profile = str(resumed_row["profile_name"])
-        profile = profiles[stored_profile]
+        profile = profiles.get(stored_profile)
+        if profile is None:
+            # The session's profile was renamed or removed from the config
+            # since it was recorded. Resume the transcript under the default
+            # profile rather than refusing to start. (ProfileManager.rebind_profile
+            # handles the same case mid-session by keeping the active profile.)
+            profile = profiles[default_profile_name]
+            logger.warning(
+                "Resumed session references unknown profile %r; using default "
+                "profile %r",
+                stored_profile,
+                profile.name,
+            )
         await store.touch_session(session_id)
         history = await store.load_turns(session_id)
         logger.info(
@@ -262,7 +274,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         store, resume, profiles, default_profile_name
     )
 
-    profile_manager = ProfileManager(profiles, active_name=default_profile_name)
+    profile_manager = ProfileManager(profiles, active_name=profile.name)
     session_manager = SessionManager()
 
     # Lazy session creation: the row is INSERTed on the first persisted

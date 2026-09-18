@@ -18,7 +18,17 @@ from pathlib import Path
 
 from meeko.sessions import default_db_path as _default_db_path
 
-VALID_MODES = {"query", "conversation"}
+# Profile keys from when the profile name selected a hardcoded idle mode.
+# Rejected at load with a pointer to the replacement, so a config that set
+# them fails loudly instead of silently falling back to default timings.
+# A profile that set *neither* old nor new keys can't be told apart from
+# one that wants the defaults, so it gets them without complaint — e.g. a
+# [profiles.conversation] that relied on the old name-derived check-in now
+# closes silently. README.md §Profiles covers that upgrade step.
+_RENAMED_PROFILE_KEYS = {
+    "conversation_idle_seconds": "idle_timeout_seconds",
+    "conversation_close_seconds": "idle_close_seconds",
+}
 
 DEFAULT_CONFIG_FILENAME = "meeko.toml"
 
@@ -106,24 +116,27 @@ class Profile:
     wake_word: str
     prompt: str
     voice: str | None = None
+    description: str | None = None
     idle_timeout_seconds: float = 5.0
-    conversation_idle_seconds: float = 60.0
-    conversation_close_seconds: float = 20.0
+    idle_prompt: str | None = None
+    idle_close_seconds: float = 20.0
+    idle_close_text: str | None = None
     post_wake_timeout_seconds: float = 15.0
 
-    # The profile name is the mode. "query" auto-closes silently after
-    # `idle_timeout_seconds` of silence; "conversation" prompts after
-    # `conversation_idle_seconds` then closes after
-    # `conversation_close_seconds` more silence (see meeko/orchestrator/idle.py
-    # run_idle_window).
+    # `description` tells Sonnet when to switch to this profile; it is
+    # composed into the switch_profile tool description.
+    #
+    # The post-turn idle window (see meeko/orchestrator/idle.py
+    # run_idle_window): after `idle_timeout_seconds` of silence, speak
+    # `idle_prompt` if set and wait `idle_close_seconds` more, then speak
+    # `idle_close_text` if set and end the session. With neither text set
+    # the session closes silently. Non-positive `idle_timeout_seconds`
+    # disables the window.
     #
     # `post_wake_timeout_seconds` is the silence window right after the
     # wake word, before the user's first turn. On expiry the session
-    # closes silently and returns to IDLE (re-wake required), regardless
-    # of mode. Non-positive disables it.
-    @property
-    def mode(self) -> str:
-        return self.name
+    # closes silently and returns to IDLE (re-wake required). Non-positive
+    # disables it.
 
 
 @dataclass(frozen=True)
@@ -162,9 +175,9 @@ def load_profiles(
 ) -> tuple[dict[str, Profile], str]:
     """Load conversation profiles from `meeko.toml`.
 
-    Returns `(profiles, default_profile_name)`. The profile name is the
-    mode, so each profile name must be one of `VALID_MODES`. The top-level
-    `default_profile` key selects which profile a fresh session starts in.
+    Returns `(profiles, default_profile_name)`. Profile names are
+    free-form. The top-level `default_profile` key selects which profile a
+    fresh session starts in.
 
     With no explicit `path`, resolves via `resolve_config_path()`.
     """
@@ -186,29 +199,28 @@ def load_profiles(
 
     profiles = {}
     for name, fields in raw_profiles.items():
-        if name not in VALID_MODES:
-            raise ValueError(
-                f"Profile name {name!r} is not a valid mode; "
-                f"must be one of {sorted(VALID_MODES)}"
-            )
+        for old_key, new_key in _RENAMED_PROFILE_KEYS.items():
+            if old_key in fields:
+                raise ValueError(
+                    f"[profiles.{name}] in {path} uses {old_key!r}, which was "
+                    f"renamed to {new_key!r}. Also set 'idle_prompt' (and "
+                    f"optionally 'idle_close_text') to keep the spoken check-in; "
+                    f"see README.md §Configuration."
+                )
         profiles[name] = Profile(
             name=name,
             wake_word=fields["wake_word"],
             prompt=fields["prompt"],
             voice=fields.get("voice"),
+            description=fields.get("description"),
             idle_timeout_seconds=float(
                 fields.get("idle_timeout_seconds", Profile.idle_timeout_seconds)
             ),
-            conversation_idle_seconds=float(
-                fields.get(
-                    "conversation_idle_seconds", Profile.conversation_idle_seconds
-                )
+            idle_prompt=fields.get("idle_prompt"),
+            idle_close_seconds=float(
+                fields.get("idle_close_seconds", Profile.idle_close_seconds)
             ),
-            conversation_close_seconds=float(
-                fields.get(
-                    "conversation_close_seconds", Profile.conversation_close_seconds
-                )
-            ),
+            idle_close_text=fields.get("idle_close_text"),
             post_wake_timeout_seconds=float(
                 fields.get(
                     "post_wake_timeout_seconds", Profile.post_wake_timeout_seconds
