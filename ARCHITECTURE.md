@@ -101,6 +101,8 @@ Used for real-time transcription and end-of-turn detection. The Flux model is sp
 - `StartOfTurn` — user has begun speaking; used to trigger barge-in if a reply is being generated or played
 - `EndOfTurn` — user has finished their turn; triggers the Claude API call
 
+What each event *means* depends on the current state, and that decision table lives in `SttEventRouter` ([meeko/stt_events.py](meeko/stt_events.py)). The cases that matter are the ones that deliberately do nothing: an `EndOfTurn` in IDLE (mic audio is gated behind the wake word, so a stray transcript must not start a conversation), and an `EndOfTurn` in SPEAKING (a barge-in would already have flipped the state to LISTENING, so reaching that branch means the transcript is the assistant's own voice). The router must always drain the event stream — backpressure there parks the websocket's transfer_data task, starves pong frames and trips Deepgram's keepalive watchdog with a 1011 mid-reply — so routing is one synchronous decision per event and the Claude+TTS work happens on the far side of the turn queue.
+
 ### 4.3 Claude API (direct)
 
 Meeko calls the Claude API directly — not via Deepgram's managed LLM. This is the central architectural decision that enables prompt caching, server-side compaction, and full session control.

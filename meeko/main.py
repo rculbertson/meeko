@@ -48,6 +48,7 @@ from meeko.session_summary import summarize_session
 from meeko.sessions import SessionStore
 from meeko.speaker import Speaker
 from meeko.state import State, StateManager
+from meeko.stt_events import SttEventRouter
 from meeko.stt_supervisor import KEEPALIVE_INTERVAL_S, STTSupervisor
 from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.profile import ProfileManager
@@ -521,13 +522,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     def request_barge_in() -> None:
         """Cancel the in-flight speak task, if any. Called from
-        pull_stt_events when StartOfTurn fires during SPEAKING (the
+        SttEventRouter when StartOfTurn fires during SPEAKING (the
         assistant is talking) or PROCESSING (the assistant's reply is
         still being generated; user has changed their mind)."""
         nonlocal barge_in_requested
         # Flip state synchronously so any EndOfTurn arriving before the
         # cancel propagates through drive_turns isn't dropped as echo
-        # by pull_stt_events. This must happen even when there's no
+        # by the router. This must happen even when there's no
         # current_speak_task (e.g. a timer chime is playing via
         # speaker.speak() — that path enters SPEAKING but is not
         # cancellable from here): the chime keeps playing, but the
@@ -543,69 +544,15 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             barge_in_requested = True
             current_speak_task.cancel()
 
-    async def pull_stt_events(stt_session):
-        """Always drain stt_session.events(); decide synchronously
-        whether each EndOfTurn should drive a turn, and queue the ones
-        that should."""
-        # If we want to make it faster, we can also use EagerEndOfTurn and
-        # TurnResumed events which allows us to send text to the LLM eagerly.
-        # If they're done talking, great, we already sent the text to the LLM.
-        # If not, we cancel the LLM request (or discard the result), and send
-        # the complete text. So may cost more since we throw away some results.
-        async for ev in stt_session.events():
-            if stop_event.is_set():
-                return
-            if ev.event == "StartOfTurn":
-                logger.info(
-                    "User started speaking (state=%s)", state_manager.state.name
-                )
-                # User activity always cancels a pending idle close; the
-                # branch below handles barge-in for the SPEAKING case.
-                idle.cancel()
-                if state_manager.state in (State.SPEAKING, State.PROCESSING):
-                    # Barge-in: user is talking over the assistant, or
-                    # they changed their mind during the window between
-                    # EndOfTurn and first audio (Claude TTFT + Deepgram
-                    # TTS first-byte synthesis, often >1s now that the
-                    # Speaker defers SPEAKING entry until first chunk).
-                    # Cancel the in-flight speak task in either case;
-                    # the eventual EndOfTurn arrives in LISTENING and
-                    # flows through normally.
-                    request_barge_in()
-                    # User is already mid-utterance; show the "hearing
-                    # you" cyan rather than the steady "ready" cyan that
-                    # request_barge_in's state change would otherwise
-                    # leave on the ring.
-                    state_manager.set_listening_active(True)
-                elif state_manager.state == State.LISTENING:
-                    # Switch from the "I heard the wake word" cyan to
-                    # the brighter "I'm hearing you speak" cyan.
-                    # Reverts on EndOfTurn → PROCESSING.
-                    state_manager.set_listening_active(True)
-                continue
-            if ev.event != "EndOfTurn":
-                continue
-            text = ev.transcript.strip()
-            if state_manager.state == State.IDLE:
-                # Safety belt: Deepgram shouldn't emit turns while
-                # we're gating mic audio behind the wake word, but
-                # any stray transcripts must not start a Claude turn.
-                continue
-            if state_manager.state == State.SPEAKING:
-                # No preceding StartOfTurn triggered barge-in (otherwise
-                # state would already be LISTENING). With AEC on, this
-                # is residual echo; drop it.
-                logger.info("[echo?] %s", text)
-                continue
-            # Speech is over — drop back to the steady "ready" cyan.
-            # Without this the ring stays on the brighter "hearing you"
-            # cue for the empty-transcript path, and briefly for the
-            # window before drive_turns picks up the turn and
-            # transitions to PROCESSING.
-            state_manager.set_listening_active(False)
-            if not text:
-                continue
-            await turn_queue.put(text)
+    # Routes STT turn events into state changes and queued user turns.
+    # Constructed here because it needs request_barge_in above.
+    stt_router = SttEventRouter(
+        state_manager=state_manager,
+        idle=idle,
+        turn_queue=turn_queue,
+        request_barge_in=request_barge_in,
+        stop_event=stop_event,
+    )
 
     async def drive_turns():
         """Drive Claude + TTS for queued user turns, one at a time."""
@@ -696,7 +643,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # ones that legitimately need the live stt_session handle.
         session_tasks = [
             asyncio.create_task(pump_mic(stt_session)),
-            asyncio.create_task(pull_stt_events(stt_session)),
+            asyncio.create_task(stt_router.run(stt_session)),
             asyncio.create_task(keepalive_pump(stt_session)),
         ]
         try:
