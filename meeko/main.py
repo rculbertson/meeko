@@ -3,21 +3,10 @@
 This module is the composition root: `run()` builds every component and
 injects its dependencies. The orchestration logic itself — state machine,
 mic pump, STT event routing, idle windows, turn worker, post-turn session
-changes — lives in `meeko/orchestrator/`.
-
-This replaces the Deepgram Voice Agent wiring from the prototype. Claude
-is called directly; STT and TTS are Deepgram-only. Audio runs over
-PyAudio.
-
-By default the mic stays open during TTS — we rely on the ReSpeaker
-XVF3800's hardware AEC to suppress echo. A `StartOfTurn` while SPEAKING
-is treated as the user barging in: the in-flight Claude+TTS turn is
-cancelled, the speaker buffer is flushed, and the session transitions
-back to LISTENING so the eventual `EndOfTurn` flows through the normal
-path. An `EndOfTurn` while SPEAKING with no preceding `StartOfTurn`
-having triggered barge-in is still echo and is dropped. For Mac /
-no-AEC development, set `MEEKO_MUTE_MIC_WHILE_SPEAKING=1`: mic chunks
-are dropped while SPEAKING and the mic queue is drained after playback.
+changes — lives in `meeko/orchestrator/`. For barge-in and echo
+handling see `MicPump` (wake-word gate, mute-while-speaking),
+`SttEventRouter` (what each STT event means per state) and `TurnWorker`
+(cancelling the in-flight turn).
 """
 
 import argparse
