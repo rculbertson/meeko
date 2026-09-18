@@ -73,8 +73,8 @@ class MicPump:
         if self._state.state == State.IDLE:
             if self._wake_detector is None:
                 # Unreachable today: IDLE is only ever entered with the wake
-                # word enabled (_create_wake_detector and
-                # _apply_post_turn_session_change in meeko/main.py). An
+                # word enabled (_create_wake_detector in meeko/main.py and
+                # apply_post_turn_session_change in session_change.py). An
                 # explicit raise rather than an assert, because `python -O`
                 # strips asserts, and because this propagates to
                 # STTSupervisor, which logs str(exc) on every retry: an

@@ -295,7 +295,7 @@ class ClaudeClient:
     def reset_session(self) -> None:
         """Drop in-memory history and clear the bound SQLite session_id.
 
-        Called by `_apply_post_turn_session_change` after `end_session` /
+        Called by `apply_post_turn_session_change` after `end_session` /
         `new_session` so
         subsequent turns persist to a fresh row (lazily created on first
         persist) and don't carry the prior conversation into a new wake
@@ -306,7 +306,7 @@ class ClaudeClient:
     def rebind_session(self, session_id: str) -> None:
         """Rebind to a different SQLite session_id without touching history.
 
-        Called by `_apply_post_turn_session_change` after `load_history`
+        Called by `apply_post_turn_session_change` after `load_history`
         swaps the message array so subsequent turns persist to the loaded
         session's row."""
         self._session_id = session_id

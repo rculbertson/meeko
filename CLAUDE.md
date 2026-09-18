@@ -4,7 +4,7 @@
 
 Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The architecture overview — component tour, state machine, session persistence, and the rationale behind the key design decisions — is in `ARCHITECTURE.md`. Read it before making significant changes.
 
-`meeko/main.py` is the entry point and composition root: `run()` builds every component and injects its dependencies. The orchestration logic (state machine, mic pump, STT event routing, idle windows, turn worker) lives in the `meeko/orchestrator/` package. `meeko/stt_supervisor.py` stays top-level as the STT connection layer.
+`meeko/main.py` is the entry point and composition root: `run()` builds every component and injects its dependencies. The orchestration logic (state machine, mic pump, STT event routing, idle windows, turn worker, post-turn session changes) lives in the `meeko/orchestrator/` package. `meeko/stt_supervisor.py` stays top-level as the STT connection layer.
 
 ## Current State
 
@@ -41,7 +41,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 ### Session management (Claude tool-use)
 - Session-management intents are exposed to Sonnet as Claude-native tools, not detected by a separate classifier (see `meeko/tools/session.py`). Sonnet decides when to call them based on full conversation context.
 - Tools: `end_session`, `new_session`, `list_sessions(query)`, `load_session(id)`. Per-profile system prompts instruct Sonnet to acknowledge verbally before `new_session` / `load_session`; `end_session` is called silently so Meeko turns off without speaking.
-- Handlers only set flags on `SessionManager`; the orchestrator drains TTS first, then performs the actual session transition after SPEAKING ends (`_apply_post_turn_session_change` in `meeko/main.py`, which `TurnWorker` calls after each turn).
+- Handlers only set flags on `SessionManager`; the orchestrator drains TTS first, then performs the actual session transition after SPEAKING ends (`apply_post_turn_session_change` in `meeko/orchestrator/session_change.py`, which `TurnWorker` calls after each turn).
 - `load_session` semantics: orchestrator finalizes (summarizes) the abandoned session in the background, then swaps the in-memory message array to the loaded transcript and rebinds `ClaudeClient` to the loaded session's SQLite row.
 - End-of-session summarization runs on Sonnet via `meeko/session_summary.py`, fire-and-forget. The summary + transcript are written to the standalone FTS5 `sessions_fts` table for keyword recall.
 - `SummaryScheduler` (same module) owns the background tasks: `fire()` after a session ends, a startup `backfill()` for sessions a killed run never summarized (capped at 3 concurrent), and `aclose()` at shutdown — which must run before `store.close()`, or an in-flight summary writes into a closed database.
