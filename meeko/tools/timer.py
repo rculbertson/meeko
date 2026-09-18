@@ -2,8 +2,9 @@
 
 Provides set_timer, list_timers, cancel_timer, and cancel_all_timers.
 Timers run as asyncio tasks and announce expiry via a speak_callback
-supplied by the orchestrator (typically: synthesize TTS + play through
-the speaker, respecting the SPEAKING state so the mic stays muted).
+supplied by meeko/main.py at startup (typically: synthesize TTS + play
+through the speaker, respecting the SPEAKING state so the mic stays
+muted).
 """
 
 import asyncio
@@ -31,8 +32,8 @@ class TimerManager:
     """Manages concurrent timers as asyncio tasks.
 
     On expiry, calls ``speak_callback`` with a fixed announcement string.
-    The callback is set via ``set_speak_callback`` during orchestrator
-    wire-up; handlers run before wire-up (e.g. in unit tests) will no-op
+    The callback is set via ``set_speak_callback`` during wire-up in
+    ``meeko/main.py``; handlers run before wire-up (e.g. in unit tests) will no-op
     on expiry unless a callback is supplied.
     """
 
@@ -136,7 +137,7 @@ class TimerManager:
         return f"All {count} timer{'s' if count != 1 else ''} cancelled."
 
 
-# Singleton instance. The orchestrator installs a speak_callback on startup.
+# Singleton instance. meeko/main.py installs a speak_callback on startup.
 timer_manager = TimerManager()
 
 

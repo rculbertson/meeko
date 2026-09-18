@@ -1,8 +1,8 @@
 """Async wrapper around Deepgram's v2 live STT (Flux) websocket.
 
 Feeds mic audio in and yields typed events out (StartOfTurn, Update,
-EndOfTurn, ...). The orchestrator owns the lifecycle via
-``async with DeepgramSTT(...).session() as stt: ...``.
+EndOfTurn, ...). ``STTSupervisor`` (meeko/stt_supervisor.py) owns the
+lifecycle via ``async with DeepgramSTT(...).session() as stt: ...``.
 """
 
 import logging

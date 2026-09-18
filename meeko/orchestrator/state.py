@@ -7,9 +7,9 @@ and the three paths back to IDLE.
 `StateManager` is the single writer: it holds the current state and
 pushes the matching cue to the LED ring on every change, so the ring can
 never disagree with the logical state. Lives here rather than in
-`meeko/main.py` so the modules that branch on `State` — the idle
-windows, the STT event router — can import it without a cycle back
-through the orchestrator.
+`meeko/main.py` so the modules that branch on `State` — the mic pump,
+the STT event router, the turn worker — can import it without a cycle
+back through `meeko/main.py`.
 """
 
 import logging

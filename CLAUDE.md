@@ -4,6 +4,8 @@
 
 Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The architecture overview — component tour, state machine, session persistence, and the rationale behind the key design decisions — is in `ARCHITECTURE.md`. Read it before making significant changes.
 
+`meeko/main.py` is the entry point and composition root: `run()` builds every component and injects its dependencies. The orchestration logic (state machine, mic pump, STT event routing, idle windows, turn worker) lives in the `meeko/orchestrator/` package. `meeko/stt_supervisor.py` stays top-level as the STT connection layer.
+
 ## Current State
 
 Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** directly, with **Claude called directly via the Anthropic SDK** (`claude-sonnet-4-6`). Wake-word gating (openWakeWord), SQLite turn persistence, end-of-session summarization with FTS recall, CLI session resume, and a Claude-native tool-use loop for timers, profile switching, and session management (`end_session`, `new_session`, `list_sessions`, `load_session`) are all implemented.
@@ -49,7 +51,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - Speaker must route through the XVF3800's **3.5mm jack**, not the Pi's audio output (required for hardware AEC)
 - Barge-in: `StartOfTurn` during SPEAKING **or PROCESSING** → stop TTS, cancel Claude request, transition to LISTENING. (Deepgram Flux emits `StartOfTurn`, not `SpeechStarted`.)
 - Barge-in and the turn worker live together in `TurnWorker` (`meeko/orchestrator/turn_worker.py`). Each turn runs as a sub-task so `request_barge_in()` can cancel just that turn. A barge-in cancel and a shutdown cancel reach the worker as the same `CancelledError`, and only the `_barge_in_requested` flag tells them apart: `stop_event` can't, because asyncio's shutdown cancels the worker before `run()`'s `finally` sets it. `request_barge_in()` flips state to LISTENING synchronously even with no turn in flight (e.g. a timer's "timer is done" announcement), so the following `EndOfTurn` isn't dropped as echo. Mistakes here tend to pass the `run()` drive-throughs and show up as a dropped utterance or a quietly dead worker; `tests/test_turn_worker.py` tests them directly.
-- Which STT event does what in which state is decided by `SttEventRouter` in `meeko/orchestrator/stt_events.py`, not in the orchestrator. The state machine it branches on (`State`, `StateManager`) lives in `meeko/orchestrator/state.py`.
+- Which STT event does what in which state is decided by `SttEventRouter` in `meeko/orchestrator/stt_events.py`, not in `main.py`. The state machine it branches on (`State`, `StateManager`) lives in `meeko/orchestrator/state.py`.
 - The mic side is `MicPump` in `meeko/orchestrator/mic_pump.py`: it owns the wake-word gate (nothing reaches Deepgram while IDLE) and the `mute_mic_while_speaking` drop. The Deepgram keepalive pump lives in `meeko/stt_supervisor.py` alongside `KEEPALIVE_INTERVAL_S`.
 - Per STT session, the mic pump, event router and keepalive run together under `run_session_workers` (`meeko/stt_supervisor.py`): the first to finish ends the session, and if it raised, that exception must reach `STTSupervisor.run()` — that's what triggers backoff and reconnect. Don't swallow it.
 - **Device selection** — `[audio]` in `meeko.toml` (env-var overrides in parens, all optional):
@@ -93,7 +95,7 @@ States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (bar
 
 Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout (query mode silently, conversation mode after a spoken check-in), and the post-wake timeout when no first turn ever arrives. See `ARCHITECTURE.md` §5.1.
 
-Both silence windows live in `meeko/orchestrator/idle.py` (`IdleController`), not in the orchestrator. They don't end the session themselves — they set the `SessionManager` end flag and post `IDLE_TIMEOUT_SENTINEL` to the turn queue, and `TurnWorker` (`meeko/orchestrator/turn_worker.py`) runs the normal post-turn handling without a Claude/TTS round-trip.
+Both silence windows live in `meeko/orchestrator/idle.py` (`IdleController`), not in `main.py`. They don't end the session themselves — they set the `SessionManager` end flag and post `IDLE_TIMEOUT_SENTINEL` to the turn queue, and `TurnWorker` (`meeko/orchestrator/turn_worker.py`) runs the normal post-turn handling without a Claude/TTS round-trip.
 
 ### Debugging
 - Run with `PYTHONASYNCIODEBUG=1` (Python's built-in env var) to enable asyncio debug mode. The loop will then log a WARNING (`Executing <Handle ...> took N.NNN seconds`) whenever a synchronous callback holds it ≥100 ms — useful for diagnosing loop stalls (e.g. STT websocket keepalive timeouts). Off in normal operation; debug mode wraps every coroutine creation with traceback capture and is a real cost on hot paths. Meeko routes asyncio's own warnings through the same logging handler as `meeko.*` logs, so they pick up the timestamp format and land in the rotating log when `MEEKO_LOG_TARGET=file`.

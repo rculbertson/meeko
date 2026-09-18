@@ -3,20 +3,23 @@
 Provides four tools:
 
 - ``end_session``: user signals they want to end the conversation ("end conversation",
-  "end session", "that's enough for today", etc.). After SPEAKING the orchestrator
-  finalizes the session and returns to IDLE, re-arming the wake word.
+  "end session", "that's enough for today", etc.). After SPEAKING the post-turn
+  hook finalizes the session and returns to IDLE, re-arming the wake word.
 - ``new_session``: user wants to start a fresh thread without stopping
   Meeko ("let's start fresh", "different topic"). After SPEAKING the
-  orchestrator finalizes the current session, allocates a new one, and
+  post-turn hook finalizes the current session, allocates a new one, and
   stays in LISTENING.
 - ``list_sessions``: search prior sessions by keyword. The handler runs
   an FTS query and returns a human-readable list Sonnet can read back.
 - ``load_session``: resume a prior session by id. After SPEAKING the
-  orchestrator swaps the in-memory message array and rebinds to the
+  post-turn hook swaps the in-memory message array and rebinds to the
   target session's SQLite row, then stays in LISTENING.
 
+The post-turn hook is ``_apply_post_turn_session_change``, which
+``TurnWorker`` calls once each turn's speech has finished.
+
 The end/new flags are mutually exclusive. Load is independent — the
-orchestrator always fires the summary for the abandoned session when
+post-turn hook always fires the summary for the abandoned session when
 load is requested, so Sonnet doesn't need to chain end_session first.
 """
 
@@ -36,20 +39,21 @@ logger = logging.getLogger("meeko")
 
 
 class SessionManager:
-    """Shared state between the session-tool handlers and the
-    orchestrator's post-SPEAKING hook.
+    """Shared state between the session-tool handlers and the post-turn
+    hook, ``_apply_post_turn_session_change``.
 
     Handlers only set flags — they do NOT tear down state directly.
-    The orchestrator drains Sonnet's acknowledgement via TTS first and
-    then, after SPEAKING ends, performs the actual session transition.
+    ``TurnWorker`` drains Sonnet's acknowledgement via TTS first and
+    then, after SPEAKING ends, the hook performs the actual session
+    transition.
 
     The end/new request flags are mutually exclusive: the two intents
     contradict each other, so a later request overrides any earlier
     one within the same turn rather than letting both be true at once.
-    That keeps the orchestrator branch selection unambiguous.
+    That keeps the hook's branch selection unambiguous.
 
     Load takes precedence over end if both are set in the same turn —
-    the orchestrator's load branch already summarizes the abandoned
+    the hook's load branch already summarizes the abandoned
     session, so an explicit end_session call is redundant but harmless."""
 
     def __init__(self) -> None:
