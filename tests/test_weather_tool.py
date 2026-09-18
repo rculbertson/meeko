@@ -145,59 +145,80 @@ _HOME_LAT = 40.7484
 _HOME_LON = -73.9857
 
 
-def _configure_home(client: WeatherClient, units: str = "imperial") -> None:
-    client.configure(latitude=_HOME_LAT, longitude=_HOME_LON, units=units)
+async def _get_weather(
+    monkeypatch,
+    payload: Any = None,
+    args: dict | None = None,
+    *,
+    home: bool = True,
+    units: str = "imperial",
+) -> tuple[str, dict | None]:
+    """Run the `get_weather` tool once and return `(result, forecast_params)`.
+
+    `payload` is one `_StubClient` response (dict, exception, or callable).
+    With `payload=None` no stub is installed, for the paths that must
+    short-circuit before any fetch; `forecast_params` is then None.
+    """
+    stub = None
+    if payload is not None:
+        stub = _StubClient({_FORECAST: [payload]})
+        _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    client.configure(
+        latitude=_HOME_LAT if home else None,
+        longitude=_HOME_LON if home else None,
+        units=units,
+    )
+    weather_mod.weather_client = client
+
+    result = await handle("get_weather", args or {})
+    params = stub.calls[0][1] if stub and stub.calls else None
+    return result, params
 
 
-def _configure_no_home(client: WeatherClient, units: str = "imperial") -> None:
-    client.configure(latitude=None, longitude=None, units=units)
+def _days_out_iso(days: int) -> str:
+    return (datetime.now().astimezone().date() + timedelta(days=days)).isoformat()
 
 
 @pytest.mark.asyncio
 async def test_handle_uses_home_coords_and_bounds_to_today(monkeypatch):
     # No rain in the immediate hours so the timing clause doesn't depend on
     # the wall clock; we assert it separately below.
-    stub = _StubClient({_FORECAST: [_forecast_payload(rain_hours=())]})
-    _install_stub_client(monkeypatch, stub)
+    result, params = await _get_weather(monkeypatch, _forecast_payload(rain_hours=()))
 
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {})
-
-    forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert forecast_call[1]["latitude"] == _HOME_LAT
-    assert forecast_call[1]["longitude"] == _HOME_LON
-    # Bounded to a single day.
+    # Home coords, bounded to a single day.
     today = _today_iso()
-    assert forecast_call[1]["start_date"] == today
-    assert forecast_call[1]["end_date"] == today
+    expected_params = {
+        "latitude": _HOME_LAT,
+        "longitude": _HOME_LON,
+        "start_date": today,
+        "end_date": today,
+    }
+    assert expected_params.items() <= params.items()
 
-    assert "Home, today" in result
-    assert today in result
     # Today shows current temp + humidity and the live weather code (partly
     # cloudy = code 2).
-    assert "54°F" in result
-    assert "humidity 47%" in result
-    assert "partly cloudy" in result
-    assert "High 61°F, low 48°F" in result
-    assert "80% chance of precipitation" in result
+    for expected in (
+        "Home, today",
+        today,
+        "54°F",
+        "humidity 47%",
+        "partly cloudy",
+        "High 61°F, low 48°F",
+        "80% chance of precipitation",
+    ):
+        assert expected in result
     # Wind is gone.
-    assert "mph" not in result and "from" not in result.lower()
+    assert "mph" not in result
+    assert "from" not in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_handle_uses_supplied_coords_when_provided(monkeypatch):
-    stub = _StubClient({_FORECAST: [_forecast_payload()]})
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle(
-        "get_weather",
+    result, params = await _get_weather(
+        monkeypatch,
+        _forecast_payload(),
         {
             "latitude": 43.6591,
             "longitude": -70.2568,
@@ -205,27 +226,20 @@ async def test_handle_uses_supplied_coords_when_provided(monkeypatch):
         },
     )
 
-    forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert forecast_call[1]["latitude"] == 43.6591
-    assert forecast_call[1]["longitude"] == -70.2568
+    assert params["latitude"] == 43.6591
+    assert params["longitude"] == -70.2568
     assert "Portland, Maine" in result
 
 
 @pytest.mark.asyncio
 async def test_future_day_selection_and_no_current_conditions(monkeypatch):
-    three_out = (datetime.now().astimezone().date() + timedelta(days=3)).isoformat()
-    stub = _StubClient({_FORECAST: [_forecast_payload(day_iso=three_out)]})
-    _install_stub_client(monkeypatch, stub)
+    three_out = _days_out_iso(3)
+    result, params = await _get_weather(
+        monkeypatch, _forecast_payload(day_iso=three_out), {"date": three_out}
+    )
 
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"date": three_out})
-
-    forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert forecast_call[1]["start_date"] == three_out
-    assert forecast_call[1]["end_date"] == three_out
+    assert params["start_date"] == three_out
+    assert params["end_date"] == three_out
 
     # Future day: weekday label, daily weather code (rain=61), high/low,
     # precip — but NO current temp / humidity.
@@ -332,34 +346,24 @@ def test_now_hour_local_uses_api_offset_not_server_tz():
 @pytest.mark.asyncio
 async def test_precip_timing_window_rendered(monkeypatch):
     # A future day so "now" filtering doesn't trim the morning window.
-    day = (datetime.now().astimezone().date() + timedelta(days=2)).isoformat()
-    stub = _StubClient(
-        {_FORECAST: [_forecast_payload(day_iso=day, rain_hours=(14, 15, 16))]}
+    day = _days_out_iso(2)
+    result, _ = await _get_weather(
+        monkeypatch,
+        _forecast_payload(day_iso=day, rain_hours=(14, 15, 16)),
+        {"date": day},
     )
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"date": day})
 
     assert "precipitation likely around 2–4 PM" in result
 
 
 @pytest.mark.asyncio
 async def test_low_precip_chance_omits_timing(monkeypatch):
-    day = (datetime.now().astimezone().date() + timedelta(days=2)).isoformat()
-    stub = _StubClient(
-        {_FORECAST: [_forecast_payload(day_iso=day, prob_max=10, rain_hours=())]}
+    day = _days_out_iso(2)
+    result, _ = await _get_weather(
+        monkeypatch,
+        _forecast_payload(day_iso=day, prob_max=10, rain_hours=()),
+        {"date": day},
     )
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"date": day})
 
     assert "10% chance of precipitation" in result
     assert "precipitation likely" not in result
@@ -369,99 +373,58 @@ async def test_low_precip_chance_omits_timing(monkeypatch):
 async def test_out_of_range_date_returns_message_without_fetch(monkeypatch):
     # No stub installed: if get_weather tried to fetch, the missing
     # AsyncClient would surface. It must short-circuit before that.
-    far = (datetime.now().astimezone().date() + timedelta(days=30)).isoformat()
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"date": far})
+    result, _ = await _get_weather(monkeypatch, args={"date": _days_out_iso(30)})
     assert "two weeks" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_past_date_returns_message_without_fetch(monkeypatch):
-    past = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"date": past})
+    result, _ = await _get_weather(monkeypatch, args={"date": _days_out_iso(-1)})
     assert "look ahead" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_unparseable_date_returns_message_without_fetch(monkeypatch):
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"date": "next thursday"})
+    result, _ = await _get_weather(monkeypatch, args={"date": "next thursday"})
     assert "date" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_handle_partial_coord_args_returns_correction(monkeypatch):
     # No HTTP stub — should short-circuit before any forecast call.
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"latitude": 43.0})
+    result, _ = await _get_weather(monkeypatch, args={"latitude": 43.0})
     assert "supply latitude, longitude" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_handle_out_of_range_coords_returns_friendly_message(monkeypatch):
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle(
-        "get_weather",
-        {"latitude": 999.0, "longitude": 0.0, "place_label": "Nowhere"},
+    result, _ = await _get_weather(
+        monkeypatch,
+        args={"latitude": 999.0, "longitude": 0.0, "place_label": "Nowhere"},
     )
     assert "out of range" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_handle_http_error_returns_friendly_message(monkeypatch):
-    stub = _StubClient({_FORECAST: [httpx.ConnectError("nope")]})
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {})
+    result, _ = await _get_weather(monkeypatch, httpx.ConnectError("nope"))
     assert "couldn't reach" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_handle_no_home_and_no_arg_returns_config_message(monkeypatch):
-    client = WeatherClient()
-    _configure_no_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {})
+    result, _ = await _get_weather(monkeypatch, home=False)
     assert "no home location" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_metric_units_change_forecast_params_and_symbols(monkeypatch):
-    stub = _StubClient({_FORECAST: [_forecast_payload(rain_hours=())]})
-    _install_stub_client(monkeypatch, stub)
+    result, params = await _get_weather(
+        monkeypatch, _forecast_payload(rain_hours=()), units="metric"
+    )
 
-    client = WeatherClient()
-    _configure_home(client, units="metric")
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {})
-
-    forecast_call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert forecast_call[1]["temperature_unit"] == "celsius"
-    assert forecast_call[1]["precipitation_unit"] == "mm"
+    assert params["temperature_unit"] == "celsius"
+    assert params["precipitation_unit"] == "mm"
     assert "°C" in result
     assert "°F" not in result
 
@@ -515,30 +478,28 @@ def _hourly_rows(result: str) -> list[str]:
     return result.split("\n")[1:]
 
 
-@pytest.mark.asyncio
-async def test_hourly_returns_48_rows_from_the_current_hour(monkeypatch):
+def _midnight_hourly_payload(**kwargs: Any) -> tuple[dict, date]:
+    """An hourly payload for a location at local midnight right now, starting
+    the day before (as the request window does), plus that location's date."""
     offset, local_today = _midnight_offset()
     payload = _hourly_payload(
-        start_date=local_today - timedelta(days=1), offset_seconds=offset
+        start_date=local_today - timedelta(days=1), offset_seconds=offset, **kwargs
     )
-    stub = _StubClient({_FORECAST: [payload]})
-    _install_stub_client(monkeypatch, stub)
+    return payload, local_today
 
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
 
-    result = await handle("get_weather", {"hourly": True})
+@pytest.mark.asyncio
+async def test_hourly_returns_48_rows_from_the_current_hour(monkeypatch):
+    payload, local_today = _midnight_hourly_payload()
+    result, params = await _get_weather(monkeypatch, payload, {"hourly": True})
 
-    call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert call[1]["latitude"] == _HOME_LAT
-    assert "temperature_2m" in call[1]["hourly"]
-    assert "weather_code" in call[1]["hourly"]
+    assert params["latitude"] == _HOME_LAT
+    assert "temperature_2m" in params["hourly"]
+    assert "weather_code" in params["hourly"]
     # Hourly mode has no use for the daily block.
-    assert "daily" not in call[1]
-    today = datetime.now().astimezone().date()
-    assert call[1]["start_date"] == (today - timedelta(days=1)).isoformat()
-    assert call[1]["end_date"] == (today + timedelta(days=3)).isoformat()
+    assert "daily" not in params
+    assert params["start_date"] == _days_out_iso(-1)
+    assert params["end_date"] == _days_out_iso(3)
 
     assert result.startswith("Home, next 48 hours. Currently 54°F, partly cloudy:")
     rows = _hourly_rows(result)
@@ -549,18 +510,9 @@ async def test_hourly_returns_48_rows_from_the_current_hour(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_hourly_rows_cross_midnight_with_day_labels(monkeypatch):
-    offset, local_today = _midnight_offset()
-    payload = _hourly_payload(
-        start_date=local_today - timedelta(days=1), offset_seconds=offset
-    )
-    stub = _StubClient({_FORECAST: [payload]})
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    rows = _hourly_rows(await handle("get_weather", {"hourly": True}))
+    payload, local_today = _midnight_hourly_payload()
+    result, _ = await _get_weather(monkeypatch, payload, {"hourly": True})
+    rows = _hourly_rows(result)
 
     tomorrow = local_today + timedelta(days=1)
     # Rows 0–23 are today, 24–47 tomorrow — starting from local midnight.
@@ -571,21 +523,12 @@ async def test_hourly_rows_cross_midnight_with_day_labels(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_hourly_ignores_date_argument(monkeypatch):
-    offset, local_today = _midnight_offset()
-    payload = _hourly_payload(
-        start_date=local_today - timedelta(days=1), offset_seconds=offset
-    )
-    stub = _StubClient({_FORECAST: [payload]})
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
+    payload, _ = _midnight_hourly_payload()
     # A date far outside the daily path's 14-day window must not short-circuit
     # the hourly request.
-    far = (datetime.now().astimezone().date() + timedelta(days=30)).isoformat()
-    result = await handle("get_weather", {"hourly": True, "date": far})
+    result, _ = await _get_weather(
+        monkeypatch, payload, {"hourly": True, "date": _days_out_iso(30)}
+    )
 
     assert "two weeks" not in result
     assert len(_hourly_rows(result)) == _HOURLY_HOURS
@@ -593,19 +536,10 @@ async def test_hourly_ignores_date_argument(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_hourly_uses_supplied_coords_and_label(monkeypatch):
-    offset, local_today = _midnight_offset()
-    payload = _hourly_payload(
-        start_date=local_today - timedelta(days=1), offset_seconds=offset
-    )
-    stub = _StubClient({_FORECAST: [payload]})
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle(
-        "get_weather",
+    payload, _ = _midnight_hourly_payload()
+    result, params = await _get_weather(
+        monkeypatch,
+        payload,
         {
             "hourly": True,
             "latitude": 43.6591,
@@ -614,74 +548,44 @@ async def test_hourly_uses_supplied_coords_and_label(monkeypatch):
         },
     )
 
-    call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert call[1]["latitude"] == 43.6591
+    assert params["latitude"] == 43.6591
     assert result.startswith("Portland, Maine, next 48 hours")
 
 
 @pytest.mark.asyncio
 async def test_hourly_omits_probability_when_absent(monkeypatch):
-    offset, local_today = _midnight_offset()
-    payload = _hourly_payload(
-        start_date=local_today - timedelta(days=1),
-        offset_seconds=offset,
-        prob=None,
-    )
-    stub = _StubClient({_FORECAST: [payload]})
-    _install_stub_client(monkeypatch, stub)
+    payload, _ = _midnight_hourly_payload(prob=None)
+    result, _ = await _get_weather(monkeypatch, payload, {"hourly": True})
 
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    rows = _hourly_rows(await handle("get_weather", {"hourly": True}))
+    rows = _hourly_rows(result)
     assert rows[0].endswith("light rain")
     assert "%" not in rows[0]
 
 
 @pytest.mark.asyncio
 async def test_hourly_empty_block_returns_friendly_message(monkeypatch):
-    stub = _StubClient({_FORECAST: [{"utc_offset_seconds": 0, "hourly": {}}]})
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"hourly": True})
+    result, _ = await _get_weather(
+        monkeypatch, {"utc_offset_seconds": 0, "hourly": {}}, {"hourly": True}
+    )
     assert "couldn't get an hourly forecast" in result
 
 
 @pytest.mark.asyncio
 async def test_hourly_http_error_returns_friendly_message(monkeypatch):
-    stub = _StubClient({_FORECAST: [httpx.ConnectError("nope")]})
-    _install_stub_client(monkeypatch, stub)
-
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"hourly": True})
+    result, _ = await _get_weather(
+        monkeypatch, httpx.ConnectError("nope"), {"hourly": True}
+    )
     assert "couldn't reach" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_hourly_metric_units(monkeypatch):
-    offset, local_today = _midnight_offset()
-    payload = _hourly_payload(
-        start_date=local_today - timedelta(days=1), offset_seconds=offset
+    payload, _ = _midnight_hourly_payload()
+    result, params = await _get_weather(
+        monkeypatch, payload, {"hourly": True}, units="metric"
     )
-    stub = _StubClient({_FORECAST: [payload]})
-    _install_stub_client(monkeypatch, stub)
 
-    client = WeatherClient()
-    _configure_home(client, units="metric")
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"hourly": True})
-
-    call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert call[1]["temperature_unit"] == "celsius"
+    assert params["temperature_unit"] == "celsius"
     assert "°C" in result
     assert "°F" not in result
 
@@ -708,17 +612,11 @@ async def test_hourly_full_window_when_location_is_a_day_ahead(monkeypatch):
             offset_seconds=offset,
         )
 
-    stub = _StubClient({_FORECAST: [_payload_for_window]})
-    _install_stub_client(monkeypatch, stub)
+    result, params = await _get_weather(
+        monkeypatch, _payload_for_window, {"hourly": True}
+    )
 
-    client = WeatherClient()
-    _configure_home(client)
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", {"hourly": True})
-
-    call = next(c for c in stub.calls if c[0] == _FORECAST)
-    assert call[1]["end_date"] == (today + timedelta(days=3)).isoformat()
+    assert params["end_date"] == (today + timedelta(days=3)).isoformat()
 
     rows = _hourly_rows(result)
     assert len(rows) == _HOURLY_HOURS
