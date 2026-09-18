@@ -9,7 +9,6 @@ clean reconnect.
 """
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
@@ -190,6 +189,15 @@ class STTSupervisor:
         """Cancel a pending grace cutoff, if any, and wait for it to unwind."""
         if self._grace_task is not None and not self._grace_task.done():
             self._grace_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await self._grace_task
+            except asyncio.CancelledError:
+                # Expected: the grace task's own cancellation. But a cancel
+                # aimed at run() (shutdown) that lands during this await
+                # arrives as the same exception; only cancelling() tells
+                # them apart, and swallowing it would ignore Ctrl-C.
+                if asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                pass
         self._grace_task = None

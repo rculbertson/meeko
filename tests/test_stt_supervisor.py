@@ -312,6 +312,39 @@ async def test_shutdown_mid_outage_cancels_the_grace_cutoff(audio_mock):
     audio_mock.stop_mic.assert_not_called()
 
 
+async def test_cancel_while_unwinding_the_grace_cutoff_still_stops_run(audio_mock):
+    """A shutdown cancel that lands while run() waits for the cancelled grace
+    cutoff to unwind is run()'s own, and must propagate — not be mistaken
+    for the grace task's CancelledError and swallowed, which would carry
+    on into a new session after Ctrl-C."""
+    stop = asyncio.Event()
+    stt = _FailThenSucceedSTT(fail_count=1)
+    unwinding = asyncio.Event()
+
+    async def sleep(delay, *a, **kw):
+        if delay != supervisor_mod.RECONNECT_GRACE_S:
+            return await _REAL_SLEEP(0)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Stay pending after the reconnect's cancel, so the test can
+            # cancel run() while it waits on this task.
+            unwinding.set()
+            await asyncio.Event().wait()
+
+    async def on_session(sess):
+        stop.set()
+        pytest.fail("run() carried on into a session after being cancelled")
+
+    sup = STTSupervisor(stt, audio_mock, stop, on_session, lambda: False)
+    with patch("meeko.stt_supervisor.asyncio.sleep", new=sleep):
+        task = asyncio.create_task(sup.run())
+        await asyncio.wait_for(unwinding.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+
+
 # ---------------------------------------------------------------------------
 # run_session_workers
 #
