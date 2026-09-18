@@ -49,7 +49,11 @@ from meeko.sessions import SessionStore
 from meeko.speaker import Speaker
 from meeko.state import State, StateManager
 from meeko.stt_events import SttEventRouter
-from meeko.stt_supervisor import STTSupervisor, keepalive_pump
+from meeko.stt_supervisor import (
+    STTSupervisor,
+    keepalive_pump,
+    run_session_workers,
+)
 from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.profile import ProfileManager
 from meeko.tools.profile import get_tool_definitions as profile_tools
@@ -575,29 +579,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # drive_turns is intentionally NOT in this group — it lives at
         # run() scope and outlives individual STT sessions, so an STT
         # blip mid-reply doesn't cut TTS off mid-sentence and doesn't
-        # lose the in-flight turn. The session-scoped tasks are the
+        # lose the in-flight turn. The session-scoped workers are the
         # ones that legitimately need the live stt_session handle.
-        session_tasks = [
-            asyncio.create_task(mic_pump.run(stt_session)),
-            asyncio.create_task(stt_router.run(stt_session)),
-            asyncio.create_task(keepalive_pump(stt_session, stop_event)),
-        ]
-        try:
-            done, pending = await asyncio.wait(
-                session_tasks, return_when=asyncio.FIRST_COMPLETED
-            )
-            for t in pending:
-                t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            for t in done:
-                exc = t.exception()
-                if exc is not None:
-                    raise exc
-        finally:
-            for t in session_tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*session_tasks, return_exceptions=True)
+        await run_session_workers(
+            mic_pump.run(stt_session),
+            stt_router.run(stt_session),
+            keepalive_pump(stt_session, stop_event),
+        )
 
     supervisor = STTSupervisor(
         stt,
