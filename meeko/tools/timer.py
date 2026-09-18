@@ -67,18 +67,20 @@ class TimerManager:
         self._timers[label] = (task, time.monotonic(), duration_seconds)
         return f"Timer '{label}' set for {duration_display}."
 
-    # NOTE: expiry currently speaks a fixed announcement directly via TTS and
-    # does NOT tell the Claude model that the timer fired. This keeps the timer
-    # subsystem decoupled from the conversation while session persistence /
-    # prompt caching / auto compaction are still out of scope.
+    # NOTE: expiry speaks a fixed announcement directly via TTS and does NOT
+    # tell the Claude model that the timer fired. Sonnet has no idea the timer
+    # it set ever went off, so it can't refer back to it.
     #
-    # FUTURE (once sessions land): append a synthetic user-role message to the
+    # POSSIBLE FOLLOW-UP: append a synthetic user-role message to the
     # ClaudeClient's message history (e.g. {"role": "user", "content": "The 10
     # minute pasta timer just finished."}) and trigger a Claude turn, so the
     # assistant can weave the expiry into the ongoing conversation, persist it,
     # and react with context. That path requires the timer to hold a reference
     # to ClaudeClient + the speak path, and to coordinate with whatever turn is
     # in flight (don't interrupt the user; queue if the assistant is speaking).
+    # The original blocker (session persistence / prompt caching / compaction
+    # not yet built) is gone — all three have since landed — so this is now a
+    # design question about turn coordination, not a sequencing one.
     async def _run_timer(
         self,
         label: str,

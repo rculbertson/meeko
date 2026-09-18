@@ -131,9 +131,10 @@ class StateManager:
         self.set(prev if prev != State.SPEAKING else State.LISTENING)
 
     def set_listening_active(self, active: bool) -> None:
-        """LISTENING_ACTIVE is a LED sub-state of LISTENING (DoA mode
-        on, vs. solid cyan). The orchestrator stays in State.LISTENING
-        either way — only the LED display changes. Calls from outside
+        """LISTENING_ACTIVE is a LED sub-state of LISTENING (brighter
+        cyan while the user is actually speaking, vs. the steady cyan
+        "ready" cue). The orchestrator stays in State.LISTENING either
+        way — only the LED display changes. Calls from outside
         LISTENING are no-ops so the LED never diverges from the
         logical state."""
         if self._state != State.LISTENING:
@@ -741,15 +742,15 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     # the eventual EndOfTurn arrives in LISTENING and
                     # flows through normally.
                     request_barge_in()
-                    # User is already mid-utterance; show DoA tracking
-                    # rather than the solid "ready" cyan that
+                    # User is already mid-utterance; show the "hearing
+                    # you" cyan rather than the steady "ready" cyan that
                     # request_barge_in's state change would otherwise
                     # leave on the ring.
                     state_manager.set_listening_active(True)
                 elif state_manager.state == State.LISTENING:
-                    # Switch from solid "I heard the wake word" to DoA
-                    # mode so the ring tracks the user's direction while
-                    # they speak. Reverts on EndOfTurn → PROCESSING.
+                    # Switch from the "I heard the wake word" cyan to
+                    # the brighter "I'm hearing you speak" cyan.
+                    # Reverts on EndOfTurn → PROCESSING.
                     state_manager.set_listening_active(True)
                 continue
             if ev.event != "EndOfTurn":
@@ -766,12 +767,11 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 # is residual echo; drop it.
                 logger.info("[echo?] %s", text)
                 continue
-            # Speech is over — leave DoA mode so the ring shows the
-            # solid "ready" cue. (DoA's firmware only lights the ring
-            # while speech is detected, so without this the ring goes
-            # dark for the empty-transcript path, and briefly for the
+            # Speech is over — drop back to the steady "ready" cyan.
+            # Without this the ring stays on the brighter "hearing you"
+            # cue for the empty-transcript path, and briefly for the
             # window before drive_turns picks up the turn and
-            # transitions to PROCESSING.)
+            # transitions to PROCESSING.
             state_manager.set_listening_active(False)
             if not text:
                 continue
