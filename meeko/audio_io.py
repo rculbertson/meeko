@@ -49,7 +49,7 @@ def _mono_to_stereo(data: bytes) -> bytes:
 
 # Hard ceiling on buffered mic chunks. At 50ms chunks this is ~8min of
 # audio — we should never come close. Hitting it means something is
-# very wrong (e.g. pump_mic stuck); log and exit.
+# very wrong (e.g. MicPump stuck); log and exit.
 MIC_QUEUE_MAX = 10000
 
 

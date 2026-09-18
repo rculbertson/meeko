@@ -248,7 +248,7 @@ async def test_run_drives_one_turn_end_to_end(monkeypatch, fake_profiles, tmp_pa
     monkeypatch.setenv("MEEKO_DB_PATH", str(tmp_path / "meeko.db"))
 
     # Mic callback is never exercised here; mic_queue stays empty and
-    # pump_mic just spins on its 100ms timeout.
+    # MicPump just spins on its 100ms timeout.
     pa_instance = MagicMock()
     mic_stream = MagicMock()
     speaker_stream = MagicMock()
@@ -378,7 +378,7 @@ async def test_mute_mic_while_speaking_drops_chunks_during_speaking(
             await asyncio.wait_for(first_speaker_write.wait(), timeout=5)
             # We're now inside SPEAKING. Snapshot STT send count, then
             # push mic chunks via the captured PyAudio callback and
-            # give pump_mic a chance to see them.
+            # give MicPump a chance to see them.
             session = fake_stt.session_obj
             baseline = session.sent_audio_count
             # 4 bytes = one stereo int16 frame, matches audio_io callback.
@@ -642,7 +642,7 @@ async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_
     pa_instance.open.side_effect = open_stream
 
     fake_stt = _FakeSTTClient("dg-test")
-    # Make the only event a long sleep so pump_mic never drains.
+    # Make the only event a long sleep so MicPump never drains.
     fake_stt.events = []
 
     with (
@@ -1006,7 +1006,7 @@ async def test_run_gates_stt_on_wake_word(monkeypatch, fake_profiles, tmp_path):
             detector = detector_holder["d"]
 
             # Push chunks until the detector fires on the second call.
-            # A small amount of real time keeps pump_mic ticking under
+            # A small amount of real time keeps MicPump ticking under
             # load.
             for _ in range(20):
                 if detector.fired.is_set():
