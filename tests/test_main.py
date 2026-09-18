@@ -24,6 +24,7 @@ from meeko import main as meeko_main
 from meeko.config import Profile
 from meeko.main import setup_logging
 from meeko.sessions import UNTITLED
+from meeko.tools.profile import ProfileManager
 
 
 @pytest.fixture
@@ -497,7 +498,11 @@ async def _running_meeko(
 
 
 async def _seed_session(
-    db_path, user="prior question", assistant="prior answer", **metadata
+    db_path,
+    user="prior question",
+    assistant="prior answer",
+    profile_name="query",
+    **metadata,
 ) -> str:
     """Write a two-turn session (plus summary metadata, if given) and return
     its id."""
@@ -505,7 +510,7 @@ async def _seed_session(
 
     store = SessionStore.open(db_path)
     try:
-        sid = await store.create_session("query")
+        sid = await store.create_session(profile_name)
         await store.persist_turn(sid, "user", user)
         await store.persist_turn(
             sid, "assistant", [{"type": "text", "text": assistant}]
@@ -784,6 +789,72 @@ async def test_run_resume_preloads_history(monkeypatch, fake_profiles, tmp_path)
         },
     ]
     assert tts.calls == []
+
+
+def _capture_profile_manager() -> tuple[list, object]:
+    """Patch target for meeko.main.ProfileManager that records the instance
+    run() builds, so a test can inspect which profile it made active."""
+    built: list[ProfileManager] = []
+
+    def make(*a, **kw):
+        built.append(ProfileManager(*a, **kw))
+        return built[-1]
+
+    return built, make
+
+
+async def test_run_resume_activates_the_sessions_profile(monkeypatch, tmp_path):
+    """Resuming a session recorded under a non-default profile makes that
+    profile active everywhere — not just its prompt, but the ProfileManager
+    that drives idle behavior and list_profiles."""
+    db_path = _set_env(monkeypatch, tmp_path)
+    session_id = await _seed_session(db_path, profile_name="brainstorm")
+    profiles = {
+        "query": _profile(),
+        "brainstorm": _profile("brainstorm", prompt="brainstorm system"),
+    }
+    built, make = _capture_profile_manager()
+    stt = _SignalingSTTClient()
+
+    with patch("meeko.main.ProfileManager", side_effect=make):
+        async with _running_meeko(
+            profiles, stt=stt, tts=_FakeTTSClient("dg-test"), resume=session_id
+        ) as h:
+            await asyncio.wait_for(stt.entered.wait(), timeout=5)
+
+    assert h.claude.system_prompt == "brainstorm system"
+    assert built[0].active_profile.name == "brainstorm"
+
+
+async def test_run_resume_falls_back_when_sessions_profile_was_removed(
+    monkeypatch, tmp_path, caplog
+):
+    """A session whose profile has since been renamed or deleted from the
+    config resumes under the default profile instead of crashing startup."""
+    db_path = _set_env(monkeypatch, tmp_path)
+    session_id = await _seed_session(
+        db_path, assistant="prior reply", profile_name="retired"
+    )
+    built, make = _capture_profile_manager()
+    stt = _SignalingSTTClient()
+
+    with (
+        caplog.at_level(logging.WARNING, logger="meeko"),
+        patch("meeko.main.ProfileManager", side_effect=make),
+    ):
+        async with _running_meeko(
+            {"query": _profile(prompt="default system")},
+            stt=stt,
+            tts=_FakeTTSClient("dg-test"),
+            resume=session_id,
+        ) as h:
+            await asyncio.wait_for(stt.entered.wait(), timeout=5)
+
+    assert h.claude.session_id == session_id
+    assert h.claude.loaded_history[-1]["content"][0]["text"] == "prior reply"
+    assert h.claude.system_prompt == "default system"
+    assert built[0].active_profile.name == "query"
+    assert any("'retired'" in r.getMessage() for r in caplog.records)
 
 
 async def test_run_resume_unknown_id_exits(monkeypatch, fake_profiles, tmp_path):
