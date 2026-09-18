@@ -1,4 +1,4 @@
-"""Tests for meeko.stt_events: what each STT event means per state.
+"""Tests for meeko.orchestrator.stt_events: what each STT event means per state.
 
 Routing is a decision table over (event, state), so these feed TurnEvent
 objects straight to `handle()`. No STT session, no Claude, no audio — the
@@ -14,8 +14,8 @@ import pytest
 
 from meeko.deepgram_stt import TurnEvent
 from meeko.leds import LedState
-from meeko.state import State, StateManager
-from meeko.stt_events import SttEventRouter
+from meeko.orchestrator.state import State, StateManager
+from meeko.orchestrator.stt_events import SttEventRouter
 
 
 class _RecordingLeds:

@@ -1,4 +1,4 @@
-"""Tests for meeko.mic_pump: where each mic chunk goes, per state.
+"""Tests for meeko.orchestrator.mic_pump: where each mic chunk goes, per state.
 
 `route_chunk` takes raw bytes and a session stand-in, so the whole
 routing table is reachable without PyAudio, Deepgram, or a running
@@ -13,8 +13,8 @@ import asyncio
 import pytest
 
 from meeko.leds import LedState
-from meeko.mic_pump import MicPump
-from meeko.state import State, StateManager
+from meeko.orchestrator.mic_pump import MicPump
+from meeko.orchestrator.state import State, StateManager
 
 CHUNK = b"\x00\x01" * 800  # one 50ms frame of 16-bit PCM
 

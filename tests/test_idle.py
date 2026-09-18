@@ -1,11 +1,13 @@
-"""Tests for meeko.idle: the idle windows and the controller that arms them."""
+"""Tests for meeko.orchestrator.idle: the idle windows and the controller
+that arms them.
+"""
 
 import asyncio
 
 import pytest
 
 from meeko.config import Profile
-from meeko.idle import (
+from meeko.orchestrator.idle import (
     CONVERSATION_CLOSE_TEXT,
     CONVERSATION_PROMPT_TEXT,
     IDLE_TIMEOUT_SENTINEL,

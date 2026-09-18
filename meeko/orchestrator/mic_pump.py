@@ -24,8 +24,8 @@ import asyncio
 import logging
 
 from meeko.audio_io import AudioIO
-from meeko.idle import IdleController
-from meeko.state import State, StateManager
+from meeko.orchestrator.idle import IdleController
+from meeko.orchestrator.state import State, StateManager
 from meeko.wake_word import WakeWordDetector
 
 logger = logging.getLogger("meeko")

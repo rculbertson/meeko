@@ -94,7 +94,7 @@ class IdleController:
 
     (This started out as cycle avoidance, back when ``State`` lived in
     ``meeko.main``. It doesn't have to be a callable any more —
-    ``meeko.state`` is importable from here — it just still should be.)
+    ``meeko.orchestrator.state`` is importable from here — it just still should be.)
     """
 
     def __init__(

@@ -66,9 +66,10 @@ _ERROR_FLASH_S = 3.0
 class LedState(StrEnum):
     """Externally-visible LED state names.
 
-    Decoupled from ``meeko.state.State``, and necessarily so: ``StateManager``
-    lives in ``meeko.state``, which imports this module to drive the ring.
-    Naming the states separately keeps that dependency pointing one way.
+    Decoupled from ``meeko.orchestrator.state.State``, and necessarily so:
+    ``StateManager`` lives in ``meeko.orchestrator.state``, which imports
+    this module to drive the ring. Naming the states separately keeps that
+    dependency pointing one way.
     ``StateManager`` maps ``State`` → ``LedState``.
 
     ``LISTENING`` and ``LISTENING_ACTIVE`` are both sub-states of the

@@ -24,8 +24,8 @@ import asyncio
 import logging
 from collections.abc import Callable
 
-from meeko.idle import IdleController
-from meeko.state import State, StateManager
+from meeko.orchestrator.idle import IdleController
+from meeko.orchestrator.state import State, StateManager
 
 logger = logging.getLogger("meeko")
 

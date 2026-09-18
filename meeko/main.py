@@ -41,14 +41,15 @@ from meeko.config import (
 )
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
-from meeko.idle import IdleController
 from meeko.leds import LedController
-from meeko.mic_pump import MicPump
+from meeko.orchestrator.idle import IdleController
+from meeko.orchestrator.mic_pump import MicPump
+from meeko.orchestrator.state import State, StateManager
+from meeko.orchestrator.stt_events import SttEventRouter
+from meeko.orchestrator.turn_worker import TurnWorker
 from meeko.session_summary import SummaryScheduler
 from meeko.sessions import UNTITLED, SessionStore
 from meeko.speaker import Speaker
-from meeko.state import State, StateManager
-from meeko.stt_events import SttEventRouter
 from meeko.stt_supervisor import (
     STTSupervisor,
     keepalive_pump,
@@ -67,7 +68,6 @@ from meeko.tools.timer import timer_manager
 from meeko.tools.weather import get_tool_definitions as weather_tools
 from meeko.tools.weather import handle as weather_handle
 from meeko.tools.weather import weather_client
-from meeko.turn_worker import TurnWorker
 from meeko.wake_word import WakeWordDetector
 
 LOG_FILE = "meeko.log"
@@ -450,7 +450,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     # Owns the post-turn and post-wake silence windows (one task slot).
     # Cancelled on user activity (StartOfTurn), barge-in, the next turn
-    # dequeuing, and shutdown. See meeko/idle.py.
+    # dequeuing, and shutdown. See meeko/orchestrator/idle.py.
     idle = IdleController(
         is_listening=lambda: state_manager.state == State.LISTENING,
         profile_manager=profile_manager,
@@ -472,7 +472,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     # Drives Claude + TTS for queued user turns and owns barge-in: its
     # request_barge_in cancels just the in-flight turn. See
-    # meeko/turn_worker.py.
+    # meeko/orchestrator/turn_worker.py.
     turn_worker = TurnWorker(
         turn_queue=turn_queue,
         state_manager=state_manager,
