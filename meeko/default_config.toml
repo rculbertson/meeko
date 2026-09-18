@@ -26,8 +26,17 @@ default_profile = "query"
 units = "imperial"
 
 [profiles.query]
+# The profile name is the conversation mode, so a profile must be named
+# either "query" or "conversation" — any other name is rejected at startup.
 wake_word = "meeko"
 voice = "mars"
+# Idle timings. Both are optional; the values shown are the defaults.
+# Silence in LISTENING after a turn before the session closes silently:
+# idle_timeout_seconds = 5.0
+# Silence between the wake word and your first turn ("Hey Meeko" with no
+# follow-up). On expiry the session closes silently and returns to IDLE,
+# so the wake word is needed again. Non-positive disables it.
+# post_wake_timeout_seconds = 15.0
 prompt = """\
 You are Meeko, a voice assistant optimized for quick questions. \
 Your responses will be spoken aloud via text-to-speech, \
@@ -71,6 +80,15 @@ conversation in the background before swapping to the loaded one.\
 [profiles.conversation]
 wake_word = "meeko"
 voice = "mars"
+# Idle timings. All optional; the values shown are the defaults.
+# Silence in LISTENING before Meeko speaks a verbal check-in
+# ("Would you like to continue, or should we end the session now?"):
+# conversation_idle_seconds = 60.0
+# Further silence after that check-in before Meeko closes the session:
+# conversation_close_seconds = 20.0
+# Silence between the wake word and your first turn — same meaning as in
+# [profiles.query]. Non-positive disables it.
+# post_wake_timeout_seconds = 15.0
 prompt = """\
 You are Meeko, a thinking partner for long, in-depth conversations — \
 brainstorming, working through a problem, talking something out, or just \
