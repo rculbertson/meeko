@@ -25,7 +25,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from enum import Enum, auto
 
 import anthropic
@@ -43,6 +43,7 @@ from meeko.config import (
 )
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
+from meeko.idle import IDLE_TIMEOUT_SENTINEL, IdleController
 from meeko.leds import LedController, LedState
 from meeko.session_summary import summarize_session
 from meeko.sessions import SessionStore
@@ -145,57 +146,6 @@ class StateManager:
 
 
 RESUME_LATEST = "__latest__"
-
-# Sentinel posted to the turn queue by the idle-timeout monitor to wake
-# drive_turns and run post-turn session handling (which finalizes the
-# session) without spending a Claude/TTS round-trip first.
-_IDLE_TIMEOUT_SENTINEL: object = object()
-
-CONVERSATION_PROMPT_TEXT = (
-    "Would you like to continue, or should we end the session now?"
-)
-CONVERSATION_CLOSE_TEXT = "Okay, ending the session now."
-
-
-async def _idle_monitor(
-    profile: Profile,
-    on_timeout: Callable[[], None],
-    speak: Callable[[str], Awaitable[None]] | None = None,
-) -> None:
-    """Wait for the active mode's idle window, then call on_timeout.
-
-    Cancellation at any await bails cleanly without firing. Called from
-    drive_turns after each turn that left the state in LISTENING.
-
-    Query mode: silent close after `idle_timeout_seconds`.
-    Conversation mode: after `conversation_idle_seconds`, speak a prompt;
-    if no response within `conversation_close_seconds` after the prompt
-    finishes, speak a closing line and end the session.
-
-    A non-positive timeout (`idle_timeout_seconds` for query,
-    `conversation_idle_seconds` for conversation) disables the monitor —
-    used as a test escape hatch and an operator override.
-    """
-    if profile.mode == "query":
-        if profile.idle_timeout_seconds <= 0:
-            return
-        await asyncio.sleep(profile.idle_timeout_seconds)
-        on_timeout()
-        return
-
-    elif profile.mode == "conversation":
-        if profile.conversation_idle_seconds <= 0:
-            return
-        if speak is None:
-            raise ValueError("conversation mode requires a speak callback")
-        await asyncio.sleep(profile.conversation_idle_seconds)
-        await speak(CONVERSATION_PROMPT_TEXT)
-        # Full close window after the prompt finishes — Meeko's own
-        # talking does not eat into the user's response time.
-        await asyncio.sleep(profile.conversation_close_seconds)
-        await speak(CONVERSATION_CLOSE_TEXT)
-        on_timeout()
-        return
 
 
 async def _list_sessions_cmd(store: SessionStore) -> None:
@@ -569,7 +519,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 if wake_detector.process(data):
                     state_manager.set(State.LISTENING)
                     logger.info("Wake word accepted; entering LISTENING")
-                    start_post_wake_monitor()
+                    idle.start_post_wake()
                 continue
             if config.mute_mic_while_speaking and state_manager.state == State.SPEAKING:
                 continue
@@ -593,90 +543,21 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     # frames, and trip the keepalive watchdog with 1011 mid-reply.
     # Unbounded: payloads are short transcript strings, and a long
     # backlog would only happen if Claude fell catastrophically behind,
-    # which is a separate problem. Also carries _IDLE_TIMEOUT_SENTINEL
+    # which is a separate problem. Also carries IDLE_TIMEOUT_SENTINEL
     # from the idle monitor to ask drive_turns to run post-turn session
     # handling without a Claude round-trip.
     turn_queue: asyncio.Queue[str | object] = asyncio.Queue()
 
-    # Set while an idle monitor task is sleeping between turns. Cancelled
-    # on user activity (StartOfTurn), barge-in, the next turn dequeuing,
-    # and shutdown. See _idle_monitor.
-    idle_monitor_task: asyncio.Task | None = None
-
-    def cancel_idle_monitor() -> None:
-        nonlocal idle_monitor_task
-        if idle_monitor_task is not None and not idle_monitor_task.done():
-            idle_monitor_task.cancel()
-        idle_monitor_task = None
-
-    def on_idle_timeout() -> None:
-        # Race guard: a turn may have arrived in the gap between
-        # asyncio.sleep waking and on_timeout running. Skip if state
-        # is no longer LISTENING (turn already in flight) or if a
-        # user transcript is already queued ahead of us — letting the
-        # sentinel land behind real text would end a session right
-        # after a successful turn.
-        if state_manager.state != State.LISTENING or not turn_queue.empty():
-            return
-        active = profile_manager.active_profile
-        if active.mode == "query":
-            logger.info(
-                "Idle timeout (%.1fs, mode=query); ending session",
-                active.idle_timeout_seconds,
-            )
-        elif active.mode == "conversation":
-            logger.info(
-                "Idle timeout (%.1fs after prompt, mode=conversation); ending session",
-                active.conversation_close_seconds,
-            )
-        else:
-            logger.warning(
-                "Idle timeout for unknown mode: %s; ending session", active.mode
-            )
-        session_manager.request_end()
-        turn_queue.put_nowait(_IDLE_TIMEOUT_SENTINEL)
-
-    def start_idle_monitor() -> None:
-        nonlocal idle_monitor_task
-        cancel_idle_monitor()
-        idle_monitor_task = asyncio.create_task(
-            _idle_monitor(
-                profile_manager.active_profile,
-                on_idle_timeout,
-                speak=speaker.speak,
-            )
-        )
-
-    def on_post_wake_timeout() -> None:
-        # Wake word fired but the user never spoke. Close silently and
-        # return to IDLE, regardless of mode. Same race guard as
-        # on_idle_timeout: a turn may have landed between the sleep
-        # waking and this running.
-        if state_manager.state != State.LISTENING or not turn_queue.empty():
-            return
-        logger.info(
-            "Post-wake timeout (%.1fs, no speech); ending session",
-            profile_manager.active_profile.post_wake_timeout_seconds,
-        )
-        session_manager.request_end()
-        turn_queue.put_nowait(_IDLE_TIMEOUT_SENTINEL)
-
-    def start_post_wake_monitor() -> None:
-        # Arms the silence window that runs from the wake word until the
-        # user's first turn. Shares idle_monitor_task so the existing
-        # cancel_idle_monitor() calls (StartOfTurn, barge-in, next turn,
-        # shutdown) tear it down.
-        nonlocal idle_monitor_task
-        cancel_idle_monitor()
-        timeout = profile_manager.active_profile.post_wake_timeout_seconds
-        if timeout <= 0:
-            return
-
-        async def _monitor() -> None:
-            await asyncio.sleep(timeout)
-            on_post_wake_timeout()
-
-        idle_monitor_task = asyncio.create_task(_monitor())
+    # Owns the post-turn and post-wake silence windows (one task slot).
+    # Cancelled on user activity (StartOfTurn), barge-in, the next turn
+    # dequeuing, and shutdown. See meeko/idle.py.
+    idle = IdleController(
+        is_listening=lambda: state_manager.state == State.LISTENING,
+        profile_manager=profile_manager,
+        session_manager=session_manager,
+        turn_queue=turn_queue,
+        speak=speaker.speak,
+    )
 
     # Set in drive_turns while a Claude+TTS turn is running so
     # request_barge_in() can cancel just that turn without tearing down
@@ -706,7 +587,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         # exit_speaking will re-assert LISTENING when they unwind; the
         # brief PROCESSING window in between is harmless (PROCESSING-
         # state EndOfTurns are queued normally).
-        cancel_idle_monitor()
+        idle.cancel()
         state_manager.set(State.LISTENING)
         if current_speak_task is not None and not current_speak_task.done():
             logger.info("Barge-in: cancelling in-flight reply")
@@ -731,7 +612,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 )
                 # User activity always cancels a pending idle close; the
                 # branch below handles barge-in for the SPEAKING case.
-                cancel_idle_monitor()
+                idle.cancel()
                 if state_manager.state in (State.SPEAKING, State.PROCESSING):
                     # Barge-in: user is talking over the assistant, or
                     # they changed their mind during the window between
@@ -782,9 +663,9 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         nonlocal current_speak_task, barge_in_requested
         while not stop_event.is_set():
             item = await turn_queue.get()
-            cancel_idle_monitor()
-            if item is _IDLE_TIMEOUT_SENTINEL:
-                # Idle window expired without user activity; on_idle_timeout
+            idle.cancel()
+            if item is IDLE_TIMEOUT_SENTINEL:
+                # Idle window expired without user activity; IdleController
                 # already set session_manager.request_end(). Run the
                 # post-turn block to finalize and (with wake word) return
                 # to IDLE. No Claude/TTS round-trip on this path, so we
@@ -855,7 +736,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             # LISTENING — IDLE means the session already ended and the
             # next interaction needs the wake word.
             if new_state == State.LISTENING:
-                start_idle_monitor()
+                idle.start_post_turn()
             state_manager.set(new_state)
 
     async def on_session(stt_session) -> None:
@@ -907,14 +788,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         pass
     finally:
         stop_event.set()
-        # Cancel and await the idle monitor directly; can't use
-        # cancel_idle_monitor() here because it nulls the reference
-        # before we can await it.
-        if idle_monitor_task is not None:
-            if not idle_monitor_task.done():
-                idle_monitor_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await idle_monitor_task
+        await idle.aclose()
         drive_turns_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await drive_turns_task

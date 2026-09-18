@@ -88,6 +88,8 @@ States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (bar
 
 Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout (query mode silently, conversation mode after a spoken check-in), and the post-wake timeout when no first turn ever arrives. See `ARCHITECTURE.md` §5.1.
 
+Both silence windows live in `meeko/idle.py` (`IdleController`), not in the orchestrator. They don't end the session themselves — they set the `SessionManager` end flag and post `IDLE_TIMEOUT_SENTINEL` to the turn queue, and `drive_turns` runs the normal post-turn handling without a Claude/TTS round-trip.
+
 ### Debugging
 - Run with `PYTHONASYNCIODEBUG=1` (Python's built-in env var) to enable asyncio debug mode. The loop will then log a WARNING (`Executing <Handle ...> took N.NNN seconds`) whenever a synchronous callback holds it ≥100 ms — useful for diagnosing loop stalls (e.g. STT websocket keepalive timeouts). Off in normal operation; debug mode wraps every coroutine creation with traceback capture and is a real cost on hot paths. Meeko routes asyncio's own warnings through the same logging handler as `meeko.*` logs, so they pick up the timestamp format and land in the rotating log when `MEEKO_LOG_TARGET=file`.
 
