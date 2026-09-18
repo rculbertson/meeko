@@ -665,7 +665,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             item = await turn_queue.get()
             idle.cancel()
             if item is IDLE_TIMEOUT_SENTINEL:
-                # Idle window expired without user activity; on_idle_timeout
+                # Idle window expired without user activity; IdleController
                 # already set session_manager.request_end(). Run the
                 # post-turn block to finalize and (with wake word) return
                 # to IDLE. No Claude/TTS round-trip on this path, so we
