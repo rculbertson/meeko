@@ -170,8 +170,8 @@ async def _init_session_state(
         if profile is None:
             # The session's profile was renamed or removed from the config
             # since it was recorded. Resume the transcript under the default
-            # profile rather than refusing to start — same fallback as
-            # ProfileManager.rebind_profile for a mid-session load_session.
+            # profile rather than refusing to start. (ProfileManager.rebind_profile
+            # handles the same case mid-session by keeping the active profile.)
             profile = profiles[default_profile_name]
             logger.warning(
                 "Resumed session references unknown profile %r; using default "
