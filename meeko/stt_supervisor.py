@@ -9,6 +9,7 @@ clean reconnect.
 """
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
@@ -30,6 +31,12 @@ KEEPALIVE_INTERVAL_S = 5
 # doesn't drop the user's speech. After this many seconds we give up,
 # stop capture, and drain the queue until a clean reconnect.
 RECONNECT_GRACE_S = 10
+
+# Delay before each reconnect attempt: 0.5s → 1 → 2 → 4 → 8 → 16 → 30
+# (cap), reset on a successful connect. The first failure in a streak
+# logs the full traceback; subsequent failures log one line so a
+# prolonged outage doesn't flood the logs.
+RECONNECT_BACKOFF_S = (0.5, 1, 2, 4, 8, 16, 30)
 
 
 async def keepalive_pump(stt_session, stop_event: asyncio.Event) -> None:
@@ -99,13 +106,12 @@ class STTSupervisor:
         self._is_speaking = is_speaking
 
     async def run(self) -> None:
-        # Reconnect backoff: 0.5s → 1 → 2 → 4 → 8 → 16 → 30 (cap), reset
-        # on a successful connect. The first failure in a streak logs the
-        # full traceback; subsequent failures log one line so a prolonged
-        # outage doesn't flood the logs.
-        backoff_schedule = [0.5, 1, 2, 4, 8, 16, 30]
-        consecutive_failures = 0
+        """Connect, run `on_session` for the life of the connection, and
+        reconnect with backoff whenever it fails, until `stop_event` is set.
 
+        Any exception out of the session (including `on_session`) counts as
+        a failure; CancelledError propagates.
+        """
         # On a brief STT outage we keep the mic running and buffer audio
         # so the user's speech isn't dropped. If the outage exceeds
         # RECONNECT_GRACE_S we stop capture and drain the queue until we
@@ -113,73 +119,77 @@ class STTSupervisor:
         # reconnect so buffered TTS echo isn't flushed to the new session
         # as a phantom user turn. Longer-term, hardware AEC (ReSpeaker
         # XVF3800) will remove the echo path entirely and enable barge-in.
-        grace_task: asyncio.Task | None = None
-        was_speaking_at_disconnect = False
-
-        async def grace_cutoff() -> None:
-            await asyncio.sleep(RECONNECT_GRACE_S)
-            logger.error(
-                "STT disconnected for %ds; stopping mic capture until reconnect",
-                RECONNECT_GRACE_S,
-            )
-            self._audio.stop_mic()
-            self._audio.drain_mic_queue()
+        self._grace_task: asyncio.Task | None = None
+        self._was_speaking_at_disconnect = False
+        self._consecutive_failures = 0
 
         while not self._stop_event.is_set():
             logger.info("Connecting to Deepgram STT (Flux)...")
             try:
                 async with self._stt.session() as stt_session:
-                    if grace_task is not None:
-                        grace_task.cancel()
-                        try:
-                            await grace_task
-                        except asyncio.CancelledError, Exception:
-                            pass
-                        grace_task = None
-                    if not self._audio.mic_capturing:
-                        self._audio.start_mic()
-                        logger.info("Mic capture resumed.")
-                    if was_speaking_at_disconnect:
-                        self._audio.drain_mic_queue()
-                        was_speaking_at_disconnect = False
-                    if consecutive_failures > 0:
-                        logger.info(
-                            "STT reconnected after %d attempt(s)",
-                            consecutive_failures + 1,
-                        )
-                    consecutive_failures = 0
+                    await self._on_connected()
                     await self._on_session(stt_session)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                if self._is_speaking():
-                    was_speaking_at_disconnect = True
-                if grace_task is None:
-                    grace_task = asyncio.create_task(grace_cutoff())
-                if consecutive_failures == 0:
-                    if isinstance(exc, ConnectionClosed):
-                        logger.exception("STT websocket closed; reconnecting")
-                    else:
-                        logger.exception("STT session failed; reconnecting")
-                else:
-                    logger.warning(
-                        "STT reconnect failed (attempt %d): %s",
-                        consecutive_failures + 1,
-                        exc,
-                    )
-                delay = backoff_schedule[
-                    min(consecutive_failures, len(backoff_schedule) - 1)
-                ]
-                consecutive_failures += 1
-                try:
-                    await asyncio.sleep(delay)
-                except asyncio.CancelledError:
-                    raise
-                continue
+                await asyncio.sleep(self._on_failure(exc))
 
-        if grace_task is not None and not grace_task.done():
-            grace_task.cancel()
-            try:
-                await grace_task
-            except asyncio.CancelledError, Exception:
-                pass
+        await self._cancel_grace()
+
+    async def _on_connected(self) -> None:
+        """Undo the outage handling once a session is open again."""
+        await self._cancel_grace()
+        if not self._audio.mic_capturing:
+            self._audio.start_mic()
+            logger.info("Mic capture resumed.")
+        if self._was_speaking_at_disconnect:
+            self._audio.drain_mic_queue()
+            self._was_speaking_at_disconnect = False
+        if self._consecutive_failures > 0:
+            logger.info(
+                "STT reconnected after %d attempt(s)",
+                self._consecutive_failures + 1,
+            )
+        self._consecutive_failures = 0
+
+    def _on_failure(self, exc: Exception) -> float:
+        """Record a failed session, arm the grace cutoff, log, and return
+        how long to wait before the next attempt."""
+        if self._is_speaking():
+            self._was_speaking_at_disconnect = True
+        if self._grace_task is None:
+            self._grace_task = asyncio.create_task(self._grace_cutoff())
+        if self._consecutive_failures == 0:
+            if isinstance(exc, ConnectionClosed):
+                logger.exception("STT websocket closed; reconnecting")
+            else:
+                logger.exception("STT session failed; reconnecting")
+        else:
+            logger.warning(
+                "STT reconnect failed (attempt %d): %s",
+                self._consecutive_failures + 1,
+                exc,
+            )
+        delay = RECONNECT_BACKOFF_S[
+            min(self._consecutive_failures, len(RECONNECT_BACKOFF_S) - 1)
+        ]
+        self._consecutive_failures += 1
+        return delay
+
+    async def _grace_cutoff(self) -> None:
+        """Stop mic capture once an outage outlasts RECONNECT_GRACE_S."""
+        await asyncio.sleep(RECONNECT_GRACE_S)
+        logger.error(
+            "STT disconnected for %ds; stopping mic capture until reconnect",
+            RECONNECT_GRACE_S,
+        )
+        self._audio.stop_mic()
+        self._audio.drain_mic_queue()
+
+    async def _cancel_grace(self) -> None:
+        """Cancel a pending grace cutoff, if any, and wait for it to unwind."""
+        if self._grace_task is not None and not self._grace_task.done():
+            self._grace_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._grace_task
+        self._grace_task = None
