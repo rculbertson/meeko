@@ -26,7 +26,6 @@ import signal
 import sys
 import time
 from collections.abc import Callable
-from enum import Enum, auto
 
 import anthropic
 from dotenv import load_dotenv
@@ -44,10 +43,11 @@ from meeko.config import (
 from meeko.deepgram_stt import DeepgramSTT
 from meeko.deepgram_tts import DeepgramTTS
 from meeko.idle import IDLE_TIMEOUT_SENTINEL, IdleController
-from meeko.leds import LedController, LedState
+from meeko.leds import LedController
 from meeko.session_summary import summarize_session
 from meeko.sessions import SessionStore
 from meeko.speaker import Speaker
+from meeko.state import State, StateManager
 from meeko.stt_supervisor import KEEPALIVE_INTERVAL_S, STTSupervisor
 from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.profile import ProfileManager
@@ -92,57 +92,6 @@ def setup_logging(log_level: str = "DEBUG", log_target: str | None = None) -> No
     asyncio_logger = logging.getLogger("asyncio")
     asyncio_logger.addHandler(handler)
     asyncio_logger.setLevel(logging.WARNING)
-
-
-class State(Enum):
-    IDLE = auto()
-    LISTENING = auto()
-    PROCESSING = auto()
-    SPEAKING = auto()
-
-
-class StateManager:
-    _STATE_TO_LED = {
-        State.IDLE: LedState.IDLE,
-        State.LISTENING: LedState.LISTENING,
-        State.PROCESSING: LedState.PROCESSING,
-        State.SPEAKING: LedState.SPEAKING,
-    }
-
-    def __init__(self, initial: State, leds: LedController) -> None:
-        self._state = initial
-        self._leds = leds
-
-    @property
-    def state(self) -> State:
-        return self._state
-
-    def set(self, new: State) -> None:
-        if new != self._state:
-            logger.debug("[state] %s → %s", self._state.name, new.name)
-            self._state = new
-        self._leds.set_state(self._STATE_TO_LED[new])
-
-    def enter_speaking(self) -> State:
-        prev = self._state
-        self.set(State.SPEAKING)
-        return prev
-
-    def exit_speaking(self, prev: State) -> None:
-        self.set(prev if prev != State.SPEAKING else State.LISTENING)
-
-    def set_listening_active(self, active: bool) -> None:
-        """LISTENING_ACTIVE is a LED sub-state of LISTENING (brighter
-        cyan while the user is actually speaking, vs. the steady cyan
-        "ready" cue). The orchestrator stays in State.LISTENING either
-        way — only the LED display changes. Calls from outside
-        LISTENING are no-ops so the LED never diverges from the
-        logical state."""
-        if self._state != State.LISTENING:
-            return
-        self._leds.set_state(
-            LedState.LISTENING_ACTIVE if active else LedState.LISTENING
-        )
 
 
 RESUME_LATEST = "__latest__"

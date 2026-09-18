@@ -1,8 +1,10 @@
 """Tests for the `meeko.main` orchestrator module.
 
-Covers `setup_logging`, the `State` enum, the sync `main()` entrypoint,
-and a happy-path drive-through of `run()` with all external services
-(PyAudio, Deepgram STT/TTS, Anthropic) mocked.
+Covers `setup_logging`, the sync `main()` entrypoint, and a happy-path
+drive-through of `run()` with all external services (PyAudio, Deepgram
+STT/TTS, Anthropic) mocked.
+
+The state machine itself lives in `meeko/state.py` — see test_state.py.
 """
 
 import asyncio
@@ -17,7 +19,8 @@ import pytest
 
 from meeko import main as meeko_main
 from meeko.config import Profile
-from meeko.main import State, setup_logging
+from meeko.main import setup_logging
+from meeko.state import State
 
 
 @pytest.fixture
@@ -50,10 +53,6 @@ def test_setup_logging_file_target(monkeypatch, tmp_path, clean_logger):
 def test_setup_logging_invalid_level_falls_back_to_debug(clean_logger):
     setup_logging(log_level="NOT_A_REAL_LEVEL")
     assert clean_logger.level == logging.DEBUG
-
-
-def test_state_enum_members():
-    assert {s.name for s in State} == {"IDLE", "LISTENING", "PROCESSING", "SPEAKING"}
 
 
 def test_main_drives_run_to_completion(monkeypatch):
