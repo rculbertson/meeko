@@ -138,6 +138,20 @@ async def test_chunks_after_the_wake_word_are_forwarded():
     assert h.detector.seen == 1
 
 
+async def test_idle_without_a_detector_raises_a_named_error():
+    """Unreachable in normal wiring, but if it ever happens the error must
+    say what's wrong. It surfaces through STTSupervisor, which logs only
+    str(exc) on retries: a bare AssertionError there reads as an empty,
+    unexplained STT failure. Pinning RuntimeError also fails the test if
+    this is reverted to an assert, which `python -O` would strip."""
+    h = _Harness(State.IDLE, wake_detector=None)
+
+    with pytest.raises(RuntimeError, match="no wake-word detector"):
+        await h.pump.route_chunk(CHUNK, h.session)
+
+    assert h.session.sent == []
+
+
 # ---------------------------------------------------------------------------
 # SPEAKING: the AEC / no-AEC split
 # ---------------------------------------------------------------------------
