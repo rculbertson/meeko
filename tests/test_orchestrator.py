@@ -20,6 +20,7 @@ import pytest
 from meeko import main as meeko_main
 from meeko.config import Profile
 from meeko.main import setup_logging
+from meeko.sessions import UNTITLED
 from meeko.state import State
 
 
@@ -796,6 +797,14 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
     try:
         sid = await seed.create_session("query")
         await seed.persist_turn(sid, "user", "hi")
+        titled = await seed.create_session("conversation")
+        await seed.persist_turn(titled, "user", "let's plan")
+        await seed.update_session_metadata(
+            session_id=titled,
+            title="Planning the todo app",
+            summary="s",
+            transcript="t",
+        )
     finally:
         await seed.close()
 
@@ -805,6 +814,10 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert sid in out
     assert "query" in out
+    # The title is what identifies a session when picking one to --resume.
+    lines = {line.split()[0]: line for line in out.splitlines()[1:]}
+    assert lines[titled].endswith("Planning the todo app")
+    assert lines[sid].endswith(UNTITLED)
 
 
 async def test_run_backfills_untitled_sessions_on_startup(

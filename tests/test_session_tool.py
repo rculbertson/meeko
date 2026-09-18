@@ -4,9 +4,11 @@ Covers the `SessionManager` flags, the tool definition shape, and the
 handler dispatching path for all session tools.
 """
 
+from datetime import datetime
+
 import pytest
 
-from meeko.sessions import SessionStore
+from meeko.sessions import UNTITLED, SessionStore
 from meeko.tools.session import (
     SessionManager,
     get_tool_definitions,
@@ -330,6 +332,26 @@ async def test_handle_load_session_rejects_current_session(tmp_path):
         )
         assert manager.should_load() is False
         assert "already loaded" in result.lower()
+    finally:
+        await store.close()
+
+
+async def test_handle_list_sessions_untitled_session_uses_placeholder(tmp_path):
+    """A date-range search reads the base table, so it can return a session
+    that hasn't been summarized yet. It must use the same placeholder as the
+    load path and the CLI (these had drifted to "(no title)" vs "(untitled)")."""
+    store = SessionStore.open(tmp_path / "meeko.db")
+    try:
+        sid = await store.create_session("query")
+        await store.persist_turn(sid, "user", "hi")
+        result = await handle(
+            "list_sessions",
+            {"since": datetime.now().astimezone().strftime("%Y-%m-%d")},
+            manager=SessionManager(),
+            store=store,
+        )
+        assert f'"{UNTITLED}"' in result
+        assert sid in result
     finally:
         await store.close()
 

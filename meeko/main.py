@@ -45,7 +45,7 @@ from meeko.idle import IDLE_TIMEOUT_SENTINEL, IdleController
 from meeko.leds import LedController
 from meeko.mic_pump import MicPump
 from meeko.session_summary import SummaryScheduler
-from meeko.sessions import SessionStore
+from meeko.sessions import UNTITLED, SessionStore
 from meeko.speaker import Speaker
 from meeko.state import State, StateManager
 from meeko.stt_events import SttEventRouter
@@ -107,11 +107,13 @@ async def _list_sessions_cmd(store: SessionStore) -> None:
     if not rows:
         print("No sessions yet.")
         return
-    print(f"{'id':36}  {'profile':12}  {'last_active':32}  turns")
+    # Title last: it's free text of unbounded length, so anywhere else it
+    # would push the fixed-width columns out of line.
+    print(f"{'id':36}  {'profile':12}  {'last_active':32}  {'turns':>5}  title")
     for r in rows:
         print(
             f"{r['id']:36}  {r['profile_name']:12}  {r['last_active']:32}  "
-            f"{r['turn_count']}"
+            f"{r['turn_count']:>5}  {r['title'] or UNTITLED}"
         )
 
 

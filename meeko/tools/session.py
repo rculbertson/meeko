@@ -26,6 +26,7 @@ import logging
 from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING
 
+from meeko.sessions import UNTITLED
 from meeko.tools.dispatch import ToolDefinition
 
 if TYPE_CHECKING:
@@ -262,7 +263,7 @@ async def _handle_list(args: dict, store: SessionStore | None) -> str:
         return f"No sessions found {criteria}."
     lines = [f"Found {len(results)} session(s) {criteria}:"]
     for i, r in enumerate(results, 1):
-        title = r["title"] or "(no title)"
+        title = r["title"] or UNTITLED
         lines.append(
             f'{i}. "{title}" — {_format_local_date(r["last_active"])} '
             f"(id: {r['session_id']})"
@@ -290,7 +291,7 @@ async def _handle_load(
     if session_id == current_session_id:
         return "That's the current session — already loaded."
     manager.request_load(session_id)
-    title = row.get("title") or "(untitled)"
+    title = row.get("title") or UNTITLED
     logger.info(
         "load_session tool called for %s; will swap history after SPEAKING",
         session_id[:8],

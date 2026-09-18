@@ -179,6 +179,21 @@ async def test_list_sessions_orders_and_counts(store):
     assert rows[0]["last_active"] >= rows[1]["last_active"]
 
 
+async def test_list_sessions_includes_title(store):
+    """None until end-of-session summarization writes one."""
+    sid = await store.create_session("query")
+    await store.persist_turn(sid, "user", "hi")
+
+    [row] = await store.list_sessions()
+    assert row["title"] is None
+
+    await store.update_session_metadata(
+        session_id=sid, title="Planning the todo app", summary="s", transcript="t"
+    )
+    [row] = await store.list_sessions()
+    assert row["title"] == "Planning the todo app"
+
+
 async def test_load_turns_roundtrips_mixed_content(store):
     sid = await store.create_session("query")
     await store.persist_turn(sid, "user", "hello")

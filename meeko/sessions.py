@@ -62,6 +62,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 """
 
 
+# Display placeholder for a session with no title. Titles are written by
+# end-of-session summarization, so a session that's still active, or whose
+# summary failed, has NULL. One constant so the CLI and the voice tools
+# can't drift apart again (they had "(no title)" and "(untitled)").
+UNTITLED = "(untitled)"
+
+
 def default_db_path() -> Path:
     """Default DB location, following the XDG Base Directory spec.
 
@@ -169,7 +176,7 @@ class SessionStore:
 
     def _list_sessions_sync(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT s.id, s.profile_name, s.last_active, COUNT(t.id) "
+            "SELECT s.id, s.profile_name, s.last_active, COUNT(t.id), s.title "
             "FROM sessions s LEFT JOIN turns t ON t.session_id = s.id "
             "GROUP BY s.id "
             "ORDER BY s.last_active DESC"
@@ -180,6 +187,7 @@ class SessionStore:
                 "profile_name": r[1],
                 "last_active": r[2],
                 "turn_count": r[3],
+                "title": r[4],
             }
             for r in rows
         ]
