@@ -20,6 +20,7 @@ and the summary drives voice-resume recall — quality matters more than
 the per-call cost at personal-use volumes. See ARCHITECTURE.md §6.3.
 """
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -179,3 +180,100 @@ async def summarize_session(
         return
 
     logger.info("summarize_session: wrote summary for %s (title=%r)", session_id, title)
+
+
+# Startup backfill can find many untitled sessions at once (e.g. after a
+# run of crashes). Cap concurrent summary calls so they don't hammer the
+# Anthropic rate limit.
+_BACKFILL_CONCURRENCY = 3
+
+
+class SummaryScheduler:
+    """Owns the lifecycle of background summarization tasks.
+
+    Summaries are fire-and-forget from the orchestrator's point of view,
+    but not from shutdown's: they hold the SQLite store and a dedicated
+    Anthropic client, so both must outlive every in-flight task.
+    ``aclose()`` cancels the tasks first and closes the client after.
+
+    The client is injected rather than built here so the caller decides
+    its lifetime. It is separate from the live conversation client,
+    which sidesteps any concern about concurrent use of one client from
+    the turn loop and from background work.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: SessionStore,
+        client: anthropic.AsyncAnthropic,
+    ) -> None:
+        self._store = store
+        self._client = client
+        self._tasks: set[asyncio.Task] = set()
+
+    def fire(self, session_id: str | None) -> None:
+        """Summarize a just-finalized session in the background.
+
+        No-op on None: a session with no turns never got a row (creation
+        is lazy), so there is nothing to summarize — e.g. end_session
+        called before the user said anything.
+        """
+        if session_id is None:
+            return
+        self._track(summarize_session(self._store, session_id, self._client))
+
+    async def backfill(self, *, active_session_id: str | None) -> None:
+        """Schedule summaries for sessions a prior run never finished.
+
+        Any session with turns but no title was left behind by a run that
+        was killed before its summary completed; without this,
+        `list_sessions` keeps reporting it as "(no title)" and voice
+        recall can't find it. Skips ``active_session_id`` — a resumed
+        session is still being added to, so summarizing it now would
+        index a transcript that's about to grow.
+        """
+        untitled = await self._store.list_untitled_sessions_with_turns()
+        if untitled:
+            if len(untitled) > 10:
+                logger.warning(
+                    "Backfilling %d untitled session(s); "
+                    "startup may be slower than usual",
+                    len(untitled),
+                )
+            else:
+                logger.info("Backfilling %d untitled session(s)", len(untitled))
+        sem = asyncio.Semaphore(_BACKFILL_CONCURRENCY)
+
+        async def _rate_limited(sid: str) -> None:
+            async with sem:
+                await summarize_session(self._store, sid, self._client)
+
+        for sid in untitled:
+            if sid == active_session_id:
+                continue
+            self._track(_rate_limited(sid))
+
+    async def aclose(self) -> None:
+        """Cancel in-flight summaries, then close the client.
+
+        Call before closing the store: a summary still running would
+        write into a closed SQLite connection and crash, and a half-done
+        summary isn't worth delaying shutdown for.
+
+        Never raises. It runs mid-teardown, and an exception here would
+        skip everything the caller still has to close after it.
+        """
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        try:
+            await self._client.close()
+        except Exception:
+            logger.exception("Failed to close summary client")
+
+    def _track(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)

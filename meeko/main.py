@@ -44,7 +44,7 @@ from meeko.deepgram_tts import DeepgramTTS
 from meeko.idle import IDLE_TIMEOUT_SENTINEL, IdleController
 from meeko.leds import LedController
 from meeko.mic_pump import MicPump
-from meeko.session_summary import summarize_session
+from meeko.session_summary import SummaryScheduler
 from meeko.sessions import SessionStore
 from meeko.speaker import Speaker
 from meeko.state import State, StateManager
@@ -374,50 +374,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     profile_manager.set_claude_client(claude)
 
     # Separate Anthropic client for background summarization — sidesteps
-    # any concern about concurrent use with the live conversation client
-    # and lets summarize_session own its own lifecycle.
-    summary_client = anthropic.AsyncAnthropic(api_key=anthropic_key)
-    summary_tasks: set[asyncio.Task] = set()
-
-    def fire_summary(finalized_sid: str | None) -> None:
-        # No-op when there's no row to finalize (e.g. end_session called
-        # before any user turn — lazy creation never fired).
-        if finalized_sid is None:
-            return
-        task = asyncio.create_task(
-            summarize_session(store, finalized_sid, summary_client)
-        )
-        summary_tasks.add(task)
-        task.add_done_callback(summary_tasks.discard)
-
-    # Backfill: any session with turns but no title is a prior run that
-    # was killed before summarization completed. Fire summary now so
-    # `list_sessions` doesn't keep reporting them as "(no title)".
-    # Cap concurrency at 3 to avoid hammering the Anthropic rate limit
-    # when many sessions need backfilling at once.
-    untitled = await store.list_untitled_sessions_with_turns()
-    if untitled:
-        if len(untitled) > 10:
-            logger.warning(
-                "Backfilling %d untitled session(s); startup may be slower than usual",
-                len(untitled),
-            )
-        else:
-            logger.info("Backfilling %d untitled session(s)", len(untitled))
-    sem = asyncio.Semaphore(3)
-
-    async def _rate_limited_summary(sid: str) -> None:
-        async with sem:
-            await summarize_session(store, sid, summary_client)
-
-    for untitled_sid in untitled:
-        if untitled_sid == session_id:
-            # Resumed session is still active — skip backfill to avoid
-            # summarizing a row the user is actively adding turns to.
-            continue
-        task = asyncio.create_task(_rate_limited_summary(untitled_sid))
-        summary_tasks.add(task)
-        task.add_done_callback(summary_tasks.discard)
+    # any concern about concurrent use with the live conversation client.
+    summaries = SummaryScheduler(
+        store=store,
+        client=anthropic.AsyncAnthropic(api_key=anthropic_key),
+    )
+    await summaries.backfill(active_session_id=session_id)
 
     stt = DeepgramSTT(deepgram_key)
     tts = DeepgramTTS(deepgram_key)
@@ -547,7 +509,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                     store=store,
                     wake_detector=wake_detector,
                     session_id=claude.session_id,
-                    fire_summary=fire_summary,
+                    fire_summary=summaries.fire,
                 )
                 state_manager.set(new_state)
                 continue
@@ -600,7 +562,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
                 store=store,
                 wake_detector=wake_detector,
                 session_id=claude.session_id,
-                fire_summary=fire_summary,
+                fire_summary=summaries.fire,
             )
             # Start the post-turn idle window. Only when state is
             # LISTENING — IDLE means the session already ended and the
@@ -663,20 +625,12 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await drive_turns_task
         timer_manager.cancel_all_timers()
-        # Cancel in-flight summary tasks before closing the SQLite
-        # connection; letting them run into a closed store would crash
-        # and a half-written summary is not worth the wait at shutdown.
-        for task in summary_tasks:
-            task.cancel()
-        if summary_tasks:
-            await asyncio.gather(*summary_tasks, return_exceptions=True)
+        # Before store.close(): an in-flight summary would otherwise write
+        # into a closed SQLite connection.
+        await summaries.aclose()
         audio.close()
         leds.close()
         await store.close()
-        try:
-            await summary_client.close()
-        except Exception:
-            logger.exception("Failed to close summary client")
         logger.info("Shutting down.")
 
 
