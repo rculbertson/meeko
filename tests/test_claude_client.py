@@ -96,11 +96,47 @@ def fake_anthropic(monkeypatch):
     return holder
 
 
-def _make_client() -> ClaudeClient:
+def _install_stream_factory(monkeypatch, make_stream) -> list[dict[str, Any]]:
+    """Patch anthropic.AsyncAnthropic with a client whose `messages.stream(**kw)`
+    returns `make_stream(captured, kw)`, and return `captured`.
+
+    The stream fakes append their kwargs to `captured` on enter, and rounds
+    run one at a time, so `len(captured)` inside `make_stream` is the
+    zero-based index of the call being made.
+    """
+    captured: list[dict[str, Any]] = []
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return make_stream(captured, kwargs)
+
+    class _Client:
+        def __init__(self, *_, **__):
+            self.messages = _Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+    return captured
+
+
+class _RecordingStore:
+    """Session store fake that records every `(session_id, role, content)`."""
+
+    def __init__(self) -> None:
+        self.persisted: list[tuple[str, str, Any]] = []
+
+    async def persist_turn(self, session_id, role, content):
+        self.persisted.append((session_id, role, content))
+
+
+def _make_client(**kwargs: Any) -> ClaudeClient:
     return ClaudeClient(
-        api_key="test-key",
-        system_prompt="You are Meeko.",
-        dispatcher=ToolDispatcher(),
+        **{
+            "api_key": "test-key",
+            "system_prompt": "You are Meeko.",
+            "dispatcher": ToolDispatcher(),
+            **kwargs,
+        }
     )
 
 
@@ -195,34 +231,24 @@ def test_with_cache_breakpoint_annotates_block_list_tail():
 async def test_persist_lazily_creates_session_on_first_turn(fake_anthropic):
     """No session row is created up-front. The first persisted turn
     triggers create_session_fn; subsequent turns reuse the id."""
-    persisted: list[tuple[str, str, Any]] = []
+    store = _RecordingStore()
     creates: list[int] = []
-
-    class _FakeStore:
-        async def persist_turn(self, sid, role, content):
-            persisted.append((sid, role, content))
 
     async def create_fn() -> str:
         creates.append(1)
         return f"sess-{len(creates)}"
 
-    client = ClaudeClient(
-        api_key="test-key",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        create_session_fn=create_fn,
-    )
+    client = _make_client(store=store, create_session_fn=create_fn)
 
     assert client.session_id is None
     assert len(creates) == 0
-    assert persisted == []
+    assert store.persisted == []
 
     await _drain(client.stream_turn("first"))
     assert client.session_id == "sess-1"
     assert len(creates) == 1
     # User + assistant turns both went to sess-1.
-    assert {sid for sid, _, _ in persisted} == {"sess-1"}
+    assert {sid for sid, _, _ in store.persisted} == {"sess-1"}
 
     await _drain(client.stream_turn("second"))
     # No second create — id reused.
@@ -234,24 +260,13 @@ async def test_persist_lazily_creates_session_on_first_turn(fake_anthropic):
 async def test_reset_session_clears_id_and_next_turn_lazily_creates(fake_anthropic):
     """reset_session() clears the bound id so the next persisted turn
     invokes create_session_fn for a fresh row."""
-
-    class _FakeStore:
-        async def persist_turn(self, sid, role, content):
-            pass
-
     creates: list[str] = []
 
     async def create_fn() -> str:
         creates.append("x")
         return f"sess-{len(creates)}"
 
-    client = ClaudeClient(
-        api_key="test-key",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        create_session_fn=create_fn,
-    )
+    client = _make_client(store=_RecordingStore(), create_session_fn=create_fn)
 
     await _drain(client.stream_turn("first"))
     assert client.session_id == "sess-1"
@@ -269,49 +284,28 @@ async def test_reset_session_clears_id_and_next_turn_lazily_creates(fake_anthrop
 async def test_persist_skips_when_no_session_id_and_no_create_fn(fake_anthropic):
     """Store provided but no create_session_fn and no session_id — _persist
     should silently skip rather than crash."""
-    persisted: list = []
-
-    class _FakeStore:
-        async def persist_turn(self, sid, role, content):
-            persisted.append((sid, role, content))
-
-    client = ClaudeClient(
-        api_key="test-key",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        # no session_id, no create_session_fn
-    )
+    store = _RecordingStore()
+    client = _make_client(store=store)  # no session_id, no create_session_fn
 
     await _drain(client.stream_turn("hello"))
-    assert persisted == []
+    assert store.persisted == []
 
 
 @pytest.mark.asyncio
 async def test_persist_skips_when_create_fn_returns_empty(fake_anthropic, caplog):
     """If create_session_fn returns an empty string, _persist logs an error
     and skips writing the turn rather than persisting under a blank id."""
-    persisted: list = []
-
-    class _FakeStore:
-        async def persist_turn(self, sid, role, content):
-            persisted.append((sid, role, content))
+    store = _RecordingStore()
 
     async def bad_create_fn() -> str:
         return ""
 
-    client = ClaudeClient(
-        api_key="test-key",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        create_session_fn=bad_create_fn,
-    )
+    client = _make_client(store=store, create_session_fn=bad_create_fn)
 
     with caplog.at_level(logging.ERROR, logger="meeko"):
         await _drain(client.stream_turn("hello"))
 
-    assert persisted == []
+    assert store.persisted == []
     assert any("empty id" in r.getMessage() for r in caplog.records)
     assert client.session_id is None
 
@@ -320,27 +314,17 @@ async def test_persist_skips_when_create_fn_returns_empty(fake_anthropic, caplog
 async def test_persist_logs_error_when_create_fn_raises(fake_anthropic, caplog):
     """If create_session_fn raises, _persist logs an error and skips writing
     the turn rather than propagating the exception."""
-    persisted: list = []
-
-    class _FakeStore:
-        async def persist_turn(self, sid, role, content):
-            persisted.append((sid, role, content))
+    store = _RecordingStore()
 
     async def failing_create_fn() -> str:
         raise RuntimeError("DB connection lost")
 
-    client = ClaudeClient(
-        api_key="test-key",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        create_session_fn=failing_create_fn,
-    )
+    client = _make_client(store=store, create_session_fn=failing_create_fn)
 
     with caplog.at_level(logging.ERROR, logger="meeko"):
         await _drain(client.stream_turn("hello"))
 
-    assert persisted == []
+    assert store.persisted == []
     assert any("raised" in r.getMessage() for r in caplog.records)
     assert client.session_id is None
 
@@ -438,21 +422,11 @@ class _ToolUseStream(_FakeStream):
 
 @pytest.mark.asyncio
 async def test_breakpoint_applied_each_round_in_tool_use_loop(monkeypatch):
-    captured: list[dict[str, Any]] = []
-    call_count = {"n": 0}
-
-    class _Messages:
-        def stream(self, **kwargs):
-            call_count["n"] += 1
-            tool_use = call_count["n"] == 1
-            return _ToolUseStream(captured, kwargs, tool_use=tool_use)
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
+    # Only the first round asks for a tool.
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda captured, kw: _ToolUseStream(captured, kw, tool_use=not captured),
+    )
 
     dispatcher = ToolDispatcher()
 
@@ -469,10 +443,10 @@ async def test_breakpoint_applied_each_round_in_tool_use_loop(monkeypatch):
         ],
         _handle,
     )
-    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=dispatcher)
+    client = _make_client(dispatcher=dispatcher)
     await _drain(client.stream_turn("Set a 30-second timer."))
 
-    assert call_count["n"] == 2
+    assert len(captured) == 2
     # Round 1: tail is the user text.
     msgs_round1 = captured[0]["messages"]
     assert msgs_round1[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
@@ -541,32 +515,9 @@ class _CompactionStream(_FakeStream):
 
 @pytest.mark.asyncio
 async def test_compaction_block_kept_in_memory_but_not_persisted(monkeypatch, caplog):
-    captured: list[dict[str, Any]] = []
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _CompactionStream(captured, kwargs)
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-
-    persisted: list[tuple[str, Any]] = []
-
-    class _FakeStore:
-        async def persist_turn(self, session_id, role, content):
-            persisted.append((role, content))
-
-    client = ClaudeClient(
-        api_key="k",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        session_id="sess-1",
-    )
+    _install_stream_factory(monkeypatch, _CompactionStream)
+    store = _RecordingStore()
+    client = _make_client(store=store, session_id="sess-1")
 
     with caplog.at_level(logging.INFO, logger="meeko"):
         await _drain(client.stream_turn("Tell me a long story."))
@@ -584,10 +535,10 @@ async def test_compaction_block_kept_in_memory_but_not_persisted(monkeypatch, ca
 
     # SQLite: only the user line + the assistant's text block were persisted.
     # The compaction summary stays out of the on-disk transcript.
-    assert persisted[0] == ("user", "Tell me a long story.")
-    assert persisted[1][0] == "assistant"
-    persisted_blocks = persisted[1][1]
-    assert [b["type"] for b in persisted_blocks] == ["text"]
+    (_, user_role, user_content), (_, asst_role, asst_blocks) = store.persisted
+    assert (user_role, user_content) == ("user", "Tell me a long story.")
+    assert asst_role == "assistant"
+    assert [b["type"] for b in asst_blocks] == ["text"]
 
     # The new info-level compaction log line fired with the iteration counts.
     compaction_logs = [
@@ -604,24 +555,14 @@ async def test_compaction_block_round_trips_into_next_turn(monkeypatch):
     """After compaction fires on turn 1, turn 2's outgoing `messages=` must
     include the compaction block on the prior assistant turn — otherwise the
     server has no record that compaction happened and will redo it."""
-    captured: list[dict[str, Any]] = []
-    call_count = {"n": 0}
-
-    class _Messages:
-        def stream(self, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return _CompactionStream(captured, kwargs)
-            return _FakeStream(captured, kwargs)
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-
-    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    # Compaction fires on the first call only.
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda captured, kw: (_FakeStream if captured else _CompactionStream)(
+            captured, kw
+        ),
+    )
+    client = _make_client()
     await _drain(client.stream_turn("Turn one."))
     await _drain(client.stream_turn("Turn two."))
 
@@ -798,21 +739,12 @@ class _PauseThenEndStream(_FakeStream):
 
 @pytest.mark.asyncio
 async def test_pause_turn_continues_loop_without_dispatch(monkeypatch):
-    captured: list[dict[str, Any]] = []
     round_counter = {"n": 0}
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _PauseThenEndStream(captured, kwargs, round_counter)
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-
-    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda captured, kw: _PauseThenEndStream(captured, kw, round_counter),
+    )
+    client = _make_client()
     await _drain(client.stream_turn("Search the web."))
 
     # Two rounds: first returned pause_turn, second returned end_turn.
@@ -866,19 +798,8 @@ async def test_pause_turn_flushed_when_round_budget_exhausted(monkeypatch):
     """If every round returns pause_turn, the accumulated paused blocks
     must still be committed at loop exit. Otherwise the next user turn
     would stack on an orphan user message and 400 the API."""
-    captured: list[dict[str, Any]] = []
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _AlwaysPauseStream(captured, kwargs)
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-    client = ClaudeClient(api_key="k", system_prompt="sys", dispatcher=ToolDispatcher())
+    captured = _install_stream_factory(monkeypatch, _AlwaysPauseStream)
+    client = _make_client()
     await _drain(client.stream_turn("hello"))
 
     # MAX_TOOL_ROUNDS rounds, all pause_turn.
@@ -1060,35 +981,15 @@ async def test_cancelled_stream_appends_partial_assistant_turn(monkeypatch):
     """When stream_turn is cancelled mid-stream (barge-in), it must
     commit a partial assistant message so the next turn doesn't append
     a second consecutive user message."""
-    captured: list[dict[str, Any]] = []
     gate = asyncio.Event()
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _CancellableStream(
-                captured, kwargs, gate, ["Hello there. ", "I was about"]
-            )
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-
-    persisted: list[tuple[str, Any]] = []
-
-    class _FakeStore:
-        async def persist_turn(self, session_id, role, content):
-            persisted.append((role, content))
-
-    client = ClaudeClient(
-        api_key="k",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        session_id="sess-1",
+    _install_stream_factory(
+        monkeypatch,
+        lambda captured, kw: _CancellableStream(
+            captured, kw, gate, ["Hello there. ", "I was about"]
+        ),
     )
+    store = _RecordingStore()
+    client = _make_client(store=store, session_id="sess-1")
 
     yielded: list[str] = []
 
@@ -1116,33 +1017,19 @@ async def test_cancelled_stream_appends_partial_assistant_turn(monkeypatch):
     assert "Hello there" in last["content"][0]["text"]
 
     # SQLite persisted both the user turn and the partial assistant turn.
-    roles = [r for r, _ in persisted]
+    roles = [r for _, r, _ in store.persisted]
     assert roles == ["user", "assistant"]
-    assert "Hello there" in persisted[1][1][0]["text"]
+    assert "Hello there" in store.persisted[1][2][0]["text"]
 
 
 async def test_cancelled_stream_with_no_output_uses_placeholder(monkeypatch):
     """If the cancel arrives before any tokens streamed, the partial
     assistant turn is a placeholder ellipsis so history stays valid."""
-    captured: list[dict[str, Any]] = []
     gate = asyncio.Event()
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _CancellableStream(captured, kwargs, gate, [])
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-
-    client = ClaudeClient(
-        api_key="k",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
+    _install_stream_factory(
+        monkeypatch, lambda captured, kw: _CancellableStream(captured, kw, gate, [])
     )
+    client = _make_client()
 
     async def consume():
         async for _ in client.stream_turn("hello"):
@@ -1245,32 +1132,9 @@ async def test_cancel_at_tail_yield_keeps_history_balanced(monkeypatch):
     turn must be appended *before* the yield, not after, otherwise a
     barge-in landing on this exact suspension point leaves an orphan
     user message."""
-    captured: list[dict[str, Any]] = []
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _TailOnlyStream(captured, kwargs)
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-
-    persisted: list[tuple[str, Any]] = []
-
-    class _FakeStore:
-        async def persist_turn(self, session_id, role, content):
-            persisted.append((role, content))
-
-    client = ClaudeClient(
-        api_key="k",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        session_id="sess-1",
-    )
+    _install_stream_factory(monkeypatch, _TailOnlyStream)
+    store = _RecordingStore()
+    client = _make_client(store=store, session_id="sess-1")
 
     agen = client.stream_turn("Hi Claude")
     # Drive the generator to its first (and only) yield — `yield tail`.
@@ -1283,7 +1147,7 @@ async def test_cancel_at_tail_yield_keeps_history_balanced(monkeypatch):
     assert client._messages[-2] == {"role": "user", "content": "Hi Claude"}
     assert client._messages[-1]["role"] == "assistant"
     assert client._messages[-1]["content"][0]["text"] == "Partial reply"
-    assert [r for r, _ in persisted] == ["user", "assistant"]
+    assert [r for _, r, _ in store.persisted] == ["user", "assistant"]
 
     # Simulate barge-in cancelling us at this suspension point.
     # Should unwind cleanly without rolling back or double-appending.
@@ -1300,37 +1164,17 @@ async def test_stream_error_commits_partial_assistant_turn(monkeypatch):
     commit a partial assistant turn — otherwise the next stream_turn
     call appends a second user message and the API 400s on consecutive
     user roles."""
-    captured: list[dict[str, Any]] = []
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _RaisingStream(
-                captured,
-                kwargs,
-                ["Hello there. ", "I was about"],
-                RuntimeError("network dropped"),
-            )
-
-    class _Client:
-        def __init__(self, *_, **__):
-            self.messages = _Messages()
-            self.beta = SimpleNamespace(messages=self.messages)
-
-    monkeypatch.setattr(claude_client_module.anthropic, "AsyncAnthropic", _Client)
-
-    persisted: list[tuple[str, Any]] = []
-
-    class _FakeStore:
-        async def persist_turn(self, session_id, role, content):
-            persisted.append((role, content))
-
-    client = ClaudeClient(
-        api_key="k",
-        system_prompt="sys",
-        dispatcher=ToolDispatcher(),
-        store=_FakeStore(),
-        session_id="sess-1",
+    _install_stream_factory(
+        monkeypatch,
+        lambda captured, kw: _RaisingStream(
+            captured,
+            kw,
+            ["Hello there. ", "I was about"],
+            RuntimeError("network dropped"),
+        ),
     )
+    store = _RecordingStore()
+    client = _make_client(store=store, session_id="sess-1")
 
     with pytest.raises(RuntimeError, match="network dropped"):
         async for _ in client.stream_turn("Hi Claude"):
@@ -1344,4 +1188,4 @@ async def test_stream_error_commits_partial_assistant_turn(monkeypatch):
     assert "Hello there" in last["content"][0]["text"]
 
     # SQLite mirrors in-memory: both turns persisted.
-    assert [r for r, _ in persisted] == ["user", "assistant"]
+    assert [r for _, r, _ in store.persisted] == ["user", "assistant"]
