@@ -1,11 +1,12 @@
-"""Tests for meeko.state: the orchestrator state machine and its LED mirror.
+"""Tests for meeko.orchestrator.state: the orchestrator state machine and
+its LED mirror.
 
 StateManager is the single writer for both the logical state and the LED
 ring, so these assert the two can't drift apart.
 """
 
 from meeko.leds import LedState
-from meeko.state import State, StateManager
+from meeko.orchestrator.state import State, StateManager
 
 
 class _RecordingLeds:

@@ -4,7 +4,7 @@ Covers `setup_logging`, the sync `main()` entrypoint, and a happy-path
 drive-through of `run()` with all external services (PyAudio, Deepgram
 STT/TTS, Anthropic) mocked.
 
-The state machine itself lives in `meeko/state.py` — see test_state.py.
+The state machine itself lives in `meeko/orchestrator/state.py` — see test_state.py.
 """
 
 import asyncio
@@ -21,8 +21,8 @@ import pytest
 from meeko import main as meeko_main
 from meeko.config import Profile
 from meeko.main import setup_logging
+from meeko.orchestrator.state import State
 from meeko.sessions import UNTITLED
-from meeko.state import State
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""Tests for meeko.turn_worker: the turn worker and barge-in.
+"""Tests for meeko.orchestrator.turn_worker: the turn worker and barge-in.
 
 The turn is a fake coroutine that blocks on an Event, so each test can put
 a cancel exactly where it wants one: mid-turn, between turns, or in the
@@ -21,10 +21,10 @@ import asyncio
 
 import pytest
 
-from meeko.idle import IDLE_TIMEOUT_SENTINEL
 from meeko.leds import LedState
-from meeko.state import State, StateManager
-from meeko.turn_worker import TurnWorker
+from meeko.orchestrator.idle import IDLE_TIMEOUT_SENTINEL
+from meeko.orchestrator.state import State, StateManager
+from meeko.orchestrator.turn_worker import TurnWorker
 
 ERROR = "error"
 

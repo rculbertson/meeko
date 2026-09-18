@@ -21,9 +21,9 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
-from meeko.idle import IDLE_TIMEOUT_SENTINEL, IdleController
 from meeko.leds import LedController
-from meeko.state import State, StateManager
+from meeko.orchestrator.idle import IDLE_TIMEOUT_SENTINEL, IdleController
+from meeko.orchestrator.state import State, StateManager
 
 logger = logging.getLogger("meeko")
 
