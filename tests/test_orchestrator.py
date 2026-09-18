@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 import logging.handlers
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +21,7 @@ import pytest
 from meeko import main as meeko_main
 from meeko.config import Profile
 from meeko.main import setup_logging
+from meeko.sessions import UNTITLED
 from meeko.state import State
 
 
@@ -796,6 +798,14 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
     try:
         sid = await seed.create_session("query")
         await seed.persist_turn(sid, "user", "hi")
+        titled = await seed.create_session("conversation")
+        await seed.persist_turn(titled, "user", "let's plan")
+        await seed.update_session_metadata(
+            session_id=titled,
+            title="Planning the todo app",
+            summary="s",
+            transcript="t",
+        )
     finally:
         await seed.close()
 
@@ -805,6 +815,38 @@ async def test_run_list_sessions_prints_and_returns(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert sid in out
     assert "query" in out
+    # The title is what identifies a session when picking one to --resume.
+    lines = {line.split()[0]: line for line in out.splitlines()[1:]}
+    assert lines[titled].endswith("Planning the todo app")
+    assert lines[sid].endswith(UNTITLED)
+
+
+@pytest.fixture
+def new_york_tz(monkeypatch):
+    """Pin local time so timestamp tests don't depend on the host's zone."""
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.parametrize(
+    ("stored", "shown"),
+    [
+        # last_active is stored as UTC with microseconds.
+        ("2026-09-18T01:42:29.123456+00:00", "2026-09-17 21:42 EDT"),
+        # Across a DST boundary the zone name changes with the offset.
+        ("2026-01-15T12:00:00+00:00", "2026-01-15 07:00 EST"),
+    ],
+)
+def test_list_sessions_shows_last_active_in_local_time(new_york_tz, stored, shown):
+    assert meeko_main._local_timestamp(stored) == shown
+
+
+def test_list_sessions_keeps_an_unparseable_timestamp_visible():
+    """A bad value shouldn't hide the row or crash the listing."""
+    assert meeko_main._local_timestamp("not a timestamp") == "not a timestamp"
 
 
 async def test_run_backfills_untitled_sessions_on_startup(
