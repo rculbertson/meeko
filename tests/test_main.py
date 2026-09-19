@@ -1281,6 +1281,126 @@ async def test_new_session_after_profile_switch_records_active_profile(
     )
 
 
+# ---------------------------------------------------------------------------
+# switch_profile records the switch on the live session row
+# ---------------------------------------------------------------------------
+
+
+def _profile_dispatcher(session_id="sid-1", store=None):
+    """The real dispatcher from _build_dispatcher over a query + pirate
+    profile set, with a fake store so the row write can be inspected."""
+    profiles = {
+        "query": _profile(prompt="default system"),
+        "pirate": _profile("pirate", prompt="pirate system"),
+    }
+    manager = ProfileManager(profiles, active_name="query")
+    store = store if store is not None else MagicMock(set_session_profile=AsyncMock())
+    dispatcher = meeko_main._build_dispatcher(
+        profiles,
+        manager,
+        MagicMock(),
+        store,
+        lambda: session_id,
+        meeko_main.MeekoConfig(),
+    )
+    return dispatcher, manager, store
+
+
+async def test_switch_profile_records_the_new_profile_on_the_session():
+    dispatcher, manager, store = _profile_dispatcher()
+
+    result = await dispatcher.dispatch("switch_profile", {"profile_name": "pirate"})
+
+    assert result == "Switched to the pirate profile."
+    assert manager.active_profile.name == "pirate"
+    store.set_session_profile.assert_awaited_once_with("sid-1", "pirate")
+
+
+@pytest.mark.parametrize(
+    ("fn_name", "args"),
+    [
+        ("switch_profile", {"profile_name": "query"}),  # already active
+        ("switch_profile", {"profile_name": "nope"}),  # unknown profile
+        ("list_profiles", {}),
+    ],
+)
+async def test_profile_tools_that_do_not_switch_leave_the_row_alone(fn_name, args):
+    dispatcher, manager, store = _profile_dispatcher()
+
+    await dispatcher.dispatch(fn_name, args)
+
+    assert manager.active_profile.name == "query"
+    store.set_session_profile.assert_not_awaited()
+
+
+async def test_switch_profile_before_any_row_exists_writes_nothing():
+    """No session id means lazy creation hasn't fired yet; it will create
+    the row under the now-active profile, so there is nothing to update."""
+    dispatcher, manager, store = _profile_dispatcher(session_id=None)
+
+    await dispatcher.dispatch("switch_profile", {"profile_name": "pirate"})
+
+    assert manager.active_profile.name == "pirate"
+    store.set_session_profile.assert_not_awaited()
+
+
+async def test_switch_profile_survives_a_failed_row_write(caplog):
+    """The user hears the switch confirmed and the in-memory switch has
+    happened, so a store failure is logged rather than failing the tool."""
+    failing = MagicMock(set_session_profile=AsyncMock(side_effect=OSError("disk")))
+    dispatcher, manager, _ = _profile_dispatcher(store=failing)
+
+    with caplog.at_level(logging.WARNING, logger="meeko"):
+        result = await dispatcher.dispatch("switch_profile", {"profile_name": "pirate"})
+
+    assert result == "Switched to the pirate profile."
+    assert manager.active_profile.name == "pirate"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("Failed to record profile switch" in m for m in messages)
+
+
+async def test_resume_restores_a_profile_switched_to_mid_session(monkeypatch, tmp_path):
+    """The reported bug, end to end. The session's row is created under
+    query when its first utterance is saved, and the switch happens after,
+    during that same turn. Resuming it must come back in pirate."""
+    db_path = _set_env(monkeypatch, tmp_path)  # autouse fixture disables the gate
+    two_profiles = {
+        "query": _profile(prompt="default system"),
+        "pirate": _profile("pirate", prompt="pirate system"),
+    }
+    stt = _HoldingSTTClient("dg-test")
+    stt.transcript = "talk like a pirate"
+
+    async with _running_meeko(
+        two_profiles,
+        stt=stt,
+        # end_session as a trailing marker: reset_session only runs after
+        # every tool in the turn, including the row write, has finished.
+        claude=_tool_calling_claude(
+            "Arr.",
+            ("switch_profile", {"profile_name": "pirate"}),
+            ("end_session", {}),
+        ),
+    ) as h:
+        await h.stt_session()
+        stt.ready.set()
+        await h.claude_reset()
+
+    [row] = await _list_sessions(db_path)
+    assert row["profile_name"] == "pirate"
+
+    built, make = _capture_profile_manager()
+    stt = _SignalingSTTClient()
+    with patch("meeko.main.ProfileManager", side_effect=make):
+        async with _running_meeko(
+            two_profiles, stt=stt, tts=_FakeTTSClient("dg-test"), resume=row["id"]
+        ) as h:
+            await asyncio.wait_for(stt.entered.wait(), timeout=5)
+
+    assert h.claude.system_prompt == "pirate system"
+    assert built[0].active_profile.name == "pirate"
+
+
 async def test_load_session_tool_swaps_history_and_stays_listening(
     monkeypatch, fake_profiles, tmp_path
 ):

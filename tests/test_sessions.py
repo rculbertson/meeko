@@ -57,6 +57,20 @@ async def test_create_session_persists_row(tmp_path, store):
     assert row[2] == row[3]  # created_at == last_active at creation
 
 
+async def test_set_session_profile_updates_profile_only(store):
+    """A mid-session switch rewrites profile_name and nothing else — in
+    particular not last_active, which tracks conversation activity."""
+    session_id = await store.create_session("query")
+    before = await store.get_session(session_id)
+
+    await store.set_session_profile(session_id, "conversation")
+
+    after = await store.get_session(session_id)
+    assert after["profile_name"] == "conversation"
+    assert after["last_active"] == before["last_active"]
+    assert after["title"] == before["title"]
+
+
 async def test_persist_turn_roundtrip_string_content(tmp_path, store):
     session_id = await store.create_session("query")
     await store.persist_turn(session_id, "user", "hello world")
