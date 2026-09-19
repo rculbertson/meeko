@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sqlite3
 import uuid
 from collections.abc import Sequence
@@ -25,10 +24,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# FTS5 operator characters that would cause a syntax error if left in a bare
-# query string.  We strip them so user speech is always treated as a literal
-# multi-token match rather than a structured FTS expression.
-_FTS_STRIP_RE = re.compile(r'["*^:()\[\]{}]')
+
+def _fts_literal_query(text: str) -> str:
+    """Turn user speech into an FTS5 query that matches it literally.
+
+    Unquoted, FTS5 reads its query language: a bare word may only hold
+    letters, digits and underscores, so ordinary transcripts ("todo-app",
+    "Supabase's", "e.g.", "c++") are syntax errors, and AND/OR/NOT are
+    operators. Quoting each word makes it a string the tokenizer splits
+    exactly as it split the indexed text; the words stay implicitly
+    ANDed. A word of pure punctuation quotes to an empty phrase, which
+    FTS5 ignores.
+    """
+    return " ".join('"' + word.replace('"', '""') + '"' for word in text.split())
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -298,7 +307,7 @@ class SessionStore:
         until: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        clean = _FTS_STRIP_RE.sub(" ", query).strip() if query else ""
+        match = _fts_literal_query(query) if query else ""
         date_clauses: list[str] = []
         date_params: list[Any] = []
         if since is not None:
@@ -308,13 +317,13 @@ class SessionStore:
             date_clauses.append("s.last_active < ?")
             date_params.append(until)
 
-        if clean:
+        if match:
             sql = (
                 "SELECT f.session_id, f.title, s.last_active "
                 "FROM sessions_fts f JOIN sessions s ON s.id = f.session_id "
                 "WHERE sessions_fts MATCH ?"
             )
-            params: list[Any] = [clean]
+            params: list[Any] = [match]
             for c in date_clauses:
                 sql += f" AND {c}"
             params.extend(date_params)
@@ -347,7 +356,7 @@ class SessionStore:
         """Search sessions by keyword and/or `last_active` range.
 
         ``query`` runs an FTS5 match over titles/summaries/transcripts of
-        finalized sessions (operators stripped so user speech is treated
+        finalized sessions (each word quoted so user speech is treated
         as a literal multi-token match). ``since`` (inclusive) and
         ``until`` (exclusive) are ISO-8601 timestamps compared lexically
         against ``last_active``; either bound may be omitted.

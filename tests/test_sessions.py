@@ -427,6 +427,59 @@ async def test_search_sessions_empty_query_returns_empty(store):
     assert results == []
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "todo-app",
+        "Supabase's schema",
+        "e.g. todo",
+        "notes/ideas todo",
+        "c++",
+        "50% off",
+        "AND",
+        "todo OR",
+        "what about NOT this",
+        "— todo",
+    ],
+)
+async def test_search_sessions_treats_everyday_speech_literally(store, query):
+    """Transcripts are full of characters that are FTS5 query syntax when
+    unquoted. Each of these raised sqlite3.OperationalError before words
+    were quoted — and a raising list_sessions used to break the session."""
+    sid = await store.create_session("query")
+    await store.update_session_metadata(
+        sid,
+        title="Todo app planning",
+        summary="Supabase's schema for the todo-app, e.g. notes/ideas.",
+        transcript="c++ and 50% off",
+    )
+    results = await store.search_sessions(query)
+    assert isinstance(results, list)
+
+
+async def test_search_sessions_matches_hyphenated_and_possessive_words(store):
+    sid = await store.create_session("query")
+    await store.update_session_metadata(
+        sid,
+        title="Todo app planning",
+        summary="Supabase's schema for the todo-app.",
+        transcript="",
+    )
+    for query in ["todo-app", "Supabase's schema", "todo app"]:
+        results = await store.search_sessions(query)
+        assert [r["session_id"] for r in results] == [sid], query
+
+
+async def test_search_sessions_requires_every_word(store):
+    """Quoting keeps FTS5's implicit AND between words."""
+    sid = await store.create_session("query")
+    await store.update_session_metadata(
+        sid, title="Todo app", summary="Planning.", transcript=""
+    )
+    assert await store.search_sessions("todo app") != []
+    assert await store.search_sessions("todo blockchain") == []
+
+
 async def test_search_sessions_strips_fts_operators(store):
     """Query characters like * " : ^ must not cause an FTS5 syntax error."""
     sid = await store.create_session("query")
