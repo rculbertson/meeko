@@ -144,6 +144,22 @@ async def _resolve_resume(store: SessionStore, resume: str) -> dict[str, object]
     return row
 
 
+def _require_api_keys() -> tuple[str, str]:
+    """Return (Deepgram, Anthropic) keys, or exit with a pointer to `.env`
+    naming every missing key — a fresh clone without `.env` would otherwise
+    die on a bare KeyError traceback."""
+    names = ("DEEPGRAM_API_KEY", "ANTHROPIC_API_KEY")
+    missing = [name for name in names if not os.environ.get(name)]
+    if missing:
+        print(
+            f"Missing {', '.join(missing)}. Add to a .env file in the project "
+            "root (see README, Setup).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return os.environ[names[0]], os.environ[names[1]]
+
+
 async def _init_session_state(
     store: SessionStore,
     resume: str | None,
@@ -285,8 +301,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
             await store.close()
         return
 
-    deepgram_key = os.environ["DEEPGRAM_API_KEY"]
-    anthropic_key = os.environ["ANTHROPIC_API_KEY"]
+    deepgram_key, anthropic_key = _require_api_keys()
 
     profiles, default_profile_name = load_profiles(config_path)
     store = SessionStore.open(config.db_path)

@@ -42,6 +42,13 @@ def fake_model(monkeypatch, tmp_path):
         return m
 
     monkeypatch.setattr(wake_word, "Model", factory)
+    # The preprocessor cache lives inside the venv, so a fresh clone has
+    # none and _ensure_preprocessors() would fetch them from GitHub. The
+    # fake Model never loads them; stub the download so the suite stays
+    # offline. Tests that assert on the download call override this.
+    monkeypatch.setattr(
+        wake_word.openwakeword.utils, "download_models", lambda **kwargs: None
+    )
     return str(model_path), created
 
 

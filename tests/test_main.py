@@ -14,6 +14,7 @@ import json
 import logging
 import logging.handlers
 import time
+from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -221,6 +222,20 @@ def _disable_wake_word_by_default(monkeypatch):
     into the legacy flow. Tests that exercise the wake-word path opt back
     in by deleting this env var in their own body."""
     monkeypatch.setenv("MEEKO_WAKE_WORD_DISABLED", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_host(monkeypatch, tmp_path):
+    """Keep run() off the contributor's machine: read a private copy of the
+    bundled default config instead of their ~/.config/meeko/meeko.toml
+    (which run() would otherwise read, or create if missing), and never
+    touch a real XVF3800 LED ring that happens to be plugged in."""
+    config_path = tmp_path / "meeko.toml"
+    config_path.write_bytes(
+        resources.files("meeko").joinpath("default_config.toml").read_bytes()
+    )
+    monkeypatch.setenv("MEEKO_CONFIG", str(config_path))
+    monkeypatch.setenv("MEEKO_LED_DISABLED", "1")
 
 
 class _StubAsyncAnthropic:
@@ -1784,15 +1799,34 @@ async def test_start_of_turn_while_listening_does_not_cancel(
         assert not h.speaker.stop_stream.called
 
 
-async def test_run_missing_api_key_raises(monkeypatch):
-    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+@pytest.mark.parametrize(
+    ("present", "missing"),
+    [
+        ({}, ["DEEPGRAM_API_KEY", "ANTHROPIC_API_KEY"]),
+        ({"DEEPGRAM_API_KEY": "dg-test"}, ["ANTHROPIC_API_KEY"]),
+        ({"ANTHROPIC_API_KEY": "anthropic-test"}, ["DEEPGRAM_API_KEY"]),
+    ],
+)
+async def test_run_missing_api_key_exits_with_env_hint(
+    monkeypatch, capsys, present, missing
+):
+    """A missing key exits 1 with a message naming exactly the missing keys
+    and pointing at `.env`, not a KeyError traceback."""
+    for name in ("DEEPGRAM_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in present.items():
+        monkeypatch.setenv(name, value)
     with (
         patch("meeko.main.load_dotenv"),
         patch("meeko.main.setup_logging"),
     ):
-        with pytest.raises(KeyError):
+        with pytest.raises(SystemExit) as excinfo:
             await meeko_main.run()
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert f"Missing {', '.join(missing)}." in err
+    assert ".env" in err
 
 
 async def test_end_session_before_any_turn_fire_summary_is_noop(
