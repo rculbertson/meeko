@@ -14,7 +14,6 @@ import pyaudio
 logger = logging.getLogger("meeko")
 
 RATE = 16000
-CHANNELS = 1
 FORMAT = pyaudio.paInt16
 CHUNK = 800  # 50ms at 16kHz (800 samples * 2 bytes = 1600 bytes per chunk)
 

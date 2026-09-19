@@ -14,6 +14,7 @@ back through `meeko/main.py`.
 
 import logging
 from enum import Enum, auto
+from typing import ClassVar
 
 from meeko.leds import LedController, LedState
 
@@ -28,7 +29,7 @@ class State(Enum):
 
 
 class StateManager:
-    _STATE_TO_LED = {
+    _STATE_TO_LED: ClassVar[dict[State, LedState]] = {
         State.IDLE: LedState.IDLE,
         State.LISTENING: LedState.LISTENING,
         State.PROCESSING: LedState.PROCESSING,
