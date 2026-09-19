@@ -269,6 +269,82 @@ def _with_cache_breakpoint(
     return out
 
 
+_INTERRUPTED_TOOL_RESULT = (
+    "Not run: the turn was interrupted before this tool finished."
+)
+
+
+def _tool_use_ids(content: object) -> list[str]:
+    if not isinstance(content, list):
+        return []
+    return [
+        b["id"] for b in content if isinstance(b, dict) and b.get("type") == "tool_use"
+    ]
+
+
+def _tool_result_ids(content: object) -> set[str]:
+    if not isinstance(content, list):
+        return set()
+    return {
+        b["tool_use_id"]
+        for b in content
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+    }
+
+
+def _interrupted_results(ids: list[str]) -> list[BetaContentBlockParam]:
+    return [
+        {
+            "type": "tool_result",
+            "tool_use_id": i,
+            "content": _INTERRUPTED_TOOL_RESULT,
+            "is_error": True,
+        }
+        for i in ids
+    ]
+
+
+def _pair_orphan_tool_uses(
+    messages: list[BetaMessageParam],
+) -> list[BetaMessageParam]:
+    """Return a copy of `messages` in which every client `tool_use` is
+    answered by a `tool_result` in the message right after it.
+
+    The API rejects any request containing an unanswered tool_use, so one
+    orphan would 400 every later turn of the session — and, because SQLite
+    stores history verbatim, every `--resume` of it too. A cancel can
+    leave one behind: barge-in while a tool is running, or while
+    stream_turn is suspended at `yield tail` between committing the
+    tool_use and dispatching it. Rather than patch each exit path, the
+    missing results are filled in on the send-time view, like the cache
+    breakpoint, so stored history stays verbatim and sessions broken on
+    disk become resumable.
+    """
+    out: list[BetaMessageParam] = []
+    pending: list[str] = []
+    for original in messages:
+        msg: BetaMessageParam = original
+        if pending:
+            answered = _tool_result_ids(msg["content"])
+            filler = _interrupted_results([i for i in pending if i not in answered])
+            if filler and msg["role"] == "user":
+                # tool_result blocks must lead the user message they sit in.
+                content = msg["content"]
+                rest: list[BetaContentBlockParam] = (
+                    [{"type": "text", "text": content}]
+                    if isinstance(content, str)
+                    else list(content)
+                )
+                msg = {"role": "user", "content": [*filler, *rest]}
+            elif filler:
+                out.append({"role": "user", "content": filler})
+        out.append(msg)
+        pending = _tool_use_ids(msg["content"]) if msg["role"] == "assistant" else []
+    if pending:
+        out.append({"role": "user", "content": _interrupted_results(pending)})
+    return out
+
+
 class ClaudeClient:
     def __init__(
         self,
@@ -376,7 +452,9 @@ class ClaudeClient:
                         self._profile_prompt, self._latitude, self._longitude
                     ),
                     tools=self._tools,
-                    messages=_with_cache_breakpoint(request_messages),
+                    messages=_with_cache_breakpoint(
+                        _pair_orphan_tool_uses(request_messages)
+                    ),
                     betas=[COMPACTION_BETA],
                     context_management=self._context_management,
                 ) as stream:
@@ -511,20 +589,30 @@ class ClaudeClient:
                 )
 
     async def _dispatch_tool_calls(self, final: Any) -> None:
-        tool_results: list[BetaToolResultBlockParam] = []
-        for block in final.content:
-            if block.type != "tool_use":
-                continue
-            result = await self._dispatcher.dispatch(block.name, block.input or {})
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result,
-                }
-            )
+        tool_results: list[BetaToolResultBlockParam] = [
+            await self._run_tool(block)
+            for block in final.content
+            if block.type == "tool_use"
+        ]
         self._messages.append({"role": "user", "content": tool_results})
         await self._persist("user", tool_results)
+
+    async def _run_tool(self, block: Any) -> BetaToolResultBlockParam:
+        try:
+            result = await self._dispatcher.dispatch(block.name, block.input or {})
+        except Exception:
+            # The tool_use is already committed, so a raising handler must
+            # still produce a result or the history is left unanswered.
+            # Report the failure to Sonnet as the tool's result instead, so
+            # it can tell the user and the conversation carries on.
+            logger.exception("Tool %s failed", block.name)
+            return {
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": f"The {block.name} tool failed with an internal error.",
+                "is_error": True,
+            }
+        return {"type": "tool_result", "tool_use_id": block.id, "content": result}
 
     async def _persist(
         self, role: str, content: str | Sequence[BetaContentBlockParam]
