@@ -115,3 +115,19 @@ async def test_resetting_a_label_keeps_the_new_timer_listed_and_cancellable():
     await asyncio.gather(new_task, return_exceptions=True)
     assert new_task.done()
     assert mgr.list_timers() == "No active timers."
+
+
+async def test_failed_announcement_is_logged_and_the_timer_cleaned_up(caplog):
+    """A TTS failure at expiry used to escape the timer task and surface only
+    as "Task exception was never retrieved" when it was garbage-collected."""
+    speak = AsyncMock(side_effect=RuntimeError("TTS unavailable"))
+    mgr = TimerManager(speak_callback=speak)
+
+    with pytest.MonkeyPatch.context() as mp, caplog.at_level("ERROR", "meeko"):
+        mp.setattr(asyncio, "sleep", AsyncMock())
+        await mgr.set_timer(60, "1 minute", "pasta")
+        task = mgr._timers["pasta"][0]
+        await task  # would raise RuntimeError before the fix
+
+    assert "Timer 'pasta' announcement failed" in caplog.text
+    assert mgr.list_timers() == "No active timers."

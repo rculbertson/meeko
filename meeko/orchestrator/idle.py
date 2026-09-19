@@ -61,16 +61,26 @@ async def run_idle_window(
         raise ValueError(
             f"profile {profile.name!r} has idle text but no speak callback"
         )
+
+    async def say(text: str) -> None:
+        # A failed check-in (e.g. TTS down) must not end the window early:
+        # the task would die before on_timeout(), and the session would stay
+        # open indefinitely, still streaming billed audio to Deepgram.
+        # Barge-in arrives as CancelledError, which still propagates.
+        assert speak is not None  # guaranteed by the ValueError guard above
+        try:
+            await speak(text)
+        except Exception:
+            logger.exception("Idle check-in speech failed; continuing to close")
+
     await asyncio.sleep(profile.idle_timeout_seconds)
     if profile.idle_prompt:
-        assert speak is not None  # guaranteed by the ValueError guard above
-        await speak(profile.idle_prompt)
+        await say(profile.idle_prompt)
         # Full close window after the prompt finishes — Meeko's own
         # talking does not eat into the user's response time.
         await asyncio.sleep(profile.idle_close_seconds)
     if profile.idle_close_text:
-        assert speak is not None  # guaranteed by the ValueError guard above
-        await speak(profile.idle_close_text)
+        await say(profile.idle_close_text)
     on_timeout()
 
 

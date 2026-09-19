@@ -122,6 +122,55 @@ async def test_check_in_full_flow():
     assert fired == [True]
 
 
+async def test_check_in_speech_failure_still_closes_the_session(caplog):
+    """If TTS fails while speaking the check-in, the window must still end
+    the session. Before, the exception killed the task before on_timeout(),
+    leaving the session open and streaming to Deepgram indefinitely."""
+    fired = []
+    attempts: list[str] = []
+
+    async def failing_speak(text: str) -> None:
+        attempts.append(text)
+        raise RuntimeError("TTS unavailable")
+
+    with caplog.at_level("ERROR", logger="meeko"):
+        await run_idle_window(
+            _check_in_profile(idle=0.01, close=0.01),
+            lambda: fired.append(True),
+            speak=failing_speak,
+        )
+
+    assert attempts == [CHECK_IN_TEXT, CLOSE_TEXT]
+    assert fired == [True]
+    failures = [r for r in caplog.records if "check-in speech failed" in r.message]
+    assert len(failures) == 2
+
+
+async def test_check_in_cancel_during_speech_still_propagates():
+    """Barge-in cancels the window mid check-in; catching speech failures
+    must not swallow that."""
+    fired = []
+    speaking = asyncio.Event()
+
+    async def slow_speak(text: str) -> None:
+        speaking.set()
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(
+        run_idle_window(
+            _check_in_profile(idle=0.01, close=0.01),
+            lambda: fired.append(True),
+            speak=slow_speak,
+        )
+    )
+    await speaking.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fired == []
+
+
 async def test_check_in_cancel_during_idle_wait():
     """Cancelling during the initial idle window: no prompt, no close, no end."""
     fired = []
