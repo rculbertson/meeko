@@ -482,13 +482,49 @@ async def run(resume: str | None = None, list_sessions: bool = False):
     # Long-lived turn worker — survives STT reconnects so a connection
     # blip mid-reply doesn't truncate TTS or lose the in-flight turn.
     turn_worker_task = asyncio.create_task(turn_worker.run())
+    supervisor_task = asyncio.create_task(supervisor.run())
 
     try:
-        await supervisor.run()
+        # Wait on the worker too. Outside shutdown it never finishes, so if it
+        # finishes first it died, and Meeko would otherwise keep listening
+        # while never answering. Raise so the process exits non-zero and
+        # systemd (Restart=on-failure) brings it back. It can return once
+        # stop_event is set (it checks between turns, e.g. when the mic-queue
+        # overflow shutdown lands mid-turn), which is not a death: wait for
+        # the supervisor as usual.
+        await asyncio.wait(
+            {supervisor_task, turn_worker_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if (
+            turn_worker_task.done()
+            and not supervisor_task.done()
+            and not stop_event.is_set()
+        ):
+            # A worker that ended cancelled (a CancelledError leaking out of
+            # a turn, not a barge-in) has no exception to chain, and calling
+            # .exception() on it would raise CancelledError, which the except
+            # below swallows: a clean exit that systemd won't restart. A real
+            # shutdown never gets here: it cancels run() itself, so the wait
+            # above raises first.
+            cause = (
+                None if turn_worker_task.cancelled() else turn_worker_task.exception()
+            )
+            # Log it too: the raise alone only reaches stderr at exit, so
+            # with log_target = "file" meeko.log would show a restart with
+            # no reason.
+            logger.error(
+                "Turn worker stopped unexpectedly; exiting so systemd restarts Meeko",
+                exc_info=cause,
+            )
+            raise RuntimeError("Turn worker stopped unexpectedly") from cause
+        await supervisor_task
     except asyncio.CancelledError:
         pass
     finally:
         stop_event.set()
+        supervisor_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await supervisor_task
         await idle.aclose()
         turn_worker_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

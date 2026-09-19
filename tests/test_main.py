@@ -756,6 +756,81 @@ async def test_grace_cutoff_stops_mic_and_drains_after_outage(
     assert h.mic.stop_stream.call_count >= 2
 
 
+async def test_a_dead_turn_worker_ends_run_with_an_error(
+    monkeypatch, fake_profiles, tmp_path, caplog
+):
+    """If the long-lived turn worker dies, Meeko would keep listening but
+    never answer. run() must notice, clean up, and raise, so the process
+    exits non-zero and systemd restarts it."""
+    _set_env(monkeypatch, tmp_path)
+    died = AsyncMock(side_effect=RuntimeError("worker blew up"))
+
+    async with _running_meeko(
+        fake_profiles,
+        stt=_QueueDrivenSTTClient("dg-test"),
+        extra_patches=[patch("meeko.main.TurnWorker.run", new=died)],
+    ) as h:
+        with pytest.raises(RuntimeError, match="Turn worker stopped") as excinfo:
+            await asyncio.wait_for(h.task, timeout=5)
+
+    assert str(excinfo.value.__cause__) == "worker blew up"
+    # Logged, with the cause, not just raised: a file log would otherwise
+    # show a restart with no reason.
+    logged = [r for r in caplog.records if "Turn worker stopped" in r.getMessage()]
+    assert logged and logged[0].levelno == logging.ERROR
+    assert str(logged[0].exc_info[1]) == "worker blew up"
+    h.mic.close.assert_called()
+    h.pa.terminate.assert_called()
+
+
+async def test_a_turn_worker_ending_cancelled_still_ends_run_with_an_error(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """A CancelledError leaking out of a turn (not a barge-in) ends the
+    worker cancelled. Asking it for .exception() would raise CancelledError,
+    which run() swallows, and Meeko would exit 0 without a restart."""
+    _set_env(monkeypatch, tmp_path)
+    cancelled = AsyncMock(side_effect=asyncio.CancelledError())
+
+    async with _running_meeko(
+        fake_profiles,
+        stt=_QueueDrivenSTTClient("dg-test"),
+        extra_patches=[patch("meeko.main.TurnWorker.run", new=cancelled)],
+    ) as h:
+        with pytest.raises(RuntimeError, match="Turn worker stopped") as excinfo:
+            await asyncio.wait_for(h.task, timeout=5)
+
+    assert excinfo.value.__cause__ is None
+    h.pa.terminate.assert_called()
+
+
+async def test_a_turn_worker_returning_during_shutdown_is_not_a_crash(
+    monkeypatch, fake_profiles, tmp_path
+):
+    """The worker returns normally once stop_event is set (the mic-queue
+    overflow shutdown sets it). Finishing before the supervisor then is
+    shutdown, not a dead worker: no "stopped unexpectedly" error."""
+    _set_env(monkeypatch, tmp_path)
+    release = asyncio.Event()
+
+    async def stop_then_return(self) -> None:
+        await release.wait()
+        self._stop_event.set()
+
+    async with _running_meeko(
+        fake_profiles,
+        stt=_QueueDrivenSTTClient("dg-test"),
+        extra_patches=[patch("meeko.main.TurnWorker.run", new=stop_then_return)],
+    ) as h:
+        # The supervisor is mid-session, as in a real overflow, so the
+        # worker's return lands first.
+        await h.stt_session()
+        release.set()
+        await asyncio.wait_for(h.task, timeout=5)  # returns; doesn't raise
+
+    h.pa.terminate.assert_called()
+
+
 async def test_mic_queue_full_triggers_shutdown(monkeypatch, fake_profiles, tmp_path):
     """If mic_callback can't enqueue because the queue is at MIC_QUEUE_MAX,
     it logs and sets stop_event so run() exits cleanly."""
