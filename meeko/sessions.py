@@ -215,6 +215,24 @@ class SessionStore:
     async def touch_session(self, session_id: str) -> None:
         await self._run(self._touch_session_sync, session_id)
 
+    def _set_session_profile_sync(self, session_id: str, profile_name: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET profile_name = ? WHERE id = ?",
+                (profile_name, session_id),
+            )
+
+    async def set_session_profile(self, session_id: str, profile_name: str) -> None:
+        """Record a mid-session profile switch on the session row.
+
+        The row is created under whatever profile was active for the
+        session's first utterance. Without this, resume and load_session
+        would restore that starting profile rather than the one the
+        session was left in. Leaves `last_active` alone: a switch isn't
+        conversation activity, and the turn that made it already bumped it.
+        """
+        await self._run(self._set_session_profile_sync, session_id, profile_name)
+
     def _update_session_metadata_sync(
         self,
         session_id: str,

@@ -12,7 +12,6 @@ handling see `MicPump` (wake-word gate, mute-while-speaking),
 import argparse
 import asyncio
 import contextlib
-import functools
 import logging
 import logging.handlers
 import os
@@ -207,10 +206,31 @@ def _build_dispatcher(
 ) -> ToolDispatcher:
     dispatcher = ToolDispatcher()
     dispatcher.register(timer_tools(), timer_handle)
-    dispatcher.register(
-        profile_tools(profiles),
-        functools.partial(profile_handle, manager=profile_manager),
-    )
+
+    async def profile_handle_wrapper(fn_name: str, args: dict) -> str:
+        before = profile_manager.active_profile.name
+        result = await profile_handle(fn_name, args, manager=profile_manager)
+        after = profile_manager.active_profile.name
+        # Record a real switch on the live session row so resume and
+        # load_session restore this profile, not the one the session
+        # started in. No row yet means lazy creation hasn't fired; it will
+        # create the row under the now-active profile.
+        session_id = get_session_id()
+        if after != before and session_id is not None:
+            try:
+                await store.set_session_profile(session_id, after)
+            except Exception:
+                # The in-memory switch already happened and the user will
+                # hear it confirmed, so don't fail the tool call. The cost
+                # is only that a later resume restores the prior profile.
+                logger.warning(
+                    "Failed to record profile switch on session %s",
+                    session_id[:8],
+                    exc_info=True,
+                )
+        return result
+
+    dispatcher.register(profile_tools(profiles), profile_handle_wrapper)
 
     async def session_handle_wrapper(fn_name: str, args: dict) -> str:
         return await session_handle(

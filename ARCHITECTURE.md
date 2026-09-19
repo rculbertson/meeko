@@ -179,7 +179,7 @@ This used to be two hardcoded modes selected by the profile name, which is why n
 
 **Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It ignores the `idle_*` keys: on expiry the session always closes silently and returns to IDLE, requiring a fresh wake word. Non-positive disables it. Both windows are owned by `IdleController` ([meeko/orchestrator/idle.py](meeko/orchestrator/idle.py)), which arms them (`start_post_wake` / `start_post_turn`) and shares one task slot between them, so every teardown path — user activity, barge-in, the next turn, shutdown — is a single `cancel()`.
 
-**Voice-driven profile switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. The `switch_profile` description is built from the loaded profiles — one line per profile, from its `description` key ([meeko/tools/profile.py](meeko/tools/profile.py)) — so Sonnet can match both "switch to conversation mode" and indirect asks like "let's have a long conversation" to a profile, including user-added ones. It calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new profile's idle behavior takes effect on the next turn. The active profile persists for the rest of the session.
+**Voice-driven profile switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. The `switch_profile` description is built from the loaded profiles — one line per profile, from its `description` key ([meeko/tools/profile.py](meeko/tools/profile.py)) — so Sonnet can match both "switch to conversation mode" and indirect asks like "let's have a long conversation" to a profile, including user-added ones. It calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new profile's idle behavior takes effect on the next turn. The active profile persists for the rest of the session, and the switch is also written to the session's `profile_name` in SQLite, so `--resume` and `load_session` bring the session back in the profile it was left in, not the one it started in. (`_build_dispatcher` in [meeko/main.py](meeko/main.py) wraps the profile tools to do this; the write is best-effort, since the in-memory switch has already been confirmed to the user.)
 
 ### 4.8 Session Manager
 
@@ -264,7 +264,7 @@ Barge-in is implemented in `TurnWorker` ([meeko/orchestrator/turn_worker.py](mee
 ```sql
 CREATE TABLE sessions (
     id            TEXT PRIMARY KEY,     -- UUID
-    profile_name  TEXT NOT NULL,        -- which profile owned the session
+    profile_name  TEXT NOT NULL,        -- profile active when last used
     title         TEXT,                 -- generated at session end
     summary       TEXT,                 -- generated at session end
     created_at    TEXT NOT NULL,        -- ISO 8601
