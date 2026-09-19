@@ -73,7 +73,7 @@ uv run ruff format .
 uv run pyright
 ```
 
-Ruff runs on commit and pytest runs on push, via the hooks installed above; the same checks run in CI. Pyright (basic mode, over `meeko/`) runs in CI only, so run it before pushing.
+Ruff runs on commit, and pyright (basic mode, over `meeko/`) and pytest run on push, via the hooks installed above; the same checks run in CI.
 
 ## Git workflow
 
