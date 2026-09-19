@@ -274,7 +274,7 @@ class ClaudeClient:
         self._dispatcher = dispatcher
         self._tools = dispatcher.get_all_definitions()
         if web_search_enabled:
-            self._tools = self._tools + [_web_search_tool(web_search_max_uses)]
+            self._tools = [*self._tools, _web_search_tool(web_search_max_uses)]
         self._messages: list[dict[str, Any]] = []
         self._store = store
         self._session_id = session_id
@@ -342,8 +342,9 @@ class ClaudeClient:
 
             request_messages = self._messages
             if paused_blocks:
-                request_messages = self._messages + [
-                    {"role": "assistant", "content": paused_blocks}
+                request_messages = [
+                    *self._messages,
+                    {"role": "assistant", "content": paused_blocks},
                 ]
 
             try:
@@ -439,7 +440,7 @@ class ClaudeClient:
         # next-turn correctness; the on-disk record is nice-to-have.
         try:
             await self._persist("assistant", partial)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug(
                 "partial-turn persist skipped (store likely closed)",
                 exc_info=True,

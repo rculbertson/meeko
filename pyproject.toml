@@ -68,4 +68,10 @@ target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "ASYNC", "BLE", "RUF"]
+# RUF001-003 flag the en dashes used throughout prose and comments.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test helpers poll with a timeout parameter and sleep loops by design.
+"tests/**" = ["ASYNC109", "ASYNC110"]

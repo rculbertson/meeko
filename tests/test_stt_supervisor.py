@@ -377,7 +377,7 @@ class _Worker:
         except asyncio.CancelledError:
             self.cancelled = True
             if self._raise_on_cancel is not None:
-                raise self._raise_on_cancel
+                raise self._raise_on_cancel  # noqa: B904 — replaces the cancel, as a buggy worker would
             raise
         self.finished = True
         if self._outcome is not None:

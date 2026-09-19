@@ -142,7 +142,7 @@ class XvfLedDevice:
             import usb.util  # type: ignore[import-not-found]
 
             usb.util.dispose_resources(self._dev)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 
@@ -150,13 +150,13 @@ def _find_xvf_device() -> XvfLedDevice | None:
     """Locate the XVF3800 via pyusb. Return None if unavailable."""
     try:
         import usb.core  # type: ignore[import-not-found]
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.info("LED: pyusb not available (%s); LED control disabled", e)
         return None
 
     try:
         dev = usb.core.find(idVendor=XVF_VENDOR_ID, idProduct=XVF_PRODUCT_ID)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.info("LED: usb.core.find failed (%s); LED control disabled", e)
         return None
     if dev is None:
@@ -280,7 +280,7 @@ class LedController:
         finally:
             try:
                 self._device.close()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     def _apply_state(self, state: LedState) -> None:
@@ -305,7 +305,7 @@ class LedController:
         assert self._device is not None
         try:
             self._device.set_effect(EFFECT_OFF)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     def _apply_error_flash(self) -> bool:

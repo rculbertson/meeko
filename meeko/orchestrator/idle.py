@@ -124,7 +124,7 @@ class IdleController:
             task.cancel()
         try:
             await task
-        except asyncio.CancelledError, Exception:
+        except asyncio.CancelledError, Exception:  # noqa: BLE001
             pass
 
     def start_post_turn(self) -> None:

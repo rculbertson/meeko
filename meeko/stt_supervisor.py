@@ -130,7 +130,7 @@ class STTSupervisor:
                     await self._on_session(stt_session)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 await asyncio.sleep(self._on_failure(exc))
 
         await self._cancel_grace()
@@ -198,6 +198,6 @@ class STTSupervisor:
                 # them apart, and swallowing it would ignore Ctrl-C.
                 if asyncio.current_task().cancelling():
                     raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         self._grace_task = None
