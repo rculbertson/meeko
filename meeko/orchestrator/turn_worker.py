@@ -143,6 +143,10 @@ class TurnWorker:
                 "[timing] turn_total_eot_to_speak_done=%dms",
                 int((time.perf_counter() - t_turn) * 1000),
             )
+            # Not caught, here or on the sentinel path above: a failure here
+            # takes a bug or a failing local database, both rare. It ends the
+            # worker, and run() in meeko/main.py then exits non-zero so
+            # systemd restarts Meeko with clean state.
             new_state = await self._apply_session_change()
             # Start the post-turn idle window. Only when state is
             # LISTENING — IDLE means the session already ended and the

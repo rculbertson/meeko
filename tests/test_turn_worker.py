@@ -75,6 +75,7 @@ class _Harness:
         self.turn_queue: asyncio.Queue = asyncio.Queue()
         self.stop_event = asyncio.Event()
         self.next_state = next_state
+        self.session_change_error: Exception | None = None
         self.session_changes = 0
         self.started: list[str] = []
         self.cancelled: list[str] = []
@@ -106,6 +107,8 @@ class _Harness:
 
     async def _apply_session_change(self) -> State:
         self.session_changes += 1
+        if self.session_change_error is not None:
+            raise self.session_change_error
         return self.next_state
 
     def start(self) -> asyncio.Task:
@@ -258,6 +261,23 @@ async def test_failed_turn_flashes_error_after_listening_and_keeps_worker(
     h.turn = h._blocking_turn
     await h.submit("again")
     assert h.started == ["hello", "again"]
+
+
+async def test_a_failing_session_change_ends_the_worker(harnesses):
+    """Deliberately not caught: a failure here takes a bug or a failing
+    local database, both rare. The worker ends with the exception, and
+    run() turns that into a non-zero exit so systemd restarts Meeko with
+    clean state (see test_main.py)."""
+    h = harnesses()
+    h.session_change_error = RuntimeError("bug in the hook")
+    h.start()
+
+    await h.submit("hello")
+    h.release.set()
+
+    assert await _finished(h.task)
+    with pytest.raises(RuntimeError, match="bug in the hook"):
+        h.task.result()
 
 
 # ---------------------------------------------------------------------------
