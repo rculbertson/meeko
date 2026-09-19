@@ -33,10 +33,15 @@ def _fts_literal_query(text: str) -> str:
     "Supabase's", "e.g.", "c++") are syntax errors, and AND/OR/NOT are
     operators. Quoting each word makes it a string the tokenizer splits
     exactly as it split the indexed text; the words stay implicitly
-    ANDed. A word of pure punctuation quotes to an empty phrase, which
-    FTS5 ignores.
+    ANDed. Words with no letters or digits are dropped: they'd quote to
+    an empty phrase, and a query of nothing else should read as no query
+    at all, so a date-bounded search still lists by date.
     """
-    return " ".join('"' + word.replace('"', '""') + '"' for word in text.split())
+    return " ".join(
+        '"' + word.replace('"', '""') + '"'
+        for word in text.split()
+        if any(ch.isalnum() for ch in word)
+    )
 
 
 _SCHEMA = """

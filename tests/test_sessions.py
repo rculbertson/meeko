@@ -480,6 +480,17 @@ async def test_search_sessions_requires_every_word(store):
     assert await store.search_sessions("todo blockchain") == []
 
 
+async def test_punctuation_only_query_falls_back_to_the_date_listing(store):
+    """A stray "?" or "—" alone carries no search terms; with a date range
+    it should list by date, as it did when operators were stripped."""
+    sid = await store.create_session("query")
+    await store.update_session_metadata(
+        sid, title="Todo app", summary="Planning.", transcript=""
+    )
+    results = await store.search_sessions("— ?", since="2000-01-01T00:00:00+00:00")
+    assert [r["session_id"] for r in results] == [sid]
+
+
 async def test_search_sessions_strips_fts_operators(store):
     """Query characters like * " : ^ must not cause an FTS5 syntax error."""
     sid = await store.create_session("query")
