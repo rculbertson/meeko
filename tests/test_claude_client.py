@@ -20,7 +20,12 @@ from typing import Any
 import pytest
 
 from meeko import claude_client as claude_client_module
-from meeko.claude_client import ClaudeClient, _with_cache_breakpoint
+from meeko.claude_client import (
+    _INTERRUPTED_TOOL_RESULT,
+    ClaudeClient,
+    _pair_orphan_tool_uses,
+    _with_cache_breakpoint,
+)
 from meeko.tools.dispatch import ToolDispatcher
 
 
@@ -225,6 +230,82 @@ def test_with_cache_breakpoint_annotates_block_list_tail():
     }
     # Original blocks untouched.
     assert "cache_control" not in msgs[-1]["content"][1]
+
+
+def _tool_use(tid: str) -> dict:
+    return {"type": "tool_use", "id": tid, "name": "echo", "input": {}}
+
+
+def _tool_result(tid: str, content: str = "ok") -> dict:
+    return {"type": "tool_result", "tool_use_id": tid, "content": content}
+
+
+def _interrupted(tid: str) -> dict:
+    return {
+        "type": "tool_result",
+        "tool_use_id": tid,
+        "content": _INTERRUPTED_TOOL_RESULT,
+        "is_error": True,
+    }
+
+
+def test_pair_orphan_tool_uses_leaves_answered_history_alone():
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [_tool_use("t1")]},
+        {"role": "user", "content": [_tool_result("t1")]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    assert _pair_orphan_tool_uses(msgs) == msgs
+
+
+def test_pair_orphan_tool_uses_leads_the_next_user_message_with_results():
+    """The barge-in case: the next turn's plain-string user message follows
+    the orphan. The results must come first in that message."""
+    msgs = [
+        {"role": "user", "content": "weather?"},
+        {"role": "assistant", "content": [_tool_use("t1"), _tool_use("t2")]},
+        {"role": "user", "content": "never mind"},
+    ]
+    out = _pair_orphan_tool_uses(msgs)
+    assert out[2] == {
+        "role": "user",
+        "content": [
+            _interrupted("t1"),
+            _interrupted("t2"),
+            {"type": "text", "text": "never mind"},
+        ],
+    }
+    # Send-time view only: stored history stays verbatim.
+    assert msgs[2] == {"role": "user", "content": "never mind"}
+
+
+def test_pair_orphan_tool_uses_fills_only_the_missing_results():
+    msgs = [
+        {"role": "assistant", "content": [_tool_use("t1"), _tool_use("t2")]},
+        {"role": "user", "content": [_tool_result("t1")]},
+    ]
+    out = _pair_orphan_tool_uses(msgs)
+    assert out[1]["content"] == [_interrupted("t2"), _tool_result("t1")]
+
+
+def test_pair_orphan_tool_uses_inserts_a_user_message_between_assistants():
+    msgs = [
+        {"role": "assistant", "content": [_tool_use("t1")]},
+        {"role": "assistant", "content": [{"type": "text", "text": "…"}]},
+    ]
+    out = _pair_orphan_tool_uses(msgs)
+    assert out == [
+        msgs[0],
+        {"role": "user", "content": [_interrupted("t1")]},
+        msgs[1],
+    ]
+
+
+def test_pair_orphan_tool_uses_answers_a_trailing_orphan():
+    msgs = [{"role": "assistant", "content": [_tool_use("t1")]}]
+    out = _pair_orphan_tool_uses(msgs)
+    assert out[-1] == {"role": "user", "content": [_interrupted("t1")]}
 
 
 @pytest.mark.asyncio

@@ -94,3 +94,24 @@ async def test_expiry_without_callback_does_not_raise():
         await task
 
     assert "orphan" not in mgr._timers
+
+
+async def test_resetting_a_label_keeps_the_new_timer_listed_and_cancellable():
+    """Re-setting "pasta" cancels the old task, whose cleanup used to pop
+    the label after the new timer was stored under it — so the new timer
+    kept running but list_timers/cancel_timer could no longer see it."""
+    mgr = TimerManager(speak_callback=AsyncMock())
+    await mgr.set_timer(60, "1 minute", "pasta")
+    old_task = mgr._timers["pasta"][0]
+    await asyncio.sleep(0)  # the first timer is running, as it would be
+    await mgr.set_timer(120, "2 minutes", "pasta")
+    new_task = mgr._timers["pasta"][0]
+
+    # Let the cancelled task run its cleanup.
+    await asyncio.gather(old_task, return_exceptions=True)
+
+    assert "pasta" in mgr.list_timers()
+    assert mgr.cancel_timer("pasta") == "Timer 'pasta' cancelled."
+    await asyncio.gather(new_task, return_exceptions=True)
+    assert new_task.done()
+    assert mgr.list_timers() == "No active timers."

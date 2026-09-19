@@ -5,8 +5,11 @@ manager mocked, so we can verify sentence yielding, tool_use routing,
 and message-history bookkeeping without real API calls.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from meeko.claude_client import ClaudeClient
 from meeko.tools.dispatch import ToolDispatcher
@@ -149,6 +152,109 @@ async def test_stream_turn_executes_tool_use_then_yields_text():
     assert tool_result_msg["content"][0]["type"] == "tool_result"
     assert tool_result_msg["content"][0]["tool_use_id"] == "t1"
     assert tool_result_msg["content"][0]["content"] == "tool-result-body"
+
+
+async def test_raising_tool_becomes_an_error_result_and_the_turn_continues():
+    """A handler that raises must not end the turn with the tool_use
+    unanswered — that history would 400 every later request. Sonnet gets
+    the failure as the tool's result and replies to it."""
+    round1_final = _final_message(
+        "tool_use", [_tool_use_block(id="t1", name="echo", input={})]
+    )
+    round2_final = _final_message("end_turn", [_text_block("Sorry, that failed.")])
+    handler = AsyncMock(side_effect=RuntimeError("fts5: syntax error"))
+    client, stream_mock = _build_client(
+        [([], round1_final), (["Sorry, that failed."], round2_final)], handler
+    )
+
+    sentences = await _collect(client.stream_turn("find the todo-app chat"))
+
+    assert sentences == ["Sorry, that failed."]
+    result = client._messages[2]["content"][0]
+    assert result["type"] == "tool_result"
+    assert result["tool_use_id"] == "t1"
+    assert result["is_error"] is True
+    assert "fts5" not in result["content"]  # internals stay in the log
+    sent = stream_mock.call_args.kwargs["messages"]
+    assert sent[2]["content"][0]["tool_use_id"] == "t1"
+
+
+async def test_barge_in_during_a_tool_does_not_break_the_next_turn():
+    """Cancelling while a tool runs leaves the committed tool_use without a
+    result. The next request must still pair it, or the API rejects it."""
+    round1_final = _final_message(
+        "tool_use", [_tool_use_block(id="t1", name="echo", input={})]
+    )
+    next_final = _final_message("end_turn", [_text_block("Okay.")])
+    started = asyncio.Event()
+
+    async def slow_tool(name, args):
+        started.set()
+        await asyncio.sleep(10)
+        return "late"
+
+    client, stream_mock = _build_client(
+        [([], round1_final), (["Okay."], next_final)], slow_tool
+    )
+
+    turn = asyncio.create_task(_collect(client.stream_turn("what's the weather?")))
+    await started.wait()
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert await _collect(client.stream_turn("never mind")) == ["Okay."]
+    sent = stream_mock.call_args.kwargs["messages"]
+    assert sent[1]["content"][0]["type"] == "tool_use"
+    first_block = sent[2]["content"][0]
+    assert first_block["type"] == "tool_result"
+    assert first_block["tool_use_id"] == "t1"
+    assert first_block["is_error"] is True
+
+
+async def test_barge_in_mid_dispatch_keeps_results_of_tools_that_ran():
+    """Two tools, interrupted during the second: the first already did its
+    work (a timer really started), so Sonnet must get its real result, not
+    the "not run" filler. Only the unfinished tool is marked interrupted."""
+    round1_final = _final_message(
+        "tool_use",
+        [
+            _tool_use_block(id="t1", name="echo", input={"n": 1}),
+            _tool_use_block(id="t2", name="echo", input={"n": 2}),
+        ],
+    )
+    next_final = _final_message("end_turn", [_text_block("Okay.")])
+    second_started = asyncio.Event()
+
+    async def tools(name, args):
+        if args["n"] == 1:
+            return "Timer 'pasta' set."
+        second_started.set()
+        await asyncio.sleep(10)
+        return "late"
+
+    client, stream_mock = _build_client(
+        [([], round1_final), (["Okay."], next_final)], tools
+    )
+
+    turn = asyncio.create_task(_collect(client.stream_turn("pasta timer, and rain?")))
+    await second_started.wait()
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    results = client._messages[-1]["content"]
+    assert results[0] == {
+        "type": "tool_result",
+        "tool_use_id": "t1",
+        "content": "Timer 'pasta' set.",
+    }
+    assert results[1]["tool_use_id"] == "t2"
+    assert results[1]["is_error"] is True
+
+    await _collect(client.stream_turn("never mind"))
+    sent = stream_mock.call_args.kwargs["messages"]
+    assert sent[2]["content"] == results  # nothing re-filled at send time
 
 
 async def test_stream_turn_strips_extra_fields_from_stored_blocks():
