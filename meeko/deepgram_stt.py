@@ -36,7 +36,7 @@ _STT_PING_INTERVAL_S = 5
 _STT_PING_TIMEOUT_S = 5
 
 _PATCH_TARGETS = (_dg_client, _dg_raw_client)
-_orig_ws_connect = _dg_raw_client.websockets_client_connect
+_orig_ws_connect = _dg_raw_client.websockets_client_connect  # pyright: ignore[reportPrivateImportUsage]
 
 
 def _connect_with_tight_pings(*args, **kwargs):
@@ -46,7 +46,7 @@ def _connect_with_tight_pings(*args, **kwargs):
 
 
 for _mod in _PATCH_TARGETS:
-    _mod.websockets_client_connect = _connect_with_tight_pings
+    _mod.websockets_client_connect = _connect_with_tight_pings  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @dataclass

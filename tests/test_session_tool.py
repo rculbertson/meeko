@@ -118,7 +118,7 @@ def test_tool_definition_shape():
         "load_session",
     }
     for d in defs:
-        assert "description" in d and d["description"]
+        assert d.get("description")
     assert by_name["end_session"]["input_schema"] == {
         "type": "object",
         "properties": {},

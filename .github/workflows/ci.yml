@@ -40,6 +40,9 @@ jobs:
       - name: Ruff format
         run: uv run ruff format --check .
 
+      - name: Pyright
+        run: uv run pyright
+
       - name: Test
         run: uv run pytest --cov-report=xml
         env:

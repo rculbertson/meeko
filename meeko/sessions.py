@@ -19,6 +19,7 @@ import os
 import re
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -125,7 +126,7 @@ class SessionStore:
         return await self._run(self._create_session_sync, profile_name)
 
     def _persist_turn_sync(
-        self, session_id: str, role: str, content: str | list[dict[str, Any]]
+        self, session_id: str, role: str, content: str | Sequence[Any]
     ) -> None:
         now = _now()
         encoded = json.dumps(content)
@@ -141,7 +142,7 @@ class SessionStore:
             )
 
     async def persist_turn(
-        self, session_id: str, role: str, content: str | list[dict[str, Any]]
+        self, session_id: str, role: str, content: str | Sequence[Any]
     ) -> None:
         await self._run(self._persist_turn_sync, session_id, role, content)
 

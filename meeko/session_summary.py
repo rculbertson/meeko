@@ -136,11 +136,12 @@ async def summarize_session(
         return
 
     try:
-        messages = [{"role": "user", "content": _PROMPT.format(transcript=transcript)}]
         response = await anthropic_client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            messages=messages,
+            messages=[
+                {"role": "user", "content": _PROMPT.format(transcript=transcript)}
+            ],
         )
     except Exception:
         logger.exception("summarize_session: Anthropic call failed for %s", session_id)

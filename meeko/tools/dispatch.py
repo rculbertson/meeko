@@ -6,13 +6,15 @@ tool_use invocations to the correct handler.
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+
+from anthropic.types.beta import BetaToolParam
 
 logger = logging.getLogger("meeko")
 
 # A tool definition is a plain dict in Anthropic's tool-use format:
 #   {"name": str, "description": str, "input_schema": {...}}
-ToolDefinition = dict[str, Any]
+# Typed as the SDK's TypedDict so pyright checks each tool module's schema.
+ToolDefinition = BetaToolParam
 
 # A handler is an async callable: (fn_name, args_dict) -> result_string.
 ToolHandler = Callable[[str, dict], Awaitable[str]]

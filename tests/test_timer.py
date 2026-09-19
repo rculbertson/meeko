@@ -36,7 +36,7 @@ async def test_unnamed_timer_announcement():
             duration_display="30 seconds",
             label=None,
         )
-        task = list(mgr._timers.values())[0][0]
+        task = next(iter(mgr._timers.values()))[0]
         await task
 
     speak.assert_awaited_once_with("The 30 second timer is done!")

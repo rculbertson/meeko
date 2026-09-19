@@ -1,5 +1,5 @@
-# pytest runs at pre-push; without this, `pre-commit install` would only
-# install the pre-commit hook and the test gate would never run locally.
+# pyright and pytest run at pre-push; without this, `pre-commit install` would
+# only install the pre-commit hook and those gates would never run locally.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
@@ -11,6 +11,15 @@ repos:
       - id: ruff-format
   - repo: local
     hooks:
+      # A local hook, not pre-commit's mirror: pyright must run in the project
+      # venv to see the SDKs. It always checks all of meeko/ (type errors cross
+      # files), which is why it sits at push rather than commit.
+      - id: pyright
+        name: pyright
+        entry: uv run pyright
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
       - id: pytest
         name: pytest
         entry: uv run pytest

@@ -13,7 +13,7 @@ weekend. See CONTRIBUTING.md.
 ---
 
 - [ ] Tests added or updated (`uv run pytest` passes)
-- [ ] `uv run ruff check .` and `uv run ruff format --check .` pass
+- [ ] `uv run ruff check .`, `uv run ruff format --check .` and `uv run pyright` pass
 - [ ] Hardware paths: if this touches `meeko/leds.py`, `meeko/audio_io.py`, or `meeko/speaker.py`, say what you tested on below — CI cannot verify these.
 
 **Hardware tested on**

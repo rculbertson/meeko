@@ -19,6 +19,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pre-commit>=4.5.1",
+    "pyright[nodejs]>=1.1.414",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "pytest-cov>=6.0",
@@ -63,9 +64,23 @@ omit = ["tests/*"]
 show_missing = true
 skip_covered = false
 
+[tool.pyright]
+# Basic mode over the app package; tests lean on fakes and duck typing.
+include = ["meeko"]
+typeCheckingMode = "basic"
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
+
 [tool.ruff]
 target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "ASYNC", "BLE", "RUF"]
+# RUF001-003 flag the en dashes used throughout prose and comments.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test helpers poll with a timeout parameter and sleep loops by design.
+"tests/**" = ["ASYNC109", "ASYNC110"]
