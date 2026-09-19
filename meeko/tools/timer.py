@@ -105,7 +105,13 @@ class TimerManager:
         except asyncio.CancelledError:
             logger.info("Timer '%s' cancelled", label)
         finally:
-            self._timers.pop(label, None)
+            # Only remove our own entry. Re-setting a label cancels this
+            # task and stores its replacement under the same key before
+            # this finally runs; popping unconditionally would drop the
+            # new timer, leaving it running but invisible to list/cancel.
+            entry = self._timers.get(label)
+            if entry is not None and entry[0] is asyncio.current_task():
+                del self._timers[label]
 
     def list_timers(self) -> str:
         if not self._timers:
