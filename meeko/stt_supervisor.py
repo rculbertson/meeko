@@ -38,6 +38,16 @@ RECONNECT_GRACE_S = 10
 RECONNECT_BACKOFF_S = (0.5, 1, 2, 4, 8, 16, 30)
 
 
+class SttSessionEndedError(RuntimeError):
+    """A session ended without an error while Meeko wasn't stopping.
+
+    Deepgram closing the socket cleanly, or keepalive_pump seeing the
+    connection close, ends a session this way. It goes through the same
+    backoff as any other failure; returning normally would reconnect at
+    once, with no delay and no failure count.
+    """
+
+
 async def keepalive_pump(stt_session, stop_event: asyncio.Event) -> None:
     """Send a Deepgram KeepAlive every few seconds so the session stays
     open when we're not streaming audio.
@@ -64,8 +74,9 @@ async def run_session_workers(*workers: Coroutine[Any, Any, None]) -> None:
     That last part is the contract the supervisor depends on. If the
     first finisher raised, the exception propagates, and ``run()`` backs
     off, arms the grace cutoff and reconnects. Swallowing it would turn
-    a dead connection into a normal return, and Meeko would reconnect
-    with no backoff, no failure count and no log explaining why.
+    a dead connection into a normal return, which ``run()`` can only
+    report as the session having "ended unexpectedly", with the real
+    cause lost.
 
     Exceptions raised by the *other* workers while they're being
     cancelled are discarded, so they can't mask the one that ended the
@@ -128,6 +139,11 @@ class STTSupervisor:
                 async with self._stt.session() as stt_session:
                     await self._on_connected()
                     await self._on_session(stt_session)
+                    if not self._stop_event.is_set():
+                        raise SttSessionEndedError(
+                            "STT session ended unexpectedly (connection "
+                            "closed or event stream ended)"
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -159,7 +175,10 @@ class STTSupervisor:
         if self._grace_task is None:
             self._grace_task = asyncio.create_task(self._grace_cutoff())
         if self._consecutive_failures == 0:
-            if isinstance(exc, ConnectionClosed):
+            if isinstance(exc, SttSessionEndedError):
+                # Raised by run() itself: the traceback would add nothing.
+                logger.warning("%s; reconnecting", exc)
+            elif isinstance(exc, ConnectionClosed):
                 logger.exception("STT websocket closed; reconnecting")
             else:
                 logger.exception("STT session failed; reconnecting")

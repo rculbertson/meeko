@@ -265,6 +265,58 @@ async def test_websocket_close_is_logged_as_such(audio_mock, caplog):
     assert [r.getMessage() for r in errors] == ["STT websocket closed; reconnecting"]
 
 
+def _recording_backoff_sleep():
+    """An asyncio.sleep stand-in that records backoff delays and holds the
+    grace cutoff's sleep (reconnects cancel it)."""
+    delays: list[float] = []
+
+    async def sleep(delay, *a, **kw):
+        if delay == supervisor_mod.RECONNECT_GRACE_S:
+            await asyncio.Event().wait()
+        delays.append(delay)
+        return await _REAL_SLEEP(0)
+
+    return sleep, delays
+
+
+def _ending_sessions(stop: asyncio.Event, count: int):
+    """on_session that returns normally, as when Deepgram closes cleanly,
+    and sets stop on session `count`."""
+    calls = 0
+
+    async def on_session(sess):
+        nonlocal calls
+        calls += 1
+        if calls == count:
+            stop.set()
+
+    return on_session
+
+
+async def test_a_session_ending_without_an_error_backs_off(audio_mock, caplog):
+    """Deepgram closing the socket cleanly used to end on_session normally,
+    and run() reconnected at once: no delay, no failure count, nothing
+    logged. It's a failure like any other now. (Each reconnect resets the
+    count, so a server that keeps dropping right after connecting gets the
+    first delay each time.)"""
+    stop = asyncio.Event()
+    stt = _OneShotSTT()
+    sleep, delays = _recording_backoff_sleep()
+
+    sup = STTSupervisor(stt, audio_mock, stop, _ending_sessions(stop, 4), lambda: False)
+    caplog.set_level(logging.WARNING, logger="meeko")
+    with patch("meeko.stt_supervisor.asyncio.sleep", new=sleep):
+        await asyncio.wait_for(sup.run(), timeout=2)
+
+    assert stt.session_count == 4
+    assert delays == [0.5, 0.5, 0.5]
+    assert "ended unexpectedly" in caplog.text
+    # Raised by the supervisor itself, so even the first one is a one-line
+    # warning: no ERROR, no traceback.
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
+
+
 async def _let_grace_fire(release: asyncio.Event) -> None:
     release.set()
     for _ in range(10):
@@ -406,7 +458,8 @@ async def test_first_worker_exception_propagates_and_the_rest_are_cancelled():
 
 async def test_first_worker_returning_normally_ends_the_session_cleanly():
     """A normal return (e.g. the event stream closed) ends the session
-    without an exception — the supervisor reconnects without backoff."""
+    without an exception. STTSupervisor.run() then treats the end as a
+    failure unless Meeko is stopping (see the SttSessionEndedError tests)."""
     a, b = _Worker(), _Worker()
     task = asyncio.create_task(run_session_workers(a.run(), b.run()))
     await _started(a, b)

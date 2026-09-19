@@ -91,8 +91,9 @@ class _Session:
     async def events(self):
         """Yield TurnEvent objects for each turn_info message.
 
-        Non-turn-info messages (Connected, FatalError, stray bytes) are
-        logged and skipped so callers only see conversational events.
+        Non-turn-info messages (Connected, stray bytes) are logged and
+        skipped so callers only see conversational events. A FatalError
+        raises, ending the session as a failure.
         """
         async for message in self._socket:
             if isinstance(message, bytes):
@@ -102,8 +103,13 @@ class _Session:
                 event = getattr(message, "event", "")
                 transcript = getattr(message, "transcript", "") or ""
                 yield TurnEvent(event=event, transcript=transcript)
-            elif msg_type == "FatalError":
-                logger.error("STT fatal error: %s", message)
-                return
+            # The SDK's ListenV2FatalError message has type "Error"
+            # (deepgram/listen/v2/types/listen_v2fatal_error_type.py);
+            # "FatalError" is only its class name.
+            elif msg_type == "Error":
+                # Raise rather than return: a normal end reads as "session
+                # over" to STTSupervisor, which is treated as a failure
+                # anyway, but this way the log names the actual cause.
+                raise RuntimeError(f"STT fatal error: {message}")
             else:
                 logger.debug("STT message: %s", message)
