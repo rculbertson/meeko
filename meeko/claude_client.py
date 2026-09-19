@@ -10,11 +10,21 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import anthropic
+from anthropic.types.beta import (
+    BetaCacheControlEphemeralParam,
+    BetaContentBlockParam,
+    BetaContextManagementConfigParam,
+    BetaMessageParam,
+    BetaTextBlockParam,
+    BetaToolResultBlockParam,
+    BetaToolUnionParam,
+    BetaWebSearchTool20260209Param,
+)
 
 from meeko.sessions import SessionStore
 from meeko.tools.dispatch import ToolDispatcher
@@ -43,7 +53,7 @@ DEFAULT_WEB_SEARCH_ENABLED = True
 DEFAULT_WEB_SEARCH_MAX_USES = 2
 
 
-def _context_management(trigger_tokens: int) -> dict:
+def _context_management(trigger_tokens: int) -> BetaContextManagementConfigParam:
     return {
         "edits": [
             {
@@ -54,7 +64,7 @@ def _context_management(trigger_tokens: int) -> dict:
     }
 
 
-def _web_search_tool(max_uses: int) -> dict:
+def _web_search_tool(max_uses: int) -> BetaWebSearchTool20260209Param:
     return {
         "type": "web_search_20260209",
         "name": "web_search",
@@ -71,7 +81,7 @@ def _web_search_tool(max_uses: int) -> dict:
 _SENTENCE_END_RE = re.compile(r"(?<![A-Z])[.!?](?=\s+[A-Z])")
 
 
-def _serialize_block(block: Any) -> dict[str, Any]:
+def _serialize_block(block: Any) -> BetaContentBlockParam:
     """Serialize an assistant content block for replay in later turns.
 
     The streaming SDK attaches helper fields (e.g. ``parsed_output``) to
@@ -107,7 +117,8 @@ def _serialize_block(block: Any) -> dict[str, Any]:
         }
     if block.type == "compaction":
         return {"type": "compaction", "content": block.content}
-    return block.model_dump()
+    # Unrecognized block type: pass the SDK's own dump through unchecked.
+    return cast(BetaContentBlockParam, block.model_dump())
 
 
 def _serialize_web_search_content(content: Any) -> Any:
@@ -150,10 +161,10 @@ def _pop_sentences(buffer: str) -> tuple[list[str], str]:
     return sentences, buffer[last_end:]
 
 
-_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+_CACHE_CONTROL: BetaCacheControlEphemeralParam = {"type": "ephemeral"}
 
 
-def _location_block(latitude: float, longitude: float) -> dict[str, Any]:
+def _location_block(latitude: float, longitude: float) -> BetaTextBlockParam:
     """A small system block carrying the user's home coordinates.
 
     Stable per host, so it lives inside the cached prefix (no
@@ -173,7 +184,7 @@ def _location_block(latitude: float, longitude: float) -> dict[str, Any]:
     }
 
 
-def _today_block() -> dict[str, Any]:
+def _today_block() -> BetaTextBlockParam:
     """A small, uncached system block carrying the user's local date and time.
 
     Sonnet uses this to interpret relative time references like "yesterday"
@@ -198,7 +209,7 @@ def _system_blocks(
     prompt: str,
     latitude: float | None = None,
     longitude: float | None = None,
-) -> list[dict[str, Any]]:
+) -> list[BetaTextBlockParam]:
     """Wrap the profile's system prompt with a cache breakpoint and append
     a small dynamic block carrying today's local date.
 
@@ -214,7 +225,7 @@ def _system_blocks(
     after the cache breakpoint so cache hits aren't invalidated by the
     daily date change.
     """
-    blocks: list[dict[str, Any]] = []
+    blocks: list[BetaTextBlockParam] = []
     if latitude is not None and longitude is not None:
         blocks.append(_location_block(latitude, longitude))
     blocks.append({"type": "text", "text": prompt, "cache_control": _CACHE_CONTROL})
@@ -222,7 +233,9 @@ def _system_blocks(
     return blocks
 
 
-def _with_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _with_cache_breakpoint(
+    messages: list[BetaMessageParam],
+) -> list[BetaMessageParam]:
     """Return a shallow copy of `messages` with a cache breakpoint on the
     last block of the last message.
 
@@ -234,20 +247,25 @@ def _with_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any
     if not messages:
         return messages
     out = list(messages)
-    last = dict(out[-1])
-    content = last["content"]
+    content = out[-1]["content"]
+    new_content: list[BetaContentBlockParam]
     if isinstance(content, str):
         new_content = [
             {"type": "text", "text": content, "cache_control": _CACHE_CONTROL}
         ]
     else:
         # list[block] — copy the list and re-emit the final block with cache_control.
+        # Stored blocks are always dicts (see _serialize_block), though the
+        # SDK's union also admits its response models. Not every block type
+        # declares cache_control, hence the cast; the API accepts it on the
+        # ones Meeko sends.
         new_content = list(content)
-        tail = dict(new_content[-1])
-        tail["cache_control"] = _CACHE_CONTROL
-        new_content[-1] = tail
-    last["content"] = new_content
-    out[-1] = last
+        tail = new_content[-1]
+        if isinstance(tail, dict):
+            new_content[-1] = cast(
+                BetaContentBlockParam, {**tail, "cache_control": _CACHE_CONTROL}
+            )
+    out[-1] = {**out[-1], "content": new_content}
     return out
 
 
@@ -272,10 +290,10 @@ class ClaudeClient:
         self._latitude = latitude
         self._longitude = longitude
         self._dispatcher = dispatcher
-        self._tools = dispatcher.get_all_definitions()
+        self._tools: list[BetaToolUnionParam] = [*dispatcher.get_all_definitions()]
         if web_search_enabled:
             self._tools = [*self._tools, _web_search_tool(web_search_max_uses)]
-        self._messages: list[dict[str, Any]] = []
+        self._messages: list[BetaMessageParam] = []
         self._store = store
         self._session_id = session_id
         self._create_session_fn = create_session_fn
@@ -290,7 +308,10 @@ class ClaudeClient:
         self._profile_prompt = prompt
 
     def load_history(self, messages: list[dict[str, Any]]) -> None:
-        self._messages = list(messages)
+        """Replace the history with turns loaded from SQLite. Stored turns
+        are JSON the type checker can't see into; they were persisted from
+        this class's own well-typed messages, so they're trusted as-is."""
+        self._messages = cast(list[BetaMessageParam], list(messages))
 
     def reset_session(self) -> None:
         """Drop in-memory history and clear the bound SQLite session_id.
@@ -328,7 +349,7 @@ class ClaudeClient:
         # transient assistant message on the next round, and merge it
         # with the continuation's blocks into a single committed turn
         # once the server finishes.
-        paused_blocks: list[dict[str, Any]] = []
+        paused_blocks: list[BetaContentBlockParam] = []
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
@@ -416,7 +437,7 @@ class ClaudeClient:
     async def _commit_partial_assistant(
         self,
         streamed_text: str,
-        paused_blocks: list[dict[str, Any]] | None = None,
+        paused_blocks: list[BetaContentBlockParam] | None = None,
     ) -> None:
         # Anything that terminates the stream early — barge-in
         # (CancelledError), consumer-driven GeneratorExit, or a
@@ -430,7 +451,7 @@ class ClaudeClient:
         # prepend the carried blocks so the partial covers the whole
         # paused turn.
         text = streamed_text.strip() or "…"
-        partial: list[dict[str, Any]] = list(paused_blocks or [])
+        partial: list[BetaContentBlockParam] = list(paused_blocks or [])
         partial.append({"type": "text", "text": text})
         self._messages.append({"role": "assistant", "content": partial})
         # Best-effort persistence: during process shutdown asyncio
@@ -447,7 +468,7 @@ class ClaudeClient:
             )
 
     async def _commit_full_assistant(
-        self, assistant_blocks: list[dict[str, Any]]
+        self, assistant_blocks: list[BetaContentBlockParam]
     ) -> None:
         # Commit the full assistant turn to history *before* the caller
         # yields the trailing partial sentence. If the consumer cancels
@@ -461,7 +482,9 @@ class ClaudeClient:
         # and the server doesn't re-summarize the prefix.
         self._messages.append({"role": "assistant", "content": assistant_blocks})
         persisted_blocks = [
-            b for b in assistant_blocks if b.get("type") != "compaction"
+            b
+            for b in assistant_blocks
+            if not (isinstance(b, dict) and b.get("type") == "compaction")
         ]
         await self._persist("assistant", persisted_blocks)
 
@@ -488,7 +511,7 @@ class ClaudeClient:
                 )
 
     async def _dispatch_tool_calls(self, final: Any) -> None:
-        tool_results = []
+        tool_results: list[BetaToolResultBlockParam] = []
         for block in final.content:
             if block.type != "tool_use":
                 continue
@@ -503,7 +526,9 @@ class ClaudeClient:
         self._messages.append({"role": "user", "content": tool_results})
         await self._persist("user", tool_results)
 
-    async def _persist(self, role: str, content: str | list[dict[str, Any]]) -> None:
+    async def _persist(
+        self, role: str, content: str | Sequence[BetaContentBlockParam]
+    ) -> None:
         if self._store is None:
             return
         if self._session_id is None:
