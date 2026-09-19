@@ -225,10 +225,12 @@ def _list_devices() -> None:
         for i in range(pa.get_device_count()):
             info = pa.get_device_info_by_index(i)
             tags = []
-            if info.get("maxInputChannels", 0) > 0:
-                tags.append(f"in={info['maxInputChannels']}ch")
-            if info.get("maxOutputChannels", 0) > 0:
-                tags.append(f"out={info['maxOutputChannels']}ch")
+            in_ch = int(info.get("maxInputChannels", 0))
+            out_ch = int(info.get("maxOutputChannels", 0))
+            if in_ch > 0:
+                tags.append(f"in={in_ch}ch")
+            if out_ch > 0:
+                tags.append(f"out={out_ch}ch")
             if i == default_in:
                 tags.append("DEFAULT-IN")
             if i == default_out:

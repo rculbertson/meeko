@@ -196,7 +196,8 @@ class STTSupervisor:
                 # aimed at run() (shutdown) that lands during this await
                 # arrives as the same exception; only cancelling() tells
                 # them apart, and swallowing it would ignore Ctrl-C.
-                if asyncio.current_task().cancelling():
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
                     raise
             except Exception:  # noqa: BLE001
                 pass

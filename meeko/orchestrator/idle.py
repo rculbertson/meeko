@@ -63,11 +63,13 @@ async def run_idle_window(
         )
     await asyncio.sleep(profile.idle_timeout_seconds)
     if profile.idle_prompt:
+        assert speak is not None  # guaranteed by the ValueError guard above
         await speak(profile.idle_prompt)
         # Full close window after the prompt finishes — Meeko's own
         # talking does not eat into the user's response time.
         await asyncio.sleep(profile.idle_close_seconds)
     if profile.idle_close_text:
+        assert speak is not None  # guaranteed by the ValueError guard above
         await speak(profile.idle_close_text)
     on_timeout()
 

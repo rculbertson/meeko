@@ -15,6 +15,7 @@ asyncio event loop without offloading to a thread.
 
 import logging
 import os
+from typing import cast
 
 import numpy as np
 import openwakeword.utils
@@ -121,7 +122,9 @@ class WakeWordDetector:
             frame_bytes = bytes(self._buffer[:FRAME_BYTES])
             del self._buffer[:FRAME_BYTES]
             samples = np.frombuffer(frame_bytes, dtype=np.int16)
-            scores = self._model.predict(samples)
+            # predict() only returns a (scores, timings) tuple when asked
+            # for timing, which Meeko never does.
+            scores = cast(dict[str, float], self._model.predict(samples))
             score = scores.get(self._score_key)
             if score is None:
                 # Fall back to whichever score the model returned —
