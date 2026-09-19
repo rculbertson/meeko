@@ -14,6 +14,7 @@ import json
 import logging
 import logging.handlers
 import time
+from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -221,6 +222,20 @@ def _disable_wake_word_by_default(monkeypatch):
     into the legacy flow. Tests that exercise the wake-word path opt back
     in by deleting this env var in their own body."""
     monkeypatch.setenv("MEEKO_WAKE_WORD_DISABLED", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_host(monkeypatch, tmp_path):
+    """Keep run() off the contributor's machine: read a private copy of the
+    bundled default config instead of their ~/.config/meeko/meeko.toml
+    (which run() would otherwise read, or create if missing), and never
+    touch a real XVF3800 LED ring that happens to be plugged in."""
+    config_path = tmp_path / "meeko.toml"
+    config_path.write_bytes(
+        resources.files("meeko").joinpath("default_config.toml").read_bytes()
+    )
+    monkeypatch.setenv("MEEKO_CONFIG", str(config_path))
+    monkeypatch.setenv("MEEKO_LED_DISABLED", "1")
 
 
 class _StubAsyncAnthropic:
