@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
 from deepgram.listen.v2 import client as _dg_client
 from deepgram.listen.v2 import raw_client as _dg_raw_client
 
@@ -89,13 +90,18 @@ async def test_events_skips_non_turn_info_messages():
     assert events == [TurnEvent(event="Update", transcript="hey")]
 
 
-async def test_events_stops_on_fatal_error():
-    fatal = _make_msg("FatalError")
+async def test_events_raises_on_fatal_error():
+    """A FatalError ends the session as a failure, so the supervisor backs
+    off (and logs why) instead of reconnecting straight away."""
+    fatal = _make_msg("Error")  # ListenV2FatalError's type, per the SDK
     turn = _make_msg("TurnInfo", event="EndOfTurn", transcript="unreachable")
     stt, _ = _build_stt([fatal, turn])
 
+    events = []
     async with stt.session() as sess:
-        events = [e async for e in sess.events()]
+        with pytest.raises(RuntimeError, match="STT fatal error"):
+            async for e in sess.events():
+                events.append(e)
 
     assert events == []
 
