@@ -292,7 +292,7 @@ def _tool_result_ids(content: object) -> set[str]:
     }
 
 
-def _interrupted_results(ids: list[str]) -> list[BetaContentBlockParam]:
+def _interrupted_results(ids: list[str]) -> list[BetaToolResultBlockParam]:
     return [
         {
             "type": "tool_result",
@@ -589,11 +589,28 @@ class ClaudeClient:
                 )
 
     async def _dispatch_tool_calls(self, final: Any) -> None:
-        tool_results: list[BetaToolResultBlockParam] = [
-            await self._run_tool(block)
-            for block in final.content
-            if block.type == "tool_use"
-        ]
+        tool_uses = [b for b in final.content if b.type == "tool_use"]
+        tool_results: list[BetaToolResultBlockParam] = []
+        try:
+            for block in tool_uses:
+                tool_results.append(await self._run_tool(block))
+        except asyncio.CancelledError:
+            # Barge-in mid-dispatch. Commit what already ran, so Sonnet isn't
+            # told a timer that really started was "not run" (the send-time
+            # filler can't know which ones finished), and mark only the rest
+            # as interrupted.
+            done = {r["tool_use_id"] for r in tool_results}
+            tool_results += _interrupted_results(
+                [b.id for b in tool_uses if b.id not in done]
+            )
+            self._messages.append({"role": "user", "content": tool_results})
+            # Best-effort, as in _commit_partial_assistant: at shutdown the
+            # store may already be closed.
+            try:
+                await self._persist("user", tool_results)
+            except Exception:  # noqa: BLE001
+                logger.debug("interrupted tool-results persist skipped", exc_info=True)
+            raise
         self._messages.append({"role": "user", "content": tool_results})
         await self._persist("user", tool_results)
 

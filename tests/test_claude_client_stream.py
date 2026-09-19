@@ -212,6 +212,51 @@ async def test_barge_in_during_a_tool_does_not_break_the_next_turn():
     assert first_block["is_error"] is True
 
 
+async def test_barge_in_mid_dispatch_keeps_results_of_tools_that_ran():
+    """Two tools, interrupted during the second: the first already did its
+    work (a timer really started), so Sonnet must get its real result, not
+    the "not run" filler. Only the unfinished tool is marked interrupted."""
+    round1_final = _final_message(
+        "tool_use",
+        [
+            _tool_use_block(id="t1", name="echo", input={"n": 1}),
+            _tool_use_block(id="t2", name="echo", input={"n": 2}),
+        ],
+    )
+    next_final = _final_message("end_turn", [_text_block("Okay.")])
+    second_started = asyncio.Event()
+
+    async def tools(name, args):
+        if args["n"] == 1:
+            return "Timer 'pasta' set."
+        second_started.set()
+        await asyncio.sleep(10)
+        return "late"
+
+    client, stream_mock = _build_client(
+        [([], round1_final), (["Okay."], next_final)], tools
+    )
+
+    turn = asyncio.create_task(_collect(client.stream_turn("pasta timer, and rain?")))
+    await second_started.wait()
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    results = client._messages[-1]["content"]
+    assert results[0] == {
+        "type": "tool_result",
+        "tool_use_id": "t1",
+        "content": "Timer 'pasta' set.",
+    }
+    assert results[1]["tool_use_id"] == "t2"
+    assert results[1]["is_error"] is True
+
+    await _collect(client.stream_turn("never mind"))
+    sent = stream_mock.call_args.kwargs["messages"]
+    assert sent[2]["content"] == results  # nothing re-filled at send time
+
+
 async def test_stream_turn_strips_extra_fields_from_stored_blocks():
     """The streaming SDK attaches fields like parsed_output to text
     blocks; those must not be replayed on later turns or Anthropic
