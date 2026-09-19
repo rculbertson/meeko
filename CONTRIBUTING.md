@@ -65,14 +65,15 @@ Any non-trivial change — new behavior, bug fix, or refactor of existing logic 
 
 Neither CI nor the maintainer can validate every path. Changes to `meeko/leds.py`, `meeko/audio_io.py`, or `meeko/speaker.py` need real hardware — a Raspberry Pi 5 with a ReSpeaker XVF3800 for the LED and AEC paths. If your PR touches these, say in the description what you tested on and what you observed. A PR in these files with no hardware report can sit indefinitely, because there may be nobody able to confirm it works.
 
-## Linting
+## Linting and type checking
 
 ```bash
 uv run ruff check .
 uv run ruff format .
+uv run pyright
 ```
 
-Ruff runs on commit and pytest runs on push, via the hooks installed above; the same checks run in CI.
+Ruff runs on commit and pytest runs on push, via the hooks installed above; the same checks run in CI. Pyright (basic mode, over `meeko/`) runs in CI only, so run it before pushing.
 
 ## Git workflow
 

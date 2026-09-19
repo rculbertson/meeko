@@ -19,6 +19,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pre-commit>=4.5.1",
+    "pyright[nodejs]>=1.1.414",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "pytest-cov>=6.0",
@@ -62,6 +63,14 @@ omit = ["tests/*"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+[tool.pyright]
+# Basic mode over the app package; tests lean on fakes and duck typing.
+include = ["meeko"]
+typeCheckingMode = "basic"
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
 
 [tool.ruff]
 target-version = "py314"
