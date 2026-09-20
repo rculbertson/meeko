@@ -146,38 +146,6 @@ def test_load_profiles_idle_keys_default_to_a_silent_close(tmp_path: Path):
     assert profile.description is None
 
 
-@pytest.mark.parametrize(
-    ("old_key", "new_key"),
-    [
-        ("conversation_idle_seconds", "idle_timeout_seconds"),
-        ("conversation_close_seconds", "idle_close_seconds"),
-    ],
-)
-def test_load_profiles_rejects_renamed_idle_keys(tmp_path: Path, old_key, new_key):
-    """An un-migrated config fails loudly rather than silently running on
-    default timings."""
-    toml_file = tmp_path / "profiles.toml"
-    toml_file.write_text(
-        textwrap.dedent(f"""\
-        default_profile = "conversation"
-
-        [profiles.conversation]
-        wake_word = "meeko"
-        prompt = "p"
-        {old_key} = 60
-    """)
-    )
-
-    with pytest.raises(ValueError) as excinfo:
-        load_profiles(toml_file)
-
-    message = str(excinfo.value)
-    assert "[profiles.conversation]" in message
-    assert old_key in message
-    assert new_key in message
-    assert "idle_prompt" in message
-
-
 def test_load_profiles_empty(tmp_path: Path):
     """Loading a TOML with no profiles section raises ValueError."""
     toml_file = tmp_path / "profiles.toml"

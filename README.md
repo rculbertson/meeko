@@ -1,20 +1,16 @@
 # Meeko
 
-Meeko is a personal voice assistant backed by Claude. It handles the usual quick questions, as well as extended, open-ended thinking sessions where context accumulates over time. Meeko remembers the full text of every conversation, so you can pause mid-thought, come back days later, and pick up exactly where you left off. Just say "let's go back to the conversation about the app I'm building" and Meeko finds it and resumes.
-
-
-## Project status
-
-Meeko is a personal project, maintained in spare time. It works and I use it daily, but I review issues and pull requests in batches — expect weeks, not days. Contributions are genuinely welcome anyway; please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open an issue before starting anything large so you don't build something I end up declining.
+Meeko is a personal voice assistant backed by Claude. It runs on Raspberry Pi and Mac. Meeko remembers the full text of every conversation, so you can pause mid-thought, come back days later, and pick up exactly where you left off. Just say "let's go back to the conversation about the app I'm building" and Meeko finds it and resumes.
 
 ## Features
 
 - **Named, resumable sessions** — every conversation is saved and searchable by voice.
-- **Natural session management** — start, end, and resume sessions by voice with no rigid command syntax; Claude decides when to call session tools from full conversation context
+- **Natural session management** — start, end, and resume sessions by voice with no rigid command syntax; Claude decides when to call session tools from full conversation context.
 - **Transcripts stay on your device** — every conversation is saved to SQLite on your own Raspberry Pi or Mac.
+- **Customizable behavior** — define new profiles to change Meeko's behavior. Comes with two default profiles: `query` for quick questions, and `conversation` for open-ended discussions.
 - **Bring your own API keys** — talks to Deepgram and Anthropic directly, billed at provider rates with no assistant-vendor markup or middleman account.
-- **Stays cheap on long conversations** — prompt caching keeps token costs low even as sessions grow to 50k–150k tokens
-- **Never fills the context window** — long sessions are summarized automatically in-flight, without losing the full transcript on disk
+- **Stays cheap on long conversations** — prompt caching keeps token costs low even as sessions grow.
+- **Never fills the context window** — long sessions are summarized automatically in-flight, without losing the full transcript on disk.
 
 ## Prerequisites
 
@@ -55,10 +51,6 @@ uv run python -m meeko.main --list-sessions        # print prior sessions and ex
 uv run python -m meeko.main --resume               # resume the most recent session
 uv run python -m meeko.main --resume SESSION_ID    # resume a specific session
 ```
-
-Resuming by voice works too — just ask ("let's go back to the conversation about the app I'm building") and Meeko searches and loads it.
-
-The default config provides two profiles — `query` (short replies, auto-closes after a short silence) and `conversation` (substantive thinking-partner persona that stays open through pauses). You can switch between them mid-session by asking — for example "switch to conversation mode", "let's have a long conversation", "switch back to query mode", or "just quick questions from now on". Ask "what modes are available?" to list profiles.
 
 ## How it works
 
@@ -124,7 +116,7 @@ Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Cla
 
 ### Profiles
 
-`[profiles.<name>]` blocks define personas. The name is free-form: the default config ships `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing), and you can add more — each is just another block, and "switch to <name> mode" switches to it by voice. How a profile behaves when you go quiet is set entirely by its `idle_*` keys, not its name. A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required. Each profile has:
+`[profiles.<name>]` blocks define personas. The name is free-form: the default config ships `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing), and you can add more — each is just another block, and "switch to <name> mode" switches to it by voice. Asking for the kind of interaction a profile's `description` covers works too ("let's have a long conversation"), and "what modes are available?" lists the profiles and which one is active. How a profile behaves when you go quiet is set entirely by its `idle_*` keys, not its name. A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required. Each profile has:
 
 | Key                           | Description                                                                        |
 |-------------------------------|------------------------------------------------------------------------------------|
@@ -139,8 +131,6 @@ Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Cla
 | `post_wake_timeout_seconds`   | silence window after the wake word, before the first turn; on expiry the session closes silently and returns to IDLE. Default `15.0`. Non-positive disables. |
 
 With no `idle_*` keys a profile closes silently after 5 seconds; the shipped `conversation` profile sets all four to get its spoken check-in. See the bundled `meeko/default_config.toml` for working examples of both profiles.
-
-**Upgrading from an older config:** `conversation_idle_seconds` and `conversation_close_seconds` were renamed to `idle_timeout_seconds` and `idle_close_seconds`, and Meeko refuses to start while they are present. A `[profiles.conversation]` block that set no timing keys used to get the spoken check-in automatically and now gets the silent 5-second close — copy the four `idle_*` lines from the bundled `[profiles.conversation]` to keep it.
 
 ## Notes for the ReSpeaker XVF3800
 
@@ -223,6 +213,10 @@ Both are accessed with your own API keys; their handling of your data is governe
 Conversation content — your transcribed speech, Claude's replies, tool-call arguments, timer labels, and session titles — is logged at `DEBUG` only. The default `log_level` is `INFO`, so when Meeko runs under systemd (stderr goes to journald) none of it reaches the system journal. What `journalctl --user-unit=meeko` does show is the content-free trace: state transitions, which tool was called (not with what), how long a dropped echo transcript was (not what it said), and errors. Per-turn `[timing]` lines are `DEBUG`.
 
 Setting `log_level = "DEBUG"` (or `MEEKO_LOG_LEVEL=DEBUG`) turns that content logging on. Pair it with `log_target = "file"` to keep it in `meeko.log` instead of the journal, and remember journald retains what it captured until its own rotation — `journalctl --user --vacuum-time=1s` clears your user journal.
+
+## Project status
+
+Meeko is a personal project, maintained in spare time. It works and I use it daily, but I review issues and pull requests in batches — expect weeks, not days. Contributions are genuinely welcome anyway; please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open an issue before starting anything large so you don't build something I end up declining.
 
 ## Contributing
 
