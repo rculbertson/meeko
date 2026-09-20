@@ -358,6 +358,30 @@ def test_parse_list_args_coerces_non_strings():
     assert parsed.query == "42"
 
 
+def test_parse_list_args_reads_null_as_absent():
+    """Sonnet may send an explicit null for an optional field rather
+    than omitting it. Coerced with `str()` that becomes the literal
+    "None": a bogus search term, or a date that fails to parse."""
+    parsed = _parse_list_args({"query": "todo", "since": None, "until": None})
+    assert not isinstance(parsed, str), parsed
+    assert parsed.query == "todo"
+    assert parsed.since is None and parsed.since_iso is None
+    assert parsed.until is None and parsed.until_iso is None
+
+
+def test_parse_list_args_null_query_is_not_a_search_term():
+    parsed = _parse_list_args({"query": None, "since": "2026-09-01"})
+    assert not isinstance(parsed, str)
+    assert parsed.query is None
+
+
+def test_parse_list_args_all_null_prompts_for_criteria():
+    """The prompt, not the invalid-date message — which is what three
+    nulls coerced to the string "None" would produce."""
+    result = _parse_list_args({"query": None, "since": None, "until": None})
+    assert result == "Please provide a search query or date range."
+
+
 def test_parse_list_args_requires_at_least_one_criterion():
     result = _parse_list_args({})
     assert isinstance(result, str)
