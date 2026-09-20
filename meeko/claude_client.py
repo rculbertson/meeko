@@ -540,23 +540,15 @@ class ClaudeClient:
         self._messages.append({"role": "user", "content": user_text})
         await self._persist("user", user_text)
 
-        # When a round returns stop_reason=pause_turn (long-running
-        # server tool like web_search), the partial assistant content
-        # has to go back to the API to resume. We carry it here, send
-        # it as a transient assistant message on the next round, and
-        # merge it with the continuation into a single committed turn.
-        #
-        # NOTE: the original reason for the carry was wrong. It assumed
-        # [..., assistant, assistant, user] would 400 on strict
-        # alternation; the API in fact combines consecutive same-role
-        # turns into one (verified in
-        # tests/test_claude_api_contract.py). Committing each round as
-        # it arrives works and is simpler. What *is* real: a paused
-        # round ends with an unanswered `server_tool_use`, which 400s
-        # if a user message follows it — so a send-time repair has to
-        # drop that trailing orphan before the carry can go away.
-        paused_blocks: list[BetaContentBlockParam] = []
-
+        # Every round commits its own blocks as they arrive, including
+        # a `pause_turn` round: the API combines consecutive same-role
+        # turns, so a paused round and its continuation land as one
+        # turn without being merged here, and a resume request ends
+        # with the paused content, which is what the server needs to
+        # pick up. `_drop_stranded_server_tool_uses` handles the one
+        # real constraint — the unanswered `server_tool_use` a paused
+        # round trails. All three shapes verified in
+        # tests/test_claude_api_contract.py.
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
             ttft_ms: int | None = None
@@ -566,13 +558,6 @@ class ClaudeClient:
             # round — completed rounds commit full assistant_blocks via
             # the normal path.
             streamed_text = ""
-
-            request_messages = self._messages
-            if paused_blocks:
-                request_messages = [
-                    *self._messages,
-                    {"role": "assistant", "content": paused_blocks},
-                ]
 
             try:
                 async with self._client.beta.messages.stream(
@@ -584,7 +569,7 @@ class ClaudeClient:
                     tools=self._tools,
                     messages=_with_cache_breakpoint(
                         _pair_orphan_tool_uses(
-                            _drop_stranded_server_tool_uses(request_messages)
+                            _drop_stranded_server_tool_uses(self._messages)
                         )
                     ),
                     betas=[COMPACTION_BETA],
@@ -605,65 +590,46 @@ class ClaudeClient:
                             yield s
                     final = await stream.get_final_message()
             except asyncio.CancelledError, GeneratorExit, Exception:
-                await self._commit_partial_assistant(streamed_text, paused_blocks)
+                await self._commit_partial_assistant(streamed_text)
                 raise
 
-            new_blocks = [_serialize_block(b) for b in final.content]
-            combined_blocks = paused_blocks + new_blocks
+            await self._commit_assistant([_serialize_block(b) for b in final.content])
 
-            if final.stop_reason == "pause_turn":
-                # Server-side tool still working. Carry the partial
-                # content forward; defer the commit until the resume
-                # completes, so the turn lands as one assistant message.
-                paused_blocks = combined_blocks
-                tail = buffer.strip()
-                if tail:
-                    yield tail
-                self._log_round_usage(round_idx, api_start, final)
-                continue
-
-            await self._commit_full_assistant(combined_blocks)
-            paused_blocks = []
-
-            tail = buffer.strip()
-            if tail:
+            if tail := buffer.strip():
                 yield tail
 
             self._log_round_usage(round_idx, api_start, final)
+
+            if final.stop_reason == "pause_turn":
+                # Server-side tool still working. The committed blocks
+                # end with its unanswered `server_tool_use`, which is
+                # how the next request tells the server to resume.
+                continue
 
             if final.stop_reason != "tool_use":
                 return
 
             await self._dispatch_tool_calls(final)
 
-        # Exhausted the round budget. If we exited mid-pause (every
-        # round returned pause_turn) the paused content was never
-        # committed — flush it now so the turn is recorded at all.
-        if paused_blocks:
-            await self._commit_full_assistant(paused_blocks)
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
 
-    async def _commit_partial_assistant(
-        self,
-        streamed_text: str,
-        paused_blocks: list[BetaContentBlockParam] | None = None,
-    ) -> None:
+    async def _commit_partial_assistant(self, streamed_text: str) -> None:
         # Anything that terminates the stream early — barge-in
         # (CancelledError), consumer-driven GeneratorExit, or a
-        # network/API error (Exception) — leaves the user message
-        # already appended at the top of stream_turn without a paired
-        # assistant message. Commit a partial assistant turn so the
-        # record shows how far Claude got before the interruption, and
-        # so the next turn reads as a reply to something. Two
-        # consecutive user messages would NOT 400 — the API combines
-        # same-role turns (tests/test_claude_api_contract.py) — so the
-        # "…" placeholder for an empty stream is cosmetic, not a
-        # correctness requirement. If we cancelled mid-resume after a
-        # pause_turn, prepend the carried blocks so the partial covers
-        # the whole paused turn.
-        text = streamed_text.strip() or "…"
-        partial: list[BetaContentBlockParam] = list(paused_blocks or [])
-        partial.append({"type": "text", "text": text})
+        # network/API error (Exception) — leaves this round's streamed
+        # text uncommitted. Record it so the transcript shows how far
+        # Claude got before the interruption, and so the next turn
+        # reads as a reply to something. Earlier rounds of the same
+        # turn are already committed on their own.
+        #
+        # Nothing streamed means nothing to record: the user message
+        # stands alone and the next user message merges with it, which
+        # the API accepts (tests/test_claude_api_contract.py). That
+        # reads better than a "…" turn Claude never said.
+        text = streamed_text.strip()
+        if not text:
+            return
+        partial: list[BetaContentBlockParam] = [{"type": "text", "text": text}]
         self._messages.append({"role": "assistant", "content": partial})
         # Best-effort persistence: during process shutdown asyncio
         # cleans up pending async generators after the SessionStore
@@ -678,21 +644,22 @@ class ClaudeClient:
                 exc_info=True,
             )
 
-    async def _commit_full_assistant(
+    async def _commit_assistant(
         self, assistant_blocks: list[BetaContentBlockParam]
     ) -> None:
-        # Commit the full assistant turn to history *before* the caller
-        # yields the trailing partial sentence. If the consumer cancels
-        # while suspended at `yield tail`, GeneratorExit fires outside
+        # Commit this round's blocks *before* the caller yields the
+        # trailing partial sentence. If the consumer cancels while
+        # suspended at `yield tail`, GeneratorExit fires outside
         # stream_turn's try/except, and with the commit after the yield
-        # the turn would go unrecorded. (It would not 400: the API
-        # combines consecutive same-role turns — see
-        # tests/test_claude_api_contract.py.) SQLite is the verbatim
-        # source of truth — strip
-        # the server's compaction summary before persisting so on-disk
-        # transcripts never carry derived state. The block stays
-        # in-memory so the next turn's `messages=` payload includes it
-        # and the server doesn't re-summarize the prefix.
+        # the round would go unrecorded. Fidelity, not validity — the
+        # API combines consecutive same-role turns either way (see
+        # tests/test_claude_api_contract.py).
+        #
+        # SQLite is the verbatim source of truth, so strip the server's
+        # compaction summary before persisting and keep on-disk
+        # transcripts free of derived state. The block stays in-memory
+        # so the next turn's `messages=` payload includes it and the
+        # server doesn't re-summarize the prefix.
         self._messages.append({"role": "assistant", "content": assistant_blocks})
         persisted_blocks = [
             b

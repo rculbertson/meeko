@@ -23,6 +23,7 @@ from meeko import claude_client as claude_client_module
 from meeko.claude_client import (
     _INTERRUPTED_TOOL_RESULT,
     ClaudeClient,
+    _drop_stranded_server_tool_uses,
     _pair_orphan_tool_uses,
     _with_cache_breakpoint,
 )
@@ -930,27 +931,34 @@ async def test_pause_turn_continues_loop_without_dispatch(monkeypatch):
     # Two rounds: first returned pause_turn, second returned end_turn.
     assert len(captured) == 2
 
-    # Round 2's request sent the paused assistant content as a transient
-    # trailing message so the server can resume.
+    # Round 2's request ends with the paused content — committed now,
+    # not carried in a transient message — which is what tells the
+    # server where to resume.
     round2_msgs = captured[1]["messages"]
     assert round2_msgs[-1]["role"] == "assistant"
     paused_content = round2_msgs[-1]["content"]
     paused_texts = [b.get("text") for b in paused_content if b.get("type") == "text"]
     assert any(t and "Searching" in t for t in paused_texts)
 
-    # In-memory history must stay user/assistant-alternating — only one
-    # assistant message per logical turn, with paused + continuation
-    # blocks merged into a single commit.
+    # Each round commits its own blocks, so the paused round and its
+    # continuation are two assistant messages. The API combines
+    # consecutive same-role turns, so they read as one turn
+    # (tests/test_claude_api_contract.py).
     roles = [m["role"] for m in client._messages]
-    assert roles == ["user", "assistant"]
-    merged = client._messages[-1]["content"]
-    merged_text = "".join(b["text"] for b in merged if b.get("type") == "text")
-    assert "Searching" in merged_text and "Done" in merged_text
+    assert roles == ["user", "assistant", "assistant"]
+    text = "".join(
+        b["text"]
+        for m in client._messages
+        if m["role"] == "assistant"
+        for b in m["content"]
+        if b.get("type") == "text"
+    )
+    assert "Searching" in text and "Done" in text
 
 
 class _AlwaysPauseStream(_FakeStream):
     """Stream that always returns stop_reason=pause_turn so the round
-    loop will exhaust its budget without ever committing."""
+    loop exhausts its budget."""
 
     @property
     def text_stream(self):
@@ -974,20 +982,17 @@ class _AlwaysPauseStream(_FakeStream):
 
 
 @pytest.mark.asyncio
-async def test_pause_turn_flushed_when_round_budget_exhausted(monkeypatch):
-    """If every round returns pause_turn, the accumulated paused blocks
-    must still be committed at loop exit. Otherwise the next user turn
-    would stack on an orphan user message and 400 the API."""
+async def test_every_paused_round_is_committed_as_it_arrives(monkeypatch):
+    """Each pause_turn round commits its own blocks, so exhausting the
+    round budget needs no flush at loop exit — nothing is left
+    uncommitted to flush."""
     captured = _install_stream_factory(monkeypatch, _AlwaysPauseStream)
     client = _make_client()
     await _drain(client.stream_turn("hello"))
 
-    # MAX_TOOL_ROUNDS rounds, all pause_turn.
     assert len(captured) == claude_client_module.MAX_TOOL_ROUNDS
-    # Despite the exhaustion, history must end with the assistant turn
-    # so the next user turn stays user/assistant-alternating.
     roles = [m["role"] for m in client._messages]
-    assert roles == ["user", "assistant"]
+    assert roles == ["user"] + ["assistant"] * claude_client_module.MAX_TOOL_ROUNDS
 
 
 # Anthropic's cache minimum for Sonnet is 1024 tokens — pad the system prompt
@@ -1202,9 +1207,11 @@ async def test_cancelled_stream_appends_partial_assistant_turn(monkeypatch):
     assert "Hello there" in store.persisted[1][2][0]["text"]
 
 
-async def test_cancelled_stream_with_no_output_uses_placeholder(monkeypatch):
-    """If the cancel arrives before any tokens streamed, the partial
-    assistant turn is a placeholder ellipsis so history stays valid."""
+async def test_cancelled_stream_with_no_output_commits_nothing(monkeypatch):
+    """A cancel before any token streamed has nothing worth recording.
+    History keeps the lone user message, and the next user message
+    merges with it — which the API accepts, so the old "…" placeholder
+    turn was cosmetic (tests/test_claude_api_contract.py)."""
     gate = asyncio.Event()
     _install_stream_factory(
         monkeypatch, lambda captured, kw: _CancellableStream(captured, kw, gate, [])
@@ -1223,9 +1230,7 @@ async def test_cancelled_stream_with_no_output_uses_placeholder(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    last = client._messages[-1]
-    assert last["role"] == "assistant"
-    assert last["content"] == [{"type": "text", "text": "…"}]
+    assert [m["role"] for m in client._messages] == ["user"]
 
 
 class _RaisingStream:
@@ -1507,3 +1512,124 @@ async def test_next_turn_after_a_paused_round_omits_the_stranded_call(fake_anthr
 
     # Stored history is untouched — SQLite stays the verbatim record.
     assert len(client._messages[1]["content"]) == 3
+
+
+class _PauseThenHangStream(_FakeStream):
+    """Pauses on the first round, then hangs mid-stream on the resume so
+    the test can cancel exactly where a barge-in would land."""
+
+    def __init__(
+        self,
+        captured: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        round_counter: dict[str, int],
+        gate: asyncio.Event,
+    ):
+        super().__init__(captured, kwargs)
+        self._round = round_counter
+        self._gate = gate
+
+    @property
+    def text_stream(self):
+        first = self._round["n"] == 0
+        gate = self._gate
+
+        async def _iter():
+            if first:
+                yield "Let me look that up. "
+                return
+            yield "The answer is"
+            await gate.wait()  # block until the test cancels us
+            yield "never reached"
+
+        return _iter()
+
+    async def get_final_message(self):
+        assert self._round["n"] == 0
+        self._round["n"] += 1
+        return SimpleNamespace(
+            content=[
+                SimpleNamespace(type="text", text="Let me look that up. "),
+                SimpleNamespace(
+                    type="server_tool_use",
+                    id="srvtoolu_paused",
+                    name="web_search",
+                    input={"query": "x"},
+                ),
+            ],
+            stop_reason="pause_turn",
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=2,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_paused_round_is_persisted_before_the_resume_request(monkeypatch):
+    """The paused round is committed on arrival, so it reaches SQLite
+    even if the resume never completes."""
+    round_counter = {"n": 0}
+    gate = asyncio.Event()
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda cap, kw: _PauseThenHangStream(cap, kw, round_counter, gate),
+    )
+    store = _RecordingStore()
+    client = _make_client(store=store, session_id="sess-1")
+
+    task = asyncio.create_task(_drain(client.stream_turn("what's the weather?")))
+    for _ in range(100):
+        if len(captured) == 2:
+            break
+        await asyncio.sleep(0)
+    assert len(captured) == 2, "expected the resume request to have gone out"
+
+    # The paused round hit SQLite before the resume was sent.
+    assert [r for _, r, _ in store.persisted] == ["user", "assistant"]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_barge_in_during_a_resume_keeps_both_rounds(monkeypatch):
+    """Cancelling mid-resume leaves the committed paused round plus a
+    partial for what the resume got through — and the next request must
+    still be one the API accepts, so the paused round's unanswered
+    server_tool_use is filtered out of the send-time view."""
+    round_counter = {"n": 0}
+    gate = asyncio.Event()
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda cap, kw: _PauseThenHangStream(cap, kw, round_counter, gate),
+    )
+    client = _make_client()
+
+    task = asyncio.create_task(_drain(client.stream_turn("what's the weather?")))
+    for _ in range(100):
+        if len(captured) == 2:
+            break
+        await asyncio.sleep(0)
+    # Let the resume stream its first delta before cancelling.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    roles = [m["role"] for m in client._messages]
+    assert roles == ["user", "assistant", "assistant"]
+    # The paused round kept its blocks verbatim, including the orphan.
+    assert [b["type"] for b in client._messages[1]["content"]] == [
+        "text",
+        "server_tool_use",
+    ]
+    assert client._messages[2]["content"] == [{"type": "text", "text": "The answer is"}]
+
+    # The send-time view of the next turn drops the stranded call.
+    sent = _drop_stranded_server_tool_uses(client._messages)
+    assert [b["type"] for b in sent[1]["content"]] == ["text"]
