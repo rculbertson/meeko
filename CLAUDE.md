@@ -120,4 +120,10 @@ Do not add: web/mobile UI, multi-user support, semantic search over sessions, se
 
 ## Before Opening a PR
 1. Commit any outstanding changes
-2. `gh pr create` — ruff and tests run automatically via pre-commit hooks
+2. `gh pr create` — ruff, tests, pyright and the complexity gate run automatically via pre-commit hooks
+
+## Complexity gate
+
+`xenon --max-absolute C --max-average A meeko` runs at pre-push and in CI: it fails on any block in `meeko/` above cyclomatic complexity 20, or on the package average leaving rank A (currently 2.82). `tests/` is excluded.
+
+The absolute ceiling is deliberately loose — CC scores a flat `stop_reason` dispatch ladder the same as a branch buried in a hot loop, so it only catches unambiguous runaway and judgment calls stay with review. Do not tighten it to B: `ClaudeClient.stream_turn` and `load_profiles` both sit at CC 10, and a B ceiling would block the next legitimate dispatch arm. If the gate fires, prefer extracting a cohesive helper (as `_commit_assistant`, `_log_round_usage` and `_dispatch_tool_calls` were extracted from `stream_turn`) over splitting to satisfy the number.

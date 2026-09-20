@@ -71,16 +71,32 @@ Neither CI nor the maintainer can validate every path. Changes to `meeko/leds.py
 uv run ruff check .
 uv run ruff format .
 uv run pyright
+uv run xenon --max-absolute C --max-average A meeko
 ```
 
-Ruff runs on commit, and pyright (basic mode, over `meeko/`) and pytest run on push, via the hooks installed above; the same checks run in CI.
+Ruff runs on commit, and pyright (basic mode, over `meeko/`), pytest and xenon run on push, via the hooks installed above; the same checks run in CI.
+
+### Complexity
+
+[xenon](https://github.com/rubik/xenon) fails the build if any block in `meeko/` exceeds cyclomatic complexity 20 (radon rank D or worse), or if the package average leaves rank A.
+
+The ceiling is deliberately loose. Cyclomatic complexity can't tell a flat dispatch ladder from a branch buried in a hot loop, and the two score the same — so the absolute gate is set where it only catches unambiguous runaway, and judgment calls are left to review. The average gate is the part that does real work: it stops the package decaying wholesale even while no single function crosses the line.
+
+`tests/` is excluded. Test functions are linear setup-then-assert and score badly for reasons that don't indicate a maintenance problem.
+
+To see where a change landed rather than just whether it passed:
+
+```bash
+uv run radon cc -s -n C meeko/     # every block ranked C or worse
+uv run radon cc meeko/ --total-average
+```
 
 ## Git workflow
 
 - Implement features on a new branch, never directly on `main`.
 - Branch naming: `<github-username>/<short-description>`.
 - Commit when a discrete, working piece is complete; each commit should run correctly on its own.
-- Before opening a PR, commit outstanding changes and run `gh pr create` — ruff runs on commit and the test suite runs on push.
+- Before opening a PR, commit outstanding changes and run `gh pr create` — ruff runs on commit, and the test suite, pyright and the complexity gate run on push.
 
 ## AI-assisted contributions
 

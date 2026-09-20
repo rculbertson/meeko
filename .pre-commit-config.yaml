@@ -1,5 +1,5 @@
-# pyright and pytest run at pre-push; without this, `pre-commit install` would
-# only install the pre-commit hook and those gates would never run locally.
+# pyright, pytest and xenon run at pre-push; without this, `pre-commit install`
+# would only install the pre-commit hook and those gates would never run locally.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
@@ -23,6 +23,16 @@ repos:
       - id: pytest
         name: pytest
         entry: uv run pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      # Same all-of-meeko/ reasoning as pyright: the average threshold is a
+      # whole-package metric, so per-file invocation would compute the wrong
+      # number. --max-absolute C fails only on genuine runaway (CC 21+);
+      # tests/ is out of scope.
+      - id: xenon
+        name: xenon
+        entry: uv run xenon --max-absolute C --max-average A meeko
         language: system
         pass_filenames: false
         stages: [pre-push]
