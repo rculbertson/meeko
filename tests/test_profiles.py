@@ -20,7 +20,6 @@ def test_load_profiles_single(tmp_path: Path):
         default_profile = "query"
 
         [profiles.query]
-        wake_word = "meeko"
         prompt = "You are Meeko."
     """)
     )
@@ -29,7 +28,6 @@ def test_load_profiles_single(tmp_path: Path):
     assert default_name == "query"
     assert "query" in profiles
     assert profiles["query"].name == "query"
-    assert profiles["query"].wake_word == "meeko"
     assert profiles["query"].prompt == "You are Meeko."
 
 
@@ -41,11 +39,9 @@ def test_load_profiles_multiple(tmp_path: Path):
         default_profile = "query"
 
         [profiles.query]
-        wake_word = "meeko"
         prompt = "You are Meeko."
 
         [profiles.conversation]
-        wake_word = "meeko"
         prompt = "You are a thinking partner."
     """)
     )
@@ -63,7 +59,6 @@ def test_load_profiles_missing_default_profile_key(tmp_path: Path):
     toml_file.write_text(
         textwrap.dedent("""\
         [profiles.query]
-        wake_word = "meeko"
         prompt = "You are Meeko."
     """)
     )
@@ -80,7 +75,6 @@ def test_load_profiles_default_profile_unknown(tmp_path: Path):
         default_profile = "nope"
 
         [profiles.query]
-        wake_word = "meeko"
         prompt = "You are Meeko."
     """)
     )
@@ -97,7 +91,6 @@ def test_load_profiles_custom_name_with_idle_keys(tmp_path: Path):
         default_profile = "pirate"
 
         [profiles.pirate]
-        wake_word = "ahoy"
         prompt = "You are a pirate."
         description = "Talk like a pirate."
         idle_timeout_seconds = 30
@@ -112,7 +105,6 @@ def test_load_profiles_custom_name_with_idle_keys(tmp_path: Path):
     assert default_name == "pirate"
     assert profiles["pirate"] == Profile(
         name="pirate",
-        wake_word="ahoy",
         prompt="You are a pirate.",
         description="Talk like a pirate.",
         idle_timeout_seconds=30.0,
@@ -133,7 +125,6 @@ def test_load_profiles_idle_keys_default_to_a_silent_close(tmp_path: Path):
         default_profile = "conversation"
 
         [profiles.conversation]
-        wake_word = "meeko"
         prompt = "p"
     """)
     )
@@ -144,38 +135,6 @@ def test_load_profiles_idle_keys_default_to_a_silent_close(tmp_path: Path):
     assert profile.idle_prompt is None
     assert profile.idle_close_text is None
     assert profile.description is None
-
-
-@pytest.mark.parametrize(
-    ("old_key", "new_key"),
-    [
-        ("conversation_idle_seconds", "idle_timeout_seconds"),
-        ("conversation_close_seconds", "idle_close_seconds"),
-    ],
-)
-def test_load_profiles_rejects_renamed_idle_keys(tmp_path: Path, old_key, new_key):
-    """An un-migrated config fails loudly rather than silently running on
-    default timings."""
-    toml_file = tmp_path / "profiles.toml"
-    toml_file.write_text(
-        textwrap.dedent(f"""\
-        default_profile = "conversation"
-
-        [profiles.conversation]
-        wake_word = "meeko"
-        prompt = "p"
-        {old_key} = 60
-    """)
-    )
-
-    with pytest.raises(ValueError) as excinfo:
-        load_profiles(toml_file)
-
-    message = str(excinfo.value)
-    assert "[profiles.conversation]" in message
-    assert old_key in message
-    assert new_key in message
-    assert "idle_prompt" in message
 
 
 def test_load_profiles_empty(tmp_path: Path):
@@ -194,8 +153,8 @@ def test_load_profiles_empty(tmp_path: Path):
 
 def _make_profiles():
     return {
-        "query": Profile("query", "meeko", "You are Meeko."),
-        "conversation": Profile("conversation", "meeko", "You are a thinking partner."),
+        "query": Profile("query", "You are Meeko."),
+        "conversation": Profile("conversation", "You are a thinking partner."),
     }
 
 
@@ -351,8 +310,8 @@ def test_switch_profile_description_is_built_from_profile_descriptions():
     description, so a custom profile is as discoverable as a shipped one.
     A profile with no description is still listed by name."""
     profiles = {
-        "pirate": Profile("pirate", "meeko", "p", description="Talk like a pirate."),
-        "plain": Profile("plain", "meeko", "p"),
+        "pirate": Profile("pirate", "p", description="Talk like a pirate."),
+        "plain": Profile("plain", "p"),
     }
 
     switch_def = next(

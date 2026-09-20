@@ -64,6 +64,3 @@ working directory, not to the config file — and the config normally lives at
 `~/.config/meeko/meeko.toml`, so a relative path like `models/…` only works when Meeko is
 launched from the repo root. Or set `MEEKO_WAKE_WORD_MODEL` for a one-off run. Expect to tune `threshold` for a new
 model — the value that works for one phrase rarely transfers.
-
-The `wake_word` key in each profile is only an advisory label used in prompts and logs; the
-ONNX model is what actually determines the phrase Meeko listens for.

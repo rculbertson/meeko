@@ -18,18 +18,6 @@ from pathlib import Path
 
 from meeko.sessions import default_db_path as _default_db_path
 
-# Profile keys from when the profile name selected a hardcoded idle mode.
-# Rejected at load with a pointer to the replacement, so a config that set
-# them fails loudly instead of silently falling back to default timings.
-# A profile that set *neither* old nor new keys can't be told apart from
-# one that wants the defaults, so it gets them without complaint — e.g. a
-# [profiles.conversation] that relied on the old name-derived check-in now
-# closes silently. README.md §Profiles covers that upgrade step.
-_RENAMED_PROFILE_KEYS = {
-    "conversation_idle_seconds": "idle_timeout_seconds",
-    "conversation_close_seconds": "idle_close_seconds",
-}
-
 DEFAULT_CONFIG_FILENAME = "meeko.toml"
 
 
@@ -113,7 +101,6 @@ def _default_wake_word_model() -> Path:
 @dataclass(frozen=True)
 class Profile:
     name: str
-    wake_word: str
     prompt: str
     voice: str | None = None
     description: str | None = None
@@ -205,17 +192,8 @@ def load_profiles(
 
     profiles = {}
     for name, fields in raw_profiles.items():
-        for old_key, new_key in _RENAMED_PROFILE_KEYS.items():
-            if old_key in fields:
-                raise ValueError(
-                    f"[profiles.{name}] in {path} uses {old_key!r}, which was "
-                    f"renamed to {new_key!r}. Also set 'idle_prompt' (and "
-                    f"optionally 'idle_close_text') to keep the spoken check-in; "
-                    f"see README.md §Configuration."
-                )
         profiles[name] = Profile(
             name=name,
-            wake_word=fields["wake_word"],
             prompt=fields["prompt"],
             voice=fields.get("voice"),
             description=fields.get("description"),

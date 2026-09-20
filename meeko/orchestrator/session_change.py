@@ -78,7 +78,6 @@ async def apply_post_turn_session_change(
         return State.LISTENING
 
     if session_manager.should_end():
-        active = profile_manager.active_profile
         finalized_sid = session_id
         claude.reset_session()
         session_manager.clear()
@@ -87,8 +86,7 @@ async def apply_post_turn_session_change(
             wake_detector.reset()
             logger.info(
                 "Session ended; returning to IDLE "
-                "(say '%s' to start a new conversation)",
-                active.wake_word,
+                "(say the wake word to start a new conversation)"
             )
             return State.IDLE
         logger.info("Session ended; wake word disabled, returning to LISTENING")
