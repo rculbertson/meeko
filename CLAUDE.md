@@ -33,6 +33,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - Prompt caching (`cache_control` on the stable prefix) and server-side compaction are wired up in `meeko/claude_client.py` (compaction beta `compact-2026-01-12`, strategy `compact_20260112`). Both operate on the in-memory message array only
 - The on-disk SQLite transcript is the source of truth — the server-emitted `compaction` block stays in-memory and is filtered out before persistence so transcripts remain verbatim
 - Compaction threshold: `[claude] compaction_trigger_tokens` in `meeko.toml` (default `150000`). Env override: `MEEKO_COMPACTION_TRIGGER_TOKENS`.
+- `_serialize_block` rebuilds assistant blocks from canonical fields for replay. Never drop `caller` from `server_tool_use` / `web_search_tool_result`: web search's dynamic filtering nests searches inside `code_execution`, and without `caller` the API 400s the *next* turn of the session. See `ARCHITECTURE.md` §4.3 and the live checks in `tests/test_claude_api_contract.py`.
 
 ### Turn persistence
 - Write every turn to SQLite immediately on completion, not buffered, not at session end (see `meeko/sessions.py` and `ClaudeClient._persist`)
