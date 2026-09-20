@@ -24,7 +24,10 @@ from meeko.claude_client import (
     _INTERRUPTED_TOOL_RESULT,
     ClaudeClient,
     _drop_stranded_server_tool_uses,
+    _lead_with_results,
+    _missing_results,
     _pair_orphan_tool_uses,
+    _repaired,
     _with_cache_breakpoint,
 )
 from meeko.tools.dispatch import ToolDispatcher
@@ -1868,3 +1871,73 @@ async def test_turn_after_a_completed_pause_keeps_the_answered_call(monkeypatch)
         if isinstance(m["content"], list)
         for b in m["content"]
     )
+
+
+# --- the two repairs, composed -------------------------------------------
+
+
+def test_missing_results_returns_nothing_when_nothing_is_pending():
+    assert _missing_results([], {"role": "user", "content": "hi"}) == []
+
+
+def test_missing_results_skips_ids_the_message_already_answers():
+    msg = {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_a", "content": "done"}
+        ],
+    }
+    filler = _missing_results(["toolu_a", "toolu_b"], msg)
+    assert [f["tool_use_id"] for f in filler] == ["toolu_b"]
+
+
+def test_lead_with_results_normalizes_a_plain_string_message():
+    """A user turn is stored as a bare string; results have to lead it,
+    so the string becomes a text block behind them."""
+    filler = [{"type": "tool_result", "tool_use_id": "toolu_a", "content": "x"}]
+    out = _lead_with_results({"role": "user", "content": "never mind"}, filler)
+    assert out["content"] == [
+        filler[0],
+        {"type": "text", "text": "never mind"},
+    ]
+
+
+def test_repaired_applies_both_repairs_to_one_history():
+    """A barge-in during a paused web search can leave both kinds of
+    orphan in the same session: a client `tool_use` with no result, and
+    a server one the pause never finished. Each needs the opposite
+    repair, and the send-time view needs both."""
+    messages = [
+        {"role": "user", "content": "timer and weather?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Looking."},
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_paused",
+                    "name": "code_execution",
+                    "input": {},
+                },
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_a", "name": "set_timer", "input": {}}
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    out = _repaired(messages)
+
+    # The stranded server call is gone; its message keeps its text.
+    assert out[1]["content"] == [{"type": "text", "text": "Looking."}]
+    # The client tool_use is answered, and the results lead the user turn.
+    answered = out[3]["content"]
+    assert answered[0]["type"] == "tool_result"
+    assert answered[0]["tool_use_id"] == "toolu_a"
+    assert answered[0]["is_error"] is True
+    assert answered[1] == {"type": "text", "text": "never mind"}
+    # Input untouched — stored history stays verbatim.
+    assert len(messages[1]["content"]) == 2
