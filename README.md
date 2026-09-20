@@ -220,7 +220,7 @@ Both are accessed with your own API keys; their handling of your data is governe
 
 ### Logs
 
-Conversation content — your transcribed speech, Claude's replies, tool arguments, and session titles — is logged at `DEBUG` only. The default `log_level` is `INFO`, so when Meeko runs under systemd (stderr goes to journald) none of it reaches the system journal; `journalctl --user-unit=meeko` shows state transitions, timings, and errors.
+Conversation content — your transcribed speech, Claude's replies, tool-call arguments, timer labels, and session titles — is logged at `DEBUG` only. The default `log_level` is `INFO`, so when Meeko runs under systemd (stderr goes to journald) none of it reaches the system journal. What `journalctl --user-unit=meeko` does show is the content-free trace: state transitions, which tool was called (not with what), how long a dropped echo transcript was (not what it said), and errors. Per-turn `[timing]` lines are `DEBUG`.
 
 Setting `log_level = "DEBUG"` (or `MEEKO_LOG_LEVEL=DEBUG`) turns that content logging on. Pair it with `log_target = "file"` to keep it in `meeko.log` instead of the journal, and remember journald retains what it captured until its own rotation — `journalctl --user --vacuum-time=1s` clears your user journal.
 

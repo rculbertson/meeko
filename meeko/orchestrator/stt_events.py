@@ -103,7 +103,10 @@ class SttEventRouter:
             # No preceding StartOfTurn triggered barge-in (otherwise
             # state would already be LISTENING). With AEC on, this is
             # residual echo; drop it.
-            # Transcript content: debug only (see setup_logging).
+            # The transcript is content (DEBUG); that one was dropped at
+            # all is operational signal — a burst of these means AEC
+            # regressed — so the count goes out at INFO.
+            logger.info("[echo?] dropped a %d-char transcript", len(text))
             logger.debug("[echo?] %s", text)
             return
         # Speech is over — drop back to the steady "ready" cyan. Without

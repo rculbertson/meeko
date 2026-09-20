@@ -99,7 +99,8 @@ Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout
 Both silence windows live in `meeko/orchestrator/idle.py` (`IdleController`), not in `main.py`. They don't end the session themselves — they set the `SessionManager` end flag and post `IDLE_TIMEOUT_SENTINEL` to the turn queue, and `TurnWorker` (`meeko/orchestrator/turn_worker.py`) runs the normal post-turn handling without a Claude/TTS round-trip.
 
 ### Logging and privacy
-- Conversation content — user transcripts, assistant sentences, tool-call arguments, session titles, and the raw summarizer response — is logged at **DEBUG only**. `[system] log_level` defaults to `INFO`, so under systemd (stderr → journald) none of it lands in the system journal.
+- Conversation content — user transcripts, assistant sentences, tool-call arguments, timer labels, weather coordinates, session titles, and the raw summarizer response — is logged at **DEBUG only**. `[system] log_level` defaults to `INFO`, so under systemd (stderr → journald) none of it lands in the system journal.
+- Where demoting a line would leave a blind spot, keep a content-free `INFO` line beside it: the tool name without its arguments, the echo transcript's length without its text, the HTTP status without the URL (Open-Meteo's query string carries the home coordinates). `[state]` transitions are `INFO` for the same reason — they're the operational trace a journal at the default level is read for.
 - When adding a log line, ask whether the interpolated value came from the user or from Claude. If it did, it goes to `logger.debug`; log the operational fact (tool name, session id prefix, state) at `INFO` instead.
 - `tests/test_logging_privacy.py` drives the content log sites at INFO and asserts nothing leaks.
 

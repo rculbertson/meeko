@@ -103,11 +103,13 @@ class TimerManager:
                     # Log it here: an exception escaping this task would only
                     # surface as "Task exception was never retrieved" whenever
                     # the task happened to be garbage-collected.
-                    logger.exception("Timer '%s' announcement failed", label)
+                    # Label omitted: user-chosen, so DEBUG-only like the
+                    # expiry line above.
+                    logger.exception("Timer announcement failed")
+                    logger.debug("Failed announcement was for timer %r", label)
             else:
-                logger.warning(
-                    "Timer '%s' expired but no speak_callback is configured", label
-                )
+                logger.warning("Timer expired but no speak_callback is configured")
+                logger.debug("Unannounced timer was %r", label)
         except asyncio.CancelledError:
             logger.debug("Timer '%s' cancelled", label)
         finally:
