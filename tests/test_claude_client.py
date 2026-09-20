@@ -734,7 +734,11 @@ def test_serialize_web_search_tool_result_preserves_caller():
 
 
 def test_serialize_caller_accepts_a_plain_dict():
-    """Blocks reloaded from SQLite come back as dicts, not SDK models."""
+    """`_with_caller` takes the field as-is when it isn't an SDK model.
+
+    Nothing feeds it a plain dict today — `load_history` puts stored
+    blocks straight into `_messages` without re-serializing — so this
+    covers the fallback branch, not a live path."""
     from meeko.claude_client import _serialize_block
 
     block = SimpleNamespace(

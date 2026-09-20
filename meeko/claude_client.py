@@ -115,12 +115,19 @@ def _serialize_block(block: Any) -> BetaContentBlockParam:
     if block.type == "text":
         return {"type": "text", "text": block.text}
     if block.type == "tool_use":
-        return {
-            "type": "tool_use",
-            "id": block.id,
-            "name": block.name,
-            "input": block.input,
-        }
+        # Client tools can carry `caller` too, once programmatic tool
+        # calling is enabled (`allowed_callers`). Meeko doesn't declare
+        # it today, so this is symmetry, not a live path — but leaving
+        # it out would reproduce the same 400 silently if it ever is.
+        return _with_caller(
+            {
+                "type": "tool_use",
+                "id": block.id,
+                "name": block.name,
+                "input": block.input,
+            },
+            block,
+        )
     if block.type == "server_tool_use":
         return _with_caller(
             {

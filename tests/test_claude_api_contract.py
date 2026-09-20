@@ -59,6 +59,30 @@ async def _send(client, messages, **kwargs):
     )
 
 
+def _group_boundary(blocks: list) -> int | None:
+    """Pick a split index that doesn't cut a server-tool group apart.
+
+    With dynamic filtering the model calls `web_search` from inside
+    `code_execution`, so the blocks come in groups: the outer
+    `server_tool_use`, the nested calls and their results, then the
+    outer result. Splitting mid-group strands a tool use without its
+    result, and the API rejects that — which would fail this test for a
+    reason that has nothing to do with the alternation it checks. Only
+    offer boundaries where every tool use so far has been answered.
+    """
+    open_ids: set[str] = set()
+    points: list[int] = []
+    for i, b in enumerate(blocks):
+        block_type = b.get("type")
+        if block_type == "server_tool_use":
+            open_ids.add(b["id"])
+        elif block_type and block_type.endswith("tool_result"):
+            open_ids.discard(b.get("tool_use_id"))
+        if not open_ids and 0 < i + 1 < len(blocks):
+            points.append(i + 1)
+    return points[-1] if points else None
+
+
 async def test_consecutive_user_messages_are_accepted():
     """Two user messages in a row — what a barge-in leaves behind if the
     partial-assistant commit is removed."""
@@ -112,16 +136,11 @@ async def test_split_web_search_turn_is_accepted():
         tools=tools,
     )
     blocks = [_serialize_block(b) for b in first.content]
-    split = next(
-        (i for i, b in enumerate(blocks) if b.get("type") == "web_search_tool_result"),
-        None,
-    )
+    split = _group_boundary(blocks)
     if split is None:
         types = [b.get("type") for b in blocks]
-        pytest.skip(f"model did not search; block types={types}")
-    head, tail = blocks[: split + 1], blocks[split + 1 :]
-    if not tail:
-        pytest.skip("no content after the search result to split off")
+        pytest.skip(f"no safe split point; block types={types}")
+    head, tail = blocks[:split], blocks[split:]
 
     response = await _send(
         client,
