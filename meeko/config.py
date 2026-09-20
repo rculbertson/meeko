@@ -162,7 +162,13 @@ class MeekoConfig:
     # claude
     compaction_trigger_tokens: int = 150000
     web_search_enabled: bool = True
-    web_search_max_uses: int = 2
+    # These two repeat `claude_client`'s constants rather than importing
+    # them: config is a leaf that components import, and reaching into
+    # the client would pull the Anthropic SDK in behind it. This is the
+    # default that actually applies — `main.py` passes
+    # `config.web_search_max_uses` into the client — so
+    # `test_defaults_match_the_client_constants` pins the two together.
+    web_search_max_uses: int = 4
     # location
     latitude: float | None = None
     longitude: float | None = None

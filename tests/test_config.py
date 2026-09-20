@@ -43,11 +43,24 @@ def test_defaults_match_historical_env_defaults(tmp_path: Path):
         "wake_word_disabled": False,
         "compaction_trigger_tokens": 150000,
         "web_search_enabled": True,
-        "web_search_max_uses": 2,
+        "web_search_max_uses": 4,
     }
     assert {k: getattr(cfg, k) for k in expected} == expected
     assert cfg.db_path.name == "meeko.db"
     assert cfg.db_path.parent.name == "meeko"
+
+
+def test_defaults_match_the_client_constants():
+    """`MeekoConfig` repeats these rather than importing them, to keep
+    config a leaf module. Nothing stops the two drifting except this."""
+    from meeko.claude_client import (
+        DEFAULT_COMPACTION_TRIGGER_TOKENS,
+        DEFAULT_WEB_SEARCH_MAX_USES,
+    )
+
+    cfg = MeekoConfig()
+    assert cfg.web_search_max_uses == DEFAULT_WEB_SEARCH_MAX_USES
+    assert cfg.compaction_trigger_tokens == DEFAULT_COMPACTION_TRIGGER_TOKENS
 
 
 def test_loads_values_from_toml(tmp_path: Path):
