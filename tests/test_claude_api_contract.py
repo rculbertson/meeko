@@ -1,21 +1,25 @@
-"""Live checks of the Messages API contract that `ClaudeClient`'s history
-bookkeeping is built on.
+"""Live checks of the Messages API contract `ClaudeClient` relies on.
 
-`stream_turn` goes to some length to keep the in-memory message array
-strictly user/assistant-alternating: it carries `pause_turn` content
-forward in `paused_blocks` rather than committing it, commits a partial
-assistant turn on every early exit, and substitutes a "…" placeholder
-when nothing streamed. The stated reason (see `fddc387`) is that
-consecutive same-role messages 400.
+`stream_turn` commits each round's blocks as they arrive and lets the
+API combine consecutive same-role turns, rather than keeping history
+strictly user/assistant-alternating. That rests on a documented
+guarantee — "consecutive `user` or `assistant` turns in your request
+will be combined into a single turn" — which these tests hold the API
+to, using the same model, betas and context-management config the
+client sends.
 
-The API docs say the opposite — consecutive same-role messages are
-combined into a single turn — and nothing in the git history shows the
-400 was ever observed. These tests settle it against the live API, using
-the same model, betas and context-management config the client sends, so
-a simplification can be built on the answer (or dropped if it fails).
+The history bookkeeping here was originally built on the opposite
+assumption, so these run against the live API rather than a fake: a
+premise this load-bearing is worth re-checking, and the fake would just
+agree with whatever we believed.
 
-Marked `integration`; a few cents per run. Test 3 issues one real web
-search.
+Not covered here: the `pause_turn` shapes. A pause needs the server's
+10-iteration loop limit, which no test can provoke on demand, so those
+were verified by replaying a captured paused turn and are modelled
+offline in tests/test_claude_client.py.
+
+Marked `integration`; a few cents per run. Two of these issue real web
+searches.
 """
 
 import os

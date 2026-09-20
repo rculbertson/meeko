@@ -309,6 +309,9 @@ def _with_cache_breakpoint(
 _INTERRUPTED_TOOL_RESULT = (
     "Not run: the turn was interrupted before this tool finished."
 )
+# Stand-in for an assistant message whose only content was a server
+# tool call the server never finished. The API rejects empty content.
+_INTERRUPTED_TEXT = "…"
 
 
 def _tool_use_ids(content: object) -> list[str]:
@@ -339,6 +342,126 @@ def _interrupted_results(ids: list[str]) -> list[BetaToolResultBlockParam]:
         }
         for i in ids
     ]
+
+
+def _drop_stranded_server_tool_uses(
+    messages: list[BetaMessageParam],
+) -> list[BetaMessageParam]:
+    """Return a copy of `messages` with unanswered *server* tool uses
+    dropped from every assistant message except the last one.
+
+    A `pause_turn` round ends mid-tool: its last block is a
+    `server_tool_use` with no result, because that's what the server is
+    still working on. Two cases, and they pull in opposite directions:
+
+    - **Resuming** that round, the paused content is the final message
+      and the trailing orphan is exactly what tells the server where to
+      pick up. Verified live: resume succeeds with it, and the docs say
+      the API detects the trailing `server_tool_use`.
+    - **Anything else following it** — a barge-in, an error, or the
+      round-budget flush, each of which commits the paused blocks and
+      then takes a new user turn — makes the API reject the request
+      outright::
+
+        `code_execution` tool use with id srvtoolu_... was found
+        without a corresponding `code_execution_tool_result` block
+
+      and, because SQLite stores history verbatim, it would reject
+      every `--resume` of that session too.
+
+    Both shapes were verified by replaying a captured paused turn
+    against the API. A pause needs the server's 10-iteration limit, so
+    no test can provoke one on demand; the offline tests model the
+    shapes instead.
+
+    So the rule is positional: keep the orphan when it trails the whole
+    conversation, drop it once something follows. A server result can't
+    be fabricated the way `_pair_orphan_tool_uses` fabricates a client
+    one, so dropping is the only repair available. Blocks nested under a
+    dropped call (`caller.tool_id`) and any result addressed to one go
+    with it, so no block is left pointing at something that isn't there.
+
+    "Answered" is judged across the whole conversation, not per message.
+    Since each round commits its own blocks, a paused round's
+    `server_tool_use` and the result the continuation round returns for
+    it land in two *different* assistant messages; scoping the check to
+    one message would call that use stranded and drop it out from under
+    its own result. Like the client-side pairing, this happens on the
+    send-time view only, so stored history stays verbatim.
+    """
+    answered = _server_tool_result_ids(messages)
+    out: list[BetaMessageParam] = []
+    last = len(messages) - 1
+    for i, msg in enumerate(messages):
+        content = msg["content"]
+        if i == last or msg["role"] != "assistant" or not isinstance(content, list):
+            out.append(msg)
+            continue
+        stranded = _stranded_ids(content, answered)
+        if not stranded:
+            out.append(msg)
+            continue
+        kept = [
+            b for b in cast(list[Any], content) if not _belongs_to_stranded(b, stranded)
+        ]
+        # The API rejects an empty content list, so a message that was
+        # nothing but a stranded call keeps a placeholder.
+        trimmed: list[BetaContentBlockParam] = kept or [
+            {"type": "text", "text": _INTERRUPTED_TEXT}
+        ]
+        out.append({"role": "assistant", "content": trimmed})
+    return out
+
+
+def _server_tool_result_ids(messages: list[BetaMessageParam]) -> set[str]:
+    """Every `tool_use_id` a server-tool result addresses, conversation-wide."""
+    answered: set[str] = set()
+    for msg in messages:
+        for block in _blocks(msg["content"]):
+            block_type = block.get("type")
+            # "tool_result" (no prefix) is a client result — that side is
+            # `_pair_orphan_tool_uses`'s business, not this one.
+            if (
+                isinstance(block_type, str)
+                and block_type.endswith("tool_result")
+                and block_type != "tool_result"
+                and isinstance(block.get("tool_use_id"), str)
+            ):
+                answered.add(block["tool_use_id"])
+    return answered
+
+
+def _stranded_ids(content: object, answered: set[str]) -> set[str]:
+    return {
+        block["id"]
+        for block in _blocks(content)
+        if block.get("type") == "server_tool_use"
+        and isinstance(block.get("id"), str)
+        and block["id"] not in answered
+    }
+
+
+def _blocks(content: object) -> list[dict[str, Any]]:
+    """The dict blocks of a message's content, ignoring anything else.
+
+    Stored history is JSON the type checker can't see into, and
+    `load_history` casts it in unchecked, so this guards rather than
+    assumes — as `_tool_use_ids` and `_with_cache_breakpoint` do.
+    """
+    if not isinstance(content, list):
+        return []
+    return [b for b in cast(list[Any], content) if isinstance(b, dict)]
+
+
+def _belongs_to_stranded(block: object, stranded: set[str]) -> bool:
+    """True for a stranded call itself, a block nested under one, or a
+    result addressed to one."""
+    if not isinstance(block, dict):
+        return False
+    if block.get("id") in stranded or block.get("tool_use_id") in stranded:
+        return True
+    caller = block.get("caller")
+    return isinstance(caller, dict) and caller.get("tool_id") in stranded
 
 
 def _pair_orphan_tool_uses(
@@ -454,23 +577,22 @@ class ClaudeClient:
         self._messages.append({"role": "user", "content": user_text})
         await self._persist("user", user_text)
 
-        # When a round returns stop_reason=pause_turn (long-running
-        # server tool like web_search), the partial assistant content
-        # has to go back to the API to resume. We carry it here, send
-        # it as a transient assistant message on the next round, and
-        # merge it with the continuation into a single committed turn.
+        # Every round commits its own blocks as they arrive, including
+        # a `pause_turn` round: the API combines consecutive same-role
+        # turns, so a paused round and its continuation land as one
+        # turn without being merged here, and a resume request ends
+        # with the paused content, which is what the server needs to
+        # pick up. `_drop_stranded_server_tool_uses` handles the one
+        # real constraint — the unanswered `server_tool_use` a paused
+        # round trails.
         #
-        # NOTE: the original reason for the carry was wrong. It assumed
-        # [..., assistant, assistant, user] would 400 on strict
-        # alternation; the API in fact combines consecutive same-role
-        # turns into one (verified in
-        # tests/test_claude_api_contract.py). Committing each round as
-        # it arrives works and is simpler. What *is* real: a paused
-        # round ends with an unanswered `server_tool_use`, which 400s
-        # if a user message follows it — so a send-time repair has to
-        # drop that trailing orphan before the carry can go away.
-        paused_blocks: list[BetaContentBlockParam] = []
-
+        # Evidence: the same-role combining is checked live in
+        # tests/test_claude_api_contract.py; the paused-round shapes
+        # were verified by replaying a captured `pause_turn` against
+        # the API (resume with the orphan succeeds, a user turn after
+        # it 400s, and a continuation opens with the paused call's
+        # result) — see the commit messages on this change, since a
+        # pause can't be triggered on demand from a test.
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
             ttft_ms: int | None = None
@@ -481,13 +603,6 @@ class ClaudeClient:
             # the normal path.
             streamed_text = ""
 
-            request_messages = self._messages
-            if paused_blocks:
-                request_messages = [
-                    *self._messages,
-                    {"role": "assistant", "content": paused_blocks},
-                ]
-
             try:
                 async with self._client.beta.messages.stream(
                     model=MODEL,
@@ -497,7 +612,9 @@ class ClaudeClient:
                     ),
                     tools=self._tools,
                     messages=_with_cache_breakpoint(
-                        _pair_orphan_tool_uses(request_messages)
+                        _pair_orphan_tool_uses(
+                            _drop_stranded_server_tool_uses(self._messages)
+                        )
                     ),
                     betas=[COMPACTION_BETA],
                     context_management=self._context_management,
@@ -517,65 +634,46 @@ class ClaudeClient:
                             yield s
                     final = await stream.get_final_message()
             except asyncio.CancelledError, GeneratorExit, Exception:
-                await self._commit_partial_assistant(streamed_text, paused_blocks)
+                await self._commit_partial_assistant(streamed_text)
                 raise
 
-            new_blocks = [_serialize_block(b) for b in final.content]
-            combined_blocks = paused_blocks + new_blocks
+            await self._commit_assistant([_serialize_block(b) for b in final.content])
 
-            if final.stop_reason == "pause_turn":
-                # Server-side tool still working. Carry the partial
-                # content forward; defer the commit until the resume
-                # completes, so the turn lands as one assistant message.
-                paused_blocks = combined_blocks
-                tail = buffer.strip()
-                if tail:
-                    yield tail
-                self._log_round_usage(round_idx, api_start, final)
-                continue
-
-            await self._commit_full_assistant(combined_blocks)
-            paused_blocks = []
-
-            tail = buffer.strip()
-            if tail:
+            if tail := buffer.strip():
                 yield tail
 
             self._log_round_usage(round_idx, api_start, final)
+
+            if final.stop_reason == "pause_turn":
+                # Server-side tool still working. The committed blocks
+                # end with its unanswered `server_tool_use`, which is
+                # how the next request tells the server to resume.
+                continue
 
             if final.stop_reason != "tool_use":
                 return
 
             await self._dispatch_tool_calls(final)
 
-        # Exhausted the round budget. If we exited mid-pause (every
-        # round returned pause_turn) the paused content was never
-        # committed — flush it now so the turn is recorded at all.
-        if paused_blocks:
-            await self._commit_full_assistant(paused_blocks)
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
 
-    async def _commit_partial_assistant(
-        self,
-        streamed_text: str,
-        paused_blocks: list[BetaContentBlockParam] | None = None,
-    ) -> None:
+    async def _commit_partial_assistant(self, streamed_text: str) -> None:
         # Anything that terminates the stream early — barge-in
         # (CancelledError), consumer-driven GeneratorExit, or a
-        # network/API error (Exception) — leaves the user message
-        # already appended at the top of stream_turn without a paired
-        # assistant message. Commit a partial assistant turn so the
-        # record shows how far Claude got before the interruption, and
-        # so the next turn reads as a reply to something. Two
-        # consecutive user messages would NOT 400 — the API combines
-        # same-role turns (tests/test_claude_api_contract.py) — so the
-        # "…" placeholder for an empty stream is cosmetic, not a
-        # correctness requirement. If we cancelled mid-resume after a
-        # pause_turn, prepend the carried blocks so the partial covers
-        # the whole paused turn.
-        text = streamed_text.strip() or "…"
-        partial: list[BetaContentBlockParam] = list(paused_blocks or [])
-        partial.append({"type": "text", "text": text})
+        # network/API error (Exception) — leaves this round's streamed
+        # text uncommitted. Record it so the transcript shows how far
+        # Claude got before the interruption, and so the next turn
+        # reads as a reply to something. Earlier rounds of the same
+        # turn are already committed on their own.
+        #
+        # Nothing streamed means nothing to record: the user message
+        # stands alone and the next user message merges with it, which
+        # the API accepts (tests/test_claude_api_contract.py). That
+        # reads better than a "…" turn Claude never said.
+        text = streamed_text.strip()
+        if not text:
+            return
+        partial: list[BetaContentBlockParam] = [{"type": "text", "text": text}]
         self._messages.append({"role": "assistant", "content": partial})
         # Best-effort persistence: during process shutdown asyncio
         # cleans up pending async generators after the SessionStore
@@ -590,21 +688,22 @@ class ClaudeClient:
                 exc_info=True,
             )
 
-    async def _commit_full_assistant(
+    async def _commit_assistant(
         self, assistant_blocks: list[BetaContentBlockParam]
     ) -> None:
-        # Commit the full assistant turn to history *before* the caller
-        # yields the trailing partial sentence. If the consumer cancels
-        # while suspended at `yield tail`, GeneratorExit fires outside
+        # Commit this round's blocks *before* the caller yields the
+        # trailing partial sentence. If the consumer cancels while
+        # suspended at `yield tail`, GeneratorExit fires outside
         # stream_turn's try/except, and with the commit after the yield
-        # the turn would go unrecorded. (It would not 400: the API
-        # combines consecutive same-role turns — see
-        # tests/test_claude_api_contract.py.) SQLite is the verbatim
-        # source of truth — strip
-        # the server's compaction summary before persisting so on-disk
-        # transcripts never carry derived state. The block stays
-        # in-memory so the next turn's `messages=` payload includes it
-        # and the server doesn't re-summarize the prefix.
+        # the round would go unrecorded. Fidelity, not validity — the
+        # API combines consecutive same-role turns either way (see
+        # tests/test_claude_api_contract.py).
+        #
+        # SQLite is the verbatim source of truth, so strip the server's
+        # compaction summary before persisting and keep on-disk
+        # transcripts free of derived state. The block stays in-memory
+        # so the next turn's `messages=` payload includes it and the
+        # server doesn't re-summarize the prefix.
         self._messages.append({"role": "assistant", "content": assistant_blocks})
         persisted_blocks = [
             b

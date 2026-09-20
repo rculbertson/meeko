@@ -23,6 +23,7 @@ from meeko import claude_client as claude_client_module
 from meeko.claude_client import (
     _INTERRUPTED_TOOL_RESULT,
     ClaudeClient,
+    _drop_stranded_server_tool_uses,
     _pair_orphan_tool_uses,
     _with_cache_breakpoint,
 )
@@ -930,27 +931,34 @@ async def test_pause_turn_continues_loop_without_dispatch(monkeypatch):
     # Two rounds: first returned pause_turn, second returned end_turn.
     assert len(captured) == 2
 
-    # Round 2's request sent the paused assistant content as a transient
-    # trailing message so the server can resume.
+    # Round 2's request ends with the paused content — committed now,
+    # not carried in a transient message — which is what tells the
+    # server where to resume.
     round2_msgs = captured[1]["messages"]
     assert round2_msgs[-1]["role"] == "assistant"
     paused_content = round2_msgs[-1]["content"]
     paused_texts = [b.get("text") for b in paused_content if b.get("type") == "text"]
     assert any(t and "Searching" in t for t in paused_texts)
 
-    # In-memory history must stay user/assistant-alternating — only one
-    # assistant message per logical turn, with paused + continuation
-    # blocks merged into a single commit.
+    # Each round commits its own blocks, so the paused round and its
+    # continuation are two assistant messages. The API combines
+    # consecutive same-role turns, so they read as one turn
+    # (tests/test_claude_api_contract.py).
     roles = [m["role"] for m in client._messages]
-    assert roles == ["user", "assistant"]
-    merged = client._messages[-1]["content"]
-    merged_text = "".join(b["text"] for b in merged if b.get("type") == "text")
-    assert "Searching" in merged_text and "Done" in merged_text
+    assert roles == ["user", "assistant", "assistant"]
+    text = "".join(
+        b["text"]
+        for m in client._messages
+        if m["role"] == "assistant"
+        for b in m["content"]
+        if b.get("type") == "text"
+    )
+    assert "Searching" in text and "Done" in text
 
 
 class _AlwaysPauseStream(_FakeStream):
     """Stream that always returns stop_reason=pause_turn so the round
-    loop will exhaust its budget without ever committing."""
+    loop exhausts its budget."""
 
     @property
     def text_stream(self):
@@ -974,20 +982,17 @@ class _AlwaysPauseStream(_FakeStream):
 
 
 @pytest.mark.asyncio
-async def test_pause_turn_flushed_when_round_budget_exhausted(monkeypatch):
-    """If every round returns pause_turn, the accumulated paused blocks
-    must still be committed at loop exit. Otherwise the next user turn
-    would stack on an orphan user message and 400 the API."""
+async def test_every_paused_round_is_committed_as_it_arrives(monkeypatch):
+    """Each pause_turn round commits its own blocks, so exhausting the
+    round budget needs no flush at loop exit — nothing is left
+    uncommitted to flush."""
     captured = _install_stream_factory(monkeypatch, _AlwaysPauseStream)
     client = _make_client()
     await _drain(client.stream_turn("hello"))
 
-    # MAX_TOOL_ROUNDS rounds, all pause_turn.
     assert len(captured) == claude_client_module.MAX_TOOL_ROUNDS
-    # Despite the exhaustion, history must end with the assistant turn
-    # so the next user turn stays user/assistant-alternating.
     roles = [m["role"] for m in client._messages]
-    assert roles == ["user", "assistant"]
+    assert roles == ["user"] + ["assistant"] * claude_client_module.MAX_TOOL_ROUNDS
 
 
 # Anthropic's cache minimum for Sonnet is 1024 tokens — pad the system prompt
@@ -1202,9 +1207,11 @@ async def test_cancelled_stream_appends_partial_assistant_turn(monkeypatch):
     assert "Hello there" in store.persisted[1][2][0]["text"]
 
 
-async def test_cancelled_stream_with_no_output_uses_placeholder(monkeypatch):
-    """If the cancel arrives before any tokens streamed, the partial
-    assistant turn is a placeholder ellipsis so history stays valid."""
+async def test_cancelled_stream_with_no_output_commits_nothing(monkeypatch):
+    """A cancel before any token streamed has nothing worth recording.
+    History keeps the lone user message, and the next user message
+    merges with it — which the API accepts, so the old "…" placeholder
+    turn was cosmetic (tests/test_claude_api_contract.py)."""
     gate = asyncio.Event()
     _install_stream_factory(
         monkeypatch, lambda captured, kw: _CancellableStream(captured, kw, gate, [])
@@ -1223,9 +1230,7 @@ async def test_cancelled_stream_with_no_output_uses_placeholder(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    last = client._messages[-1]
-    assert last["role"] == "assistant"
-    assert last["content"] == [{"type": "text", "text": "…"}]
+    assert [m["role"] for m in client._messages] == ["user"]
 
 
 class _RaisingStream:
@@ -1369,3 +1374,497 @@ async def test_stream_error_commits_partial_assistant_turn(monkeypatch):
 
     # SQLite mirrors in-memory: both turns persisted.
     assert [r for _, r, _ in store.persisted] == ["user", "assistant"]
+
+
+# --- stranded server tool uses ------------------------------------------
+#
+# A `pause_turn` round ends with a `server_tool_use` that has no result —
+# that's what the server is still working on. Keeping it is required to
+# resume; keeping it once a user turn follows makes the API 400 the whole
+# request (both verified against the live API).
+
+_PAUSED_CONTENT = [
+    {"type": "text", "text": "Let me look that up."},
+    {
+        "type": "server_tool_use",
+        "id": "srvtoolu_outer",
+        "name": "code_execution",
+        "input": {"code": "web_search(...)"},
+    },
+    {
+        "type": "server_tool_use",
+        "id": "srvtoolu_nested",
+        "name": "web_search",
+        "input": {"query": "x"},
+        "caller": {"tool_id": "srvtoolu_outer", "type": "code_execution_20260120"},
+    },
+]
+
+
+def test_stranded_server_tool_use_is_kept_when_it_trails_the_history():
+    """The resume case: the paused content is the last message, and its
+    trailing orphan is what tells the server where to pick up."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    messages = [
+        {"role": "user", "content": "what's the weather?"},
+        {"role": "assistant", "content": _PAUSED_CONTENT},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+def test_stranded_server_tool_use_is_dropped_once_a_turn_follows():
+    """The barge-in case: a user turn after the paused content would
+    otherwise 400 the request, and every later turn of the session."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    messages = [
+        {"role": "user", "content": "what's the weather?"},
+        {"role": "assistant", "content": _PAUSED_CONTENT},
+        {"role": "user", "content": "never mind"},
+    ]
+    out = _drop_stranded_server_tool_uses(messages)
+
+    # The nested call goes with the outer one it was made from.
+    assert out[1]["content"] == [{"type": "text", "text": "Let me look that up."}]
+    # Everything else is untouched, and the input list isn't mutated.
+    assert out[0] == messages[0] and out[2] == messages[2]
+    assert len(messages[1]["content"]) == 3
+
+
+def test_answered_server_tool_uses_survive():
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    content = [
+        {
+            "type": "server_tool_use",
+            "id": "srvtoolu_a",
+            "name": "web_search",
+            "input": {},
+        },
+        {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_a", "content": []},
+    ]
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": content},
+        {"role": "user", "content": "and then?"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+def test_message_of_only_a_stranded_call_keeps_a_placeholder():
+    """The API rejects an empty content list."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_a",
+                    "name": "web_search",
+                    "input": {},
+                }
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages)[1]["content"] == [
+        {"type": "text", "text": "…"}
+    ]
+
+
+def test_client_tool_use_is_left_to_the_pairing_pass():
+    """Client `tool_use` gets an interrupted `tool_result` instead —
+    that repair is `_pair_orphan_tool_uses`'s job, not this one."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    content = [{"type": "tool_use", "id": "toolu_a", "name": "set_timer", "input": {}}]
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": content},
+        {"role": "user", "content": "never mind"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+@pytest.mark.asyncio
+async def test_next_turn_after_a_paused_round_omits_the_stranded_call(fake_anthropic):
+    """End-to-end: a session whose history carries a paused round (a
+    barge-in mid-web-search, or a resumed one from SQLite) must still
+    send a request the API accepts. The stranded call is filtered from
+    the send-time view while stored history stays verbatim."""
+    client = _make_client()
+    client.load_history(
+        [
+            {"role": "user", "content": "what's the weather?"},
+            {"role": "assistant", "content": _PAUSED_CONTENT},
+        ]
+    )
+
+    await _drain(client.stream_turn("never mind, say hi"))
+
+    sent = fake_anthropic["client"].captured[0]["messages"]
+    assistant_blocks = sent[1]["content"]
+    assert [b["type"] for b in assistant_blocks] == ["text"]
+
+    # Stored history is untouched — SQLite stays the verbatim record.
+    assert len(client._messages[1]["content"]) == 3
+
+
+class _PauseThenHangStream(_FakeStream):
+    """Pauses on the first round, then hangs mid-stream on the resume so
+    the test can cancel exactly where a barge-in would land."""
+
+    def __init__(
+        self,
+        captured: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        round_counter: dict[str, int],
+        gate: asyncio.Event,
+    ):
+        super().__init__(captured, kwargs)
+        self._round = round_counter
+        self._gate = gate
+
+    @property
+    def text_stream(self):
+        first = self._round["n"] == 0
+        gate = self._gate
+
+        async def _iter():
+            if first:
+                yield "Let me look that up. "
+                return
+            yield "The answer is"
+            await gate.wait()  # block until the test cancels us
+            yield "never reached"
+
+        return _iter()
+
+    async def get_final_message(self):
+        assert self._round["n"] == 0
+        self._round["n"] += 1
+        return SimpleNamespace(
+            content=[
+                SimpleNamespace(type="text", text="Let me look that up. "),
+                SimpleNamespace(
+                    type="server_tool_use",
+                    id="srvtoolu_paused",
+                    name="web_search",
+                    input={"query": "x"},
+                ),
+            ],
+            stop_reason="pause_turn",
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=2,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_paused_round_is_persisted_before_the_resume_request(monkeypatch):
+    """The paused round is committed on arrival, so it reaches SQLite
+    even if the resume never completes."""
+    round_counter = {"n": 0}
+    gate = asyncio.Event()
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda cap, kw: _PauseThenHangStream(cap, kw, round_counter, gate),
+    )
+    store = _RecordingStore()
+    client = _make_client(store=store, session_id="sess-1")
+
+    task = asyncio.create_task(_drain(client.stream_turn("what's the weather?")))
+    for _ in range(100):
+        if len(captured) == 2:
+            break
+        await asyncio.sleep(0)
+    assert len(captured) == 2, "expected the resume request to have gone out"
+
+    # The paused round hit SQLite before the resume was sent.
+    assert [r for _, r, _ in store.persisted] == ["user", "assistant"]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_barge_in_during_a_resume_keeps_both_rounds(monkeypatch):
+    """Cancelling mid-resume leaves the committed paused round plus a
+    partial for what the resume got through — and the next request must
+    still be one the API accepts, so the paused round's unanswered
+    server_tool_use is filtered out of the send-time view."""
+    round_counter = {"n": 0}
+    gate = asyncio.Event()
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda cap, kw: _PauseThenHangStream(cap, kw, round_counter, gate),
+    )
+    client = _make_client()
+
+    task = asyncio.create_task(_drain(client.stream_turn("what's the weather?")))
+    for _ in range(100):
+        if len(captured) == 2:
+            break
+        await asyncio.sleep(0)
+    # Let the resume stream its first delta before cancelling.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    roles = [m["role"] for m in client._messages]
+    assert roles == ["user", "assistant", "assistant"]
+    # The paused round kept its blocks verbatim, including the orphan.
+    assert [b["type"] for b in client._messages[1]["content"]] == [
+        "text",
+        "server_tool_use",
+    ]
+    assert client._messages[2]["content"] == [{"type": "text", "text": "The answer is"}]
+
+    # The send-time view of the next turn drops the stranded call.
+    sent = _drop_stranded_server_tool_uses(client._messages)
+    assert [b["type"] for b in sent[1]["content"]] == ["text"]
+
+
+# A resumed pause_turn's continuation *starts* with the result for the
+# tool use the previous message left unanswered — verified against the
+# live API. With per-round commits the pair therefore spans two
+# assistant messages, so "answered" has to be judged conversation-wide.
+_RESUME_CONTINUATION = [
+    {
+        "type": "code_execution_tool_result",
+        "tool_use_id": "srvtoolu_paused",
+        "content": [],
+    },
+    {"type": "text", "text": "It's 54 and raining."},
+]
+
+
+def test_a_use_answered_by_the_next_message_is_not_stranded():
+    """The pair spans two messages after a resume. Dropping the call
+    here would strand its result instead — the mirror-image 400."""
+    messages = [
+        {"role": "user", "content": "what's the weather?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me look."},
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_paused",
+                    "name": "code_execution",
+                    "input": {},
+                },
+            ],
+        },
+        {"role": "assistant", "content": _RESUME_CONTINUATION},
+        {"role": "user", "content": "thanks"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+def test_only_the_still_unanswered_call_is_dropped_across_rounds():
+    """Two paused rounds: the first round's call gets answered by the
+    second, whose own trailing call never does. Only the latter goes."""
+    messages = [
+        {"role": "user", "content": "research this"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_one",
+                    "name": "code_execution",
+                    "input": {},
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "code_execution_tool_result",
+                    "tool_use_id": "srvtoolu_one",
+                    "content": [],
+                },
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_two",
+                    "name": "code_execution",
+                    "input": {},
+                },
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    out = _drop_stranded_server_tool_uses(messages)
+
+    # Round 1's call survives: round 2 answers it.
+    assert out[1] == messages[1]
+    # Round 2's own trailing call goes, and its result for round 1 stays.
+    assert [b["type"] for b in out[2]["content"]] == ["code_execution_tool_result"]
+
+
+def test_a_result_addressed_to_a_dropped_call_goes_with_it():
+    """Nothing may be left pointing at a block that isn't there."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_outer",
+                    "name": "code_execution",
+                    "input": {},
+                },
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_nested",
+                    "name": "web_search",
+                    "input": {},
+                    "caller": {
+                        "tool_id": "srvtoolu_outer",
+                        "type": "code_execution_20260120",
+                    },
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_nested",
+                    "content": [],
+                    "caller": {
+                        "tool_id": "srvtoolu_outer",
+                        "type": "code_execution_20260120",
+                    },
+                },
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    # The outer call is never answered, so the whole group goes and the
+    # message falls back to the placeholder.
+    assert _drop_stranded_server_tool_uses(messages)[1]["content"] == [
+        {"type": "text", "text": "…"}
+    ]
+
+
+def test_non_dict_blocks_do_not_crash_the_filter():
+    """Stored history is JSON cast in unchecked by `load_history`."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                "not a block",
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_a",
+                    "name": "web_search",
+                    "input": {},
+                },
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages)[1]["content"] == ["not a block"]
+
+
+class _PauseThenResolveStream(_FakeStream):
+    """A faithful resume: round 1 pauses with an unanswered call, and
+    round 2 opens with that call's result, the way the live API does."""
+
+    def __init__(self, captured, kwargs, round_counter):
+        super().__init__(captured, kwargs)
+        self._round = round_counter
+
+    @property
+    def text_stream(self):
+        first = self._round["n"] == 0
+
+        async def _iter():
+            yield "Let me look. " if first else "It's raining."
+
+        return _iter()
+
+    async def get_final_message(self):
+        first = self._round["n"] == 0
+        self._round["n"] += 1
+        usage = SimpleNamespace(
+            input_tokens=10,
+            output_tokens=2,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        if first:
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(type="text", text="Let me look. "),
+                    SimpleNamespace(
+                        type="server_tool_use",
+                        id="srvtoolu_paused",
+                        name="code_execution",
+                        input={},
+                    ),
+                ],
+                stop_reason="pause_turn",
+                usage=usage,
+            )
+        return SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="code_execution_tool_result",
+                    tool_use_id="srvtoolu_paused",
+                    content=[],
+                    model_dump=lambda: {
+                        "type": "code_execution_tool_result",
+                        "tool_use_id": "srvtoolu_paused",
+                        "content": [],
+                    },
+                ),
+                SimpleNamespace(type="text", text="It's raining."),
+            ],
+            stop_reason="end_turn",
+            usage=usage,
+        )
+
+
+@pytest.mark.asyncio
+async def test_turn_after_a_completed_pause_keeps_the_answered_call(monkeypatch):
+    """End-to-end for the two-message pair: the paused round's call is
+    answered by the continuation round, so the next turn must send both
+    — dropping the call would strand its result and 400."""
+    round_counter = {"n": 0}
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda cap, kw: _PauseThenResolveStream(cap, kw, round_counter),
+    )
+    client = _make_client()
+    await _drain(client.stream_turn("what's the weather?"))
+    round_counter["n"] = 1  # keep the follow-up on the resolved branch
+    await _drain(client.stream_turn("thanks"))
+
+    sent = captured[-1]["messages"]
+    paused_msg = next(
+        m
+        for m in sent
+        if m["role"] == "assistant"
+        and any(b.get("type") == "server_tool_use" for b in m["content"])
+    )
+    ids = [b["id"] for b in paused_msg["content"] if b.get("type") == "server_tool_use"]
+    assert ids == ["srvtoolu_paused"]
+    # And its result is still there, in the following message.
+    assert any(
+        b.get("tool_use_id") == "srvtoolu_paused"
+        for m in sent
+        if isinstance(m["content"], list)
+        for b in m["content"]
+    )
