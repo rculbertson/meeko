@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 
-from meeko.claude_client import DEFAULT_WEB_SEARCH_MAX_USES
 from meeko.sessions import default_db_path as _default_db_path
 
 # Profile keys from when the profile name selected a hardcoded idle mode.
@@ -163,11 +162,13 @@ class MeekoConfig:
     # claude
     compaction_trigger_tokens: int = 150000
     web_search_enabled: bool = True
-    # Sourced from claude_client so the reasoning for the number lives
-    # next to the tool it configures — and so this can't drift from it.
-    # This is the default that actually applies: `main.py` passes
-    # `config.web_search_max_uses` into the client.
-    web_search_max_uses: int = DEFAULT_WEB_SEARCH_MAX_USES
+    # These two repeat `claude_client`'s constants rather than importing
+    # them: config is a leaf that components import, and reaching into
+    # the client would pull the Anthropic SDK in behind it. This is the
+    # default that actually applies — `main.py` passes
+    # `config.web_search_max_uses` into the client — so
+    # `test_defaults_match_the_client_constants` pins the two together.
+    web_search_max_uses: int = 4
     # location
     latitude: float | None = None
     longitude: float | None = None
