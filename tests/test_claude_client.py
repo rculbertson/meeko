@@ -1369,3 +1369,141 @@ async def test_stream_error_commits_partial_assistant_turn(monkeypatch):
 
     # SQLite mirrors in-memory: both turns persisted.
     assert [r for _, r, _ in store.persisted] == ["user", "assistant"]
+
+
+# --- stranded server tool uses ------------------------------------------
+#
+# A `pause_turn` round ends with a `server_tool_use` that has no result —
+# that's what the server is still working on. Keeping it is required to
+# resume; keeping it once a user turn follows makes the API 400 the whole
+# request (both verified against the live API).
+
+_PAUSED_CONTENT = [
+    {"type": "text", "text": "Let me look that up."},
+    {
+        "type": "server_tool_use",
+        "id": "srvtoolu_outer",
+        "name": "code_execution",
+        "input": {"code": "web_search(...)"},
+    },
+    {
+        "type": "server_tool_use",
+        "id": "srvtoolu_nested",
+        "name": "web_search",
+        "input": {"query": "x"},
+        "caller": {"tool_id": "srvtoolu_outer", "type": "code_execution_20260120"},
+    },
+]
+
+
+def test_stranded_server_tool_use_is_kept_when_it_trails_the_history():
+    """The resume case: the paused content is the last message, and its
+    trailing orphan is what tells the server where to pick up."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    messages = [
+        {"role": "user", "content": "what's the weather?"},
+        {"role": "assistant", "content": _PAUSED_CONTENT},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+def test_stranded_server_tool_use_is_dropped_once_a_turn_follows():
+    """The barge-in case: a user turn after the paused content would
+    otherwise 400 the request, and every later turn of the session."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    messages = [
+        {"role": "user", "content": "what's the weather?"},
+        {"role": "assistant", "content": _PAUSED_CONTENT},
+        {"role": "user", "content": "never mind"},
+    ]
+    out = _drop_stranded_server_tool_uses(messages)
+
+    # The nested call goes with the outer one it was made from.
+    assert out[1]["content"] == [{"type": "text", "text": "Let me look that up."}]
+    # Everything else is untouched, and the input list isn't mutated.
+    assert out[0] == messages[0] and out[2] == messages[2]
+    assert len(messages[1]["content"]) == 3
+
+
+def test_answered_server_tool_uses_survive():
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    content = [
+        {
+            "type": "server_tool_use",
+            "id": "srvtoolu_a",
+            "name": "web_search",
+            "input": {},
+        },
+        {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_a", "content": []},
+    ]
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": content},
+        {"role": "user", "content": "and then?"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+def test_message_of_only_a_stranded_call_keeps_a_placeholder():
+    """The API rejects an empty content list."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_a",
+                    "name": "web_search",
+                    "input": {},
+                }
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages)[1]["content"] == [
+        {"type": "text", "text": "…"}
+    ]
+
+
+def test_client_tool_use_is_left_to_the_pairing_pass():
+    """Client `tool_use` gets an interrupted `tool_result` instead —
+    that repair is `_pair_orphan_tool_uses`'s job, not this one."""
+    from meeko.claude_client import _drop_stranded_server_tool_uses
+
+    content = [{"type": "tool_use", "id": "toolu_a", "name": "set_timer", "input": {}}]
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": content},
+        {"role": "user", "content": "never mind"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+@pytest.mark.asyncio
+async def test_next_turn_after_a_paused_round_omits_the_stranded_call(fake_anthropic):
+    """End-to-end: a session whose history carries a paused round (a
+    barge-in mid-web-search, or a resumed one from SQLite) must still
+    send a request the API accepts. The stranded call is filtered from
+    the send-time view while stored history stays verbatim."""
+    client = _make_client()
+    client.load_history(
+        [
+            {"role": "user", "content": "what's the weather?"},
+            {"role": "assistant", "content": _PAUSED_CONTENT},
+        ]
+    )
+
+    await _drain(client.stream_turn("never mind, say hi"))
+
+    sent = fake_anthropic["client"].captured[0]["messages"]
+    assistant_blocks = sent[1]["content"]
+    assert [b["type"] for b in assistant_blocks] == ["text"]
+
+    # Stored history is untouched — SQLite stays the verbatim record.
+    assert len(client._messages[1]["content"]) == 3

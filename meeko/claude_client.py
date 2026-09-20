@@ -309,6 +309,9 @@ def _with_cache_breakpoint(
 _INTERRUPTED_TOOL_RESULT = (
     "Not run: the turn was interrupted before this tool finished."
 )
+# Stand-in for an assistant message whose only content was a server
+# tool call the server never finished. The API rejects empty content.
+_INTERRUPTED_TEXT = "…"
 
 
 def _tool_use_ids(content: object) -> list[str]:
@@ -339,6 +342,89 @@ def _interrupted_results(ids: list[str]) -> list[BetaToolResultBlockParam]:
         }
         for i in ids
     ]
+
+
+def _drop_stranded_server_tool_uses(
+    messages: list[BetaMessageParam],
+) -> list[BetaMessageParam]:
+    """Return a copy of `messages` with unanswered *server* tool uses
+    dropped from every assistant message except the last one.
+
+    A `pause_turn` round ends mid-tool: its last block is a
+    `server_tool_use` with no result, because that's what the server is
+    still working on. Two cases, and they pull in opposite directions:
+
+    - **Resuming** that round, the paused content is the final message
+      and the trailing orphan is exactly what tells the server where to
+      pick up. Verified live: resume succeeds with it, and the docs say
+      the API detects the trailing `server_tool_use`.
+    - **Anything else following it** — a barge-in, an error, or the
+      round-budget flush, each of which commits the paused blocks and
+      then takes a new user turn — makes the API reject the request
+      outright::
+
+        `code_execution` tool use with id srvtoolu_... was found
+        without a corresponding `code_execution_tool_result` block
+
+      and, because SQLite stores history verbatim, it would reject
+      every `--resume` of that session too.
+
+    So the rule is positional: keep the orphan when it trails the whole
+    conversation, drop it once something follows. A server result can't
+    be fabricated the way `_pair_orphan_tool_uses` fabricates a client
+    one, so dropping is the only repair available. Blocks nested under a
+    dropped call (`caller.tool_id`) go with it, since they'd otherwise
+    point at a tool use that is no longer there. Like the client-side
+    pairing, this happens on the send-time view only, so stored history
+    stays verbatim.
+    """
+    out: list[BetaMessageParam] = []
+    last = len(messages) - 1
+    for i, msg in enumerate(messages):
+        content = msg["content"]
+        if i == last or msg["role"] != "assistant" or not isinstance(content, list):
+            out.append(msg)
+            continue
+        stranded = _stranded_server_tool_use_ids(content)
+        if not stranded:
+            out.append(msg)
+            continue
+        kept = [
+            b
+            for b in content
+            if not _belongs_to_stranded(cast(dict[str, Any], b), stranded)
+        ]
+        # The API rejects an empty content list, so a message that was
+        # nothing but a stranded call keeps a placeholder.
+        trimmed: list[BetaContentBlockParam] = kept or [
+            {"type": "text", "text": _INTERRUPTED_TEXT}
+        ]
+        out.append({"role": "assistant", "content": trimmed})
+    return out
+
+
+def _stranded_server_tool_use_ids(content: list[Any]) -> set[str]:
+    uses = {
+        b["id"]
+        for b in content
+        if isinstance(b, dict) and b.get("type") == "server_tool_use"
+    }
+    answered = {
+        b["tool_use_id"]
+        for b in content
+        if isinstance(b, dict)
+        and isinstance(b.get("type"), str)
+        and b["type"].endswith("tool_result")
+        and "tool_use_id" in b
+    }
+    return uses - answered
+
+
+def _belongs_to_stranded(block: dict[str, Any], stranded: set[str]) -> bool:
+    if block.get("id") in stranded:
+        return True
+    caller = block.get("caller")
+    return isinstance(caller, dict) and caller.get("tool_id") in stranded
 
 
 def _pair_orphan_tool_uses(
@@ -497,7 +583,9 @@ class ClaudeClient:
                     ),
                     tools=self._tools,
                     messages=_with_cache_breakpoint(
-                        _pair_orphan_tool_uses(request_messages)
+                        _pair_orphan_tool_uses(
+                            _drop_stranded_server_tool_uses(request_messages)
+                        )
                     ),
                     betas=[COMPACTION_BETA],
                     context_management=self._context_management,
