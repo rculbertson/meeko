@@ -1,5 +1,5 @@
-# pyright and pytest run at pre-push; without this, `pre-commit install` would
-# only install the pre-commit hook and those gates would never run locally.
+# pyright, the complexity gate and pytest run at pre-push; without this, `pre-commit install`
+# would only install the pre-commit hook and those gates would never run locally.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
@@ -17,6 +17,16 @@ repos:
       - id: pyright
         name: pyright
         entry: uv run pyright
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      # Ahead of pytest deliberately: hooks run in declaration order, and this
+      # takes a second where the suite takes fifteen. Same all-of-meeko/
+      # reasoning as pyright — the average threshold is a whole-package metric,
+      # so per-file invocation would compute the wrong number.
+      - id: complexity
+        name: complexity
+        entry: ./scripts/check_complexity.sh
         language: system
         pass_filenames: false
         stages: [pre-push]

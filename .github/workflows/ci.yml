@@ -43,6 +43,12 @@ jobs:
       - name: Pyright
         run: uv run pyright
 
+      # Thresholds and rationale live in the script, shared with the pre-push
+      # hook. Runs before the test suite so a complexity failure comes back in
+      # a second rather than after full coverage.
+      - name: Complexity
+        run: ./scripts/check_complexity.sh
+
       - name: Test
         run: uv run pytest --cov-report=xml
         env:

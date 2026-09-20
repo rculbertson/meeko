@@ -71,16 +71,34 @@ Neither CI nor the maintainer can validate every path. Changes to `meeko/leds.py
 uv run ruff check .
 uv run ruff format .
 uv run pyright
+./scripts/check_complexity.sh
 ```
 
-Ruff runs on commit, and pyright (basic mode, over `meeko/`) and pytest run on push, via the hooks installed above; the same checks run in CI.
+Ruff runs on commit, and pyright (basic mode, over `meeko/`), the complexity gate and pytest run on push, via the hooks installed above; the same checks run in CI.
+
+### Complexity
+
+`scripts/check_complexity.sh` wraps [xenon](https://github.com/rubik/xenon) and holds the thresholds, so CI and the pre-push hook can't drift apart. It fails if any block in `meeko/` exceeds cyclomatic complexity 20 (radon rank D or worse), or if the package average exceeds **3.1** (currently 2.82 over 289 blocks).
+
+Two different jobs. The **absolute** ceiling is deliberately loose, because cyclomatic complexity can't tell a flat dispatch ladder from a branch buried in a hot loop and scores the two identically — so it only catches unambiguous runaway, and judgment calls are left to review. The **average** is the ratchet, and it has to be numeric to be worth anything: xenon's letter-grade `--max-average A` runs all the way to CC 5.0, which would let 42 more CC-20 functions through while the build stayed green. Re-pin it downward as the real average improves.
+
+Neither gate catches everything, and it's worth knowing the hole: because the average is a per-block mean, inlining two small helpers back into their caller can leave both checks green while the code gets worse. Complexity gates catch decay in bulk; they don't replace review.
+
+`tests/` is excluded. Test functions are linear setup-then-assert and score badly for reasons that don't indicate a maintenance problem.
+
+To see where a change landed rather than just whether it passed:
+
+```bash
+uv run radon cc -s -n C meeko/            # blocks ranked C or worse (silent when clean)
+uv run radon cc meeko --total-average -n F  # just the package average
+```
 
 ## Git workflow
 
 - Implement features on a new branch, never directly on `main`.
 - Branch naming: `<github-username>/<short-description>`.
 - Commit when a discrete, working piece is complete; each commit should run correctly on its own.
-- Before opening a PR, commit outstanding changes and run `gh pr create` — ruff runs on commit and the test suite runs on push.
+- Before opening a PR, commit outstanding changes and run `gh pr create` — ruff runs on commit, and the test suite, pyright and the complexity gate run on push.
 
 ## AI-assisted contributions
 
