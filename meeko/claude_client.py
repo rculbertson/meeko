@@ -47,10 +47,25 @@ DEFAULT_COMPACTION_TRIGGER_TOKENS = 150000
 # Anthropic-hosted web search server tool. When enabled, Sonnet decides
 # per-turn whether to issue searches; results are inlined into the
 # assistant message as `server_tool_use` + `web_search_tool_result`
-# blocks without any client-side dispatch. `max_uses` caps worst-case
-# latency and cost per turn ($10 per 1k searches).
+# blocks without any client-side dispatch.
+#
+# `max_uses` reads like a quality dial but behaves as a circuit breaker.
+# Searches sometimes hang server-side, and the budget covers *attempts*,
+# so a loose cap buys retries of a search that is already timing out.
+# Measured on one two-part question, time to Meeko's first spoken
+# sentence, runs interleaved so load drift hit both caps:
+#
+#     cap  runs  time to first sentence     outcome
+#       2     1  24.3s                      ran out; said so out loud
+#       4     3  17.2 / 22.3 / 25.3s        clean answer every time
+#       8     3  291.9 / 296.5 / 395.5s     clean answer, 5-7 min late
+#
+# Hence 4: enough attempts to finish a two-part question, few enough to
+# trip before the user gives up. Raising it is not a latency/quality
+# trade — it is strictly worse. Absolute times drift a lot with
+# Anthropic-side load; the ordering is what holds. See issue #118.
 DEFAULT_WEB_SEARCH_ENABLED = True
-DEFAULT_WEB_SEARCH_MAX_USES = 2
+DEFAULT_WEB_SEARCH_MAX_USES = 4
 
 
 def _context_management(trigger_tokens: int) -> BetaContextManagementConfigParam:

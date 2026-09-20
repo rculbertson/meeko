@@ -43,7 +43,7 @@ def test_defaults_match_historical_env_defaults(tmp_path: Path):
         "wake_word_disabled": False,
         "compaction_trigger_tokens": 150000,
         "web_search_enabled": True,
-        "web_search_max_uses": 2,
+        "web_search_max_uses": 4,
     }
     assert {k: getattr(cfg, k) for k in expected} == expected
     assert cfg.db_path.name == "meeko.db"
