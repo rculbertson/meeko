@@ -342,7 +342,10 @@ def _pair_orphan_tool_uses(
 
     The API rejects any request containing an unanswered tool_use, so one
     orphan would 400 every later turn of the session — and, because SQLite
-    stores history verbatim, every `--resume` of it too. A cancel can
+    stores history verbatim, every `--resume` of it too. (This one is a
+    real API rule, unlike the role-alternation the rest of this module
+    used to assume; it does not yet cover an unanswered *server* tool
+    use, which a `pause_turn` round leaves behind.) A cancel can
     leave one behind: barge-in while a tool is running, or while
     stream_turn is suspended at `yield tail` between committing the
     tool_use and dispatching it. Rather than patch each exit path, the
@@ -445,26 +448,30 @@ class ClaudeClient:
         await self._persist("user", user_text)
 
         # When a round returns stop_reason=pause_turn (long-running
-        # server tool like web_search), we must replay the partial
-        # assistant content back to the API to resume. But the API
-        # requires user/assistant alternation across rounds, so we
-        # can't commit the partial as its own message and then commit
-        # the continuation as a second assistant message — the next
-        # user turn would produce [..., assistant, assistant, user]
-        # and 400. Carry the paused content here, send it as a
-        # transient assistant message on the next round, and merge it
-        # with the continuation's blocks into a single committed turn
-        # once the server finishes.
+        # server tool like web_search), the partial assistant content
+        # has to go back to the API to resume. We carry it here, send
+        # it as a transient assistant message on the next round, and
+        # merge it with the continuation into a single committed turn.
+        #
+        # NOTE: the original reason for the carry was wrong. It assumed
+        # [..., assistant, assistant, user] would 400 on strict
+        # alternation; the API in fact combines consecutive same-role
+        # turns into one (verified in
+        # tests/test_claude_api_contract.py). Committing each round as
+        # it arrives works and is simpler. What *is* real: a paused
+        # round ends with an unanswered `server_tool_use`, which 400s
+        # if a user message follows it — so a send-time repair has to
+        # drop that trailing orphan before the carry can go away.
         paused_blocks: list[BetaContentBlockParam] = []
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
             ttft_ms: int | None = None
             buffer = ""
-            # Track text streamed in this round so a barge-in cancel can
-            # commit a partial assistant message and keep alternating
-            # user/assistant history valid. Reset per round — completed
-            # rounds commit full assistant_blocks via the normal path.
+            # Track text streamed in this round so a barge-in cancel
+            # can commit what Claude actually got through. Reset per
+            # round — completed rounds commit full assistant_blocks via
+            # the normal path.
             streamed_text = ""
 
             request_messages = self._messages
@@ -512,7 +519,7 @@ class ClaudeClient:
             if final.stop_reason == "pause_turn":
                 # Server-side tool still working. Carry the partial
                 # content forward; defer the commit until the resume
-                # completes so history stays user/assistant-alternating.
+                # completes, so the turn lands as one assistant message.
                 paused_blocks = combined_blocks
                 tail = buffer.strip()
                 if tail:
@@ -536,8 +543,7 @@ class ClaudeClient:
 
         # Exhausted the round budget. If we exited mid-pause (every
         # round returned pause_turn) the paused content was never
-        # committed — flush it now so the next user turn doesn't stack
-        # on an orphan user message and 400 the API.
+        # committed — flush it now so the turn is recorded at all.
         if paused_blocks:
             await self._commit_full_assistant(paused_blocks)
         logger.warning("Exceeded MAX_TOOL_ROUNDS without a text response")
@@ -552,12 +558,14 @@ class ClaudeClient:
         # network/API error (Exception) — leaves the user message
         # already appended at the top of stream_turn without a paired
         # assistant message. Commit a partial assistant turn so the
-        # next user turn doesn't produce two consecutive user messages
-        # and trip a 400 from the API. Empty stream gets a "…"
-        # placeholder rather than an empty text block (which the API
-        # rejects). If we cancelled mid-resume after a pause_turn,
-        # prepend the carried blocks so the partial covers the whole
-        # paused turn.
+        # record shows how far Claude got before the interruption, and
+        # so the next turn reads as a reply to something. Two
+        # consecutive user messages would NOT 400 — the API combines
+        # same-role turns (tests/test_claude_api_contract.py) — so the
+        # "…" placeholder for an empty stream is cosmetic, not a
+        # correctness requirement. If we cancelled mid-resume after a
+        # pause_turn, prepend the carried blocks so the partial covers
+        # the whole paused turn.
         text = streamed_text.strip() or "…"
         partial: list[BetaContentBlockParam] = list(paused_blocks or [])
         partial.append({"type": "text", "text": text})
@@ -581,9 +589,11 @@ class ClaudeClient:
         # Commit the full assistant turn to history *before* the caller
         # yields the trailing partial sentence. If the consumer cancels
         # while suspended at `yield tail`, GeneratorExit fires outside
-        # stream_turn's try/except — without this ordering, the next
-        # user turn would stack on an orphaned user message and 400
-        # from the API. SQLite is the verbatim source of truth — strip
+        # stream_turn's try/except, and with the commit after the yield
+        # the turn would go unrecorded. (It would not 400: the API
+        # combines consecutive same-role turns — see
+        # tests/test_claude_api_contract.py.) SQLite is the verbatim
+        # source of truth — strip
         # the server's compaction summary before persisting so on-disk
         # transcripts never carry derived state. The block stays
         # in-memory so the next turn's `messages=` payload includes it
