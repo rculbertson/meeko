@@ -117,6 +117,8 @@ Meeko calls the Claude API directly — not via Deepgram's managed LLM. This is 
 
 **Web search.** `ClaudeClient` exposes Anthropic's `web_search_20260209` server tool to Sonnet, gated by `[claude] web_search_enabled` (default `true`) and capped at `[claude] web_search_max_uses` calls per turn (default `2`). Web search is a server-side tool: the model invokes it inside the same streaming turn, emits `server_tool_use` and `web_search_tool_result` blocks, and we round-trip those blocks in the in-memory message array so the cached prefix stays valid. Result blocks are normalized before SQLite persistence so the on-disk transcript stays compact.
 
+`web_search_20260209` also does *dynamic filtering*: Sonnet calls `web_search` from inside a `code_execution` server tool rather than at the top level. Those nested blocks carry a `caller` field (`{"tool_id": <the code_execution id>, "type": "code_execution_20260120"}`) tying them to the call that made them, and `_serialize_block` **must preserve it**. Without `caller` the API can't match the nested searches to their `code_execution` and rejects the request with `` `code_execution` tool use with id ... was found without a corresponding `code_execution_tool_result` block ``. That kills the *next* turn of the session, not the search turn itself — and, since SQLite stores history verbatim, every `--resume` of it too. `tests/test_claude_api_contract.py` covers this end to end.
+
 ### 4.4 Deepgram TTS (Aura-2)
 
 Used for speech synthesis. Text is streamed to the TTS WebSocket as Claude generates tokens, and audio is played back in real time with sub-200ms latency to first audio byte. The Aura-2 voice id is per-profile (`voice = "mars"`, `"andromeda"`, etc.) — see §4.7.
