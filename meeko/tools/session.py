@@ -265,13 +265,18 @@ class _ListCriteria(NamedTuple):
 
 
 def _text_arg(args: dict, key: str) -> str | None:
-    """One tool argument as text, with blank read as absent.
+    """One tool argument as text, with blank or null read as absent.
 
     Sonnet fills these in from speech, so they're coerced rather than
     trusted: JSON can hand us a number, and a dictated field can arrive
-    as whitespace.
+    as whitespace. An explicit `null` means the same as omitting the
+    field — without that check `str(None)` would make it the literal
+    "None", which reads as a search term or an unparseable date.
     """
-    return str(args.get(key, "")).strip() or None
+    value = args.get(key)
+    if value is None:
+        return None
+    return str(value).strip() or None
 
 
 def _parse_list_args(args: dict) -> _ListCriteria | str:
