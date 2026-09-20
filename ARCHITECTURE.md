@@ -161,7 +161,6 @@ Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/he
 Meeko runs under one of several **profiles** defined in `[profiles.<name>]` tables in `meeko.toml`. A profile is a (persona, voice, idle-timing) bundle:
 
 - `prompt` — the system prompt that defines the persona (required)
-- `wake_word` — wake-phrase label, advisory only; the ONNX model in `[wake_word]` determines the phrase Meeko actually listens for (required)
 - `voice` — Aura-2 voice id (optional; defaults to `asteria`)
 - `description` — one line telling Sonnet when to switch to this profile (optional)
 - `idle_timeout_seconds`, `idle_prompt`, `idle_close_seconds`, `idle_close_text`, `post_wake_timeout_seconds`

@@ -81,7 +81,7 @@ Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[cl
 | TOML key       | Env var              | Default              | Description                                                                 |
 |----------------|----------------------|----------------------|-----------------------------------------------------------------------------|
 | `log_level`    | `MEEKO_LOG_LEVEL`    | `INFO`               | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` logs conversation content — see [Privacy](#privacy). |
-| `log_target`   | `MEEKO_LOG_TARGET`   | unset (stderr)       | Set to `file` to log to `meeko.log` (rotating, 5 MB × 3 files), relative to the working directory. |
+| `log_target`   | `MEEKO_LOG_TARGET`   | unset (stderr)       | Set to `file` to log to `meeko.log` (rotating at 5 MB, keeping 3 older files), relative to the working directory. |
 | `db_path`      | `MEEKO_DB_PATH`      | `~/.local/share/meeko/meeko.db` | SQLite database location for sessions and transcripts (honors `$XDG_DATA_HOME`). |
 | `led_disabled` | `MEEKO_LED_DISABLED` | `false`              | Skip LED control. Auto-disabled when the XVF3800 isn't found.               |
 
