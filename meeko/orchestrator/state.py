@@ -46,7 +46,9 @@ class StateManager:
 
     def set(self, new: State) -> None:
         if new != self._state:
-            logger.debug("[state] %s → %s", self._state.name, new.name)
+            # Content-free, one line per transition: this is the trace
+            # that makes a journal at the default INFO level readable.
+            logger.info("[state] %s → %s", self._state.name, new.name)
             self._state = new
         self._leds.set_state(self._STATE_TO_LED[new])
 

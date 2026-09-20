@@ -230,13 +230,18 @@ async def _fetch_guarded(kind: str, fetch: Awaitable[dict[str, Any]]) -> dict[st
     try:
         return await fetch
     except (httpx.HTTPError, ValueError) as exc:
+        # The message and traceback of an httpx error embed the request
+        # URL, whose query string carries the coordinates — the home
+        # location, or wherever the user asked about. Only the exception
+        # type and (for HTTP errors) the status code are safe at INFO.
+        response = getattr(exc, "response", None)
         logger.warning(
-            "Weather %s fetch failed (%s): %s",
+            "Weather %s fetch failed (%s%s)",
             kind,
             type(exc).__name__,
-            exc or "(no message)",
-            exc_info=True,
+            f", HTTP {response.status_code}" if response is not None else "",
         )
+        logger.debug("Weather %s fetch failure detail", kind, exc_info=True)
         raise _FriendlyError(
             "Sorry, I couldn't reach the weather service right now."
         ) from None

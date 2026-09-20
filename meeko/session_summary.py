@@ -162,9 +162,10 @@ async def summarize_session(
         title = parsed["title"]
         summary = parsed["summary"]
     except json.JSONDecodeError, KeyError, TypeError:
-        logger.warning(
-            "summarize_session: invalid JSON for %s; raw=%r", session_id, raw[:500]
-        )
+        # The raw response paraphrases the conversation, so it goes to
+        # debug; the warning itself stays at INFO-visible level.
+        logger.warning("summarize_session: invalid JSON for %s", session_id)
+        logger.debug("summarize_session: %s raw=%r", session_id, raw[:500])
         return
 
     try:
@@ -180,7 +181,8 @@ async def summarize_session(
         )
         return
 
-    logger.info("summarize_session: wrote summary for %s (title=%r)", session_id, title)
+    logger.info("summarize_session: wrote summary for %s", session_id)
+    logger.debug("summarize_session: %s title=%r", session_id, title)
 
 
 # Startup backfill can find many untitled sessions at once (e.g. after a

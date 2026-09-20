@@ -129,5 +129,7 @@ async def test_failed_announcement_is_logged_and_the_timer_cleaned_up(caplog):
         task = mgr._timers["pasta"][0]
         await task  # would raise RuntimeError before the fix
 
-    assert "Timer 'pasta' announcement failed" in caplog.text
+    assert "Timer announcement failed" in caplog.text
+    # The label is user-chosen and stays out of the system log.
+    assert "pasta" not in caplog.text
     assert mgr.list_timers() == "No active timers."

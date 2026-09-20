@@ -42,7 +42,11 @@ class ToolDispatcher:
 
     async def dispatch(self, name: str, args: dict) -> str:
         """Look up the handler for `name` and invoke it with `args`."""
-        logger.info("Function call: %s(%s)", name, args)
+        # Arguments carry conversation content (place names, timer
+        # labels, session search queries), so only the tool name is
+        # logged at INFO.
+        logger.info("Function call: %s", name)
+        logger.debug("Function call args: %s(%s)", name, args)
         handler = self._handlers.get(name)
         if handler is None:
             logger.warning("Unknown function call: %s", name)

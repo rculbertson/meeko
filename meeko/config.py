@@ -145,7 +145,7 @@ class MeekoConfig:
     historical env-var defaults so unset == prior behavior."""
 
     # system
-    log_level: str = "DEBUG"
+    log_level: str = "INFO"
     log_target: str | None = None  # None = stderr; "file" = rotating file
     db_path: Path = field(default_factory=_default_db_path)
     led_disabled: bool = False

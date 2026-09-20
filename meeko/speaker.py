@@ -89,7 +89,9 @@ class Speaker:
                     async for sentence in texts:
                         if not sentence:
                             continue
-                        logger.info("[assistant] %s", sentence)
+                        # Conversation content: debug only, so it stays out of
+                        # the system log at the default INFO level.
+                        logger.debug("[assistant] %s", sentence)
                         inner: asyncio.Queue = asyncio.Queue()
                         tts_tasks.append(asyncio.create_task(tts_into(sentence, inner)))
                         await outer.put(inner)

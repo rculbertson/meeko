@@ -91,7 +91,7 @@ class TimerManager:
     ) -> None:
         try:
             await asyncio.sleep(duration_seconds)
-            logger.info("Timer '%s' expired", label)
+            logger.debug("Timer '%s' expired", label)
             if custom_label:
                 message = f"The {duration_display} {custom_label} timer is done!"
             else:
@@ -103,13 +103,15 @@ class TimerManager:
                     # Log it here: an exception escaping this task would only
                     # surface as "Task exception was never retrieved" whenever
                     # the task happened to be garbage-collected.
-                    logger.exception("Timer '%s' announcement failed", label)
+                    # Label omitted: user-chosen, so DEBUG-only like the
+                    # expiry line above.
+                    logger.exception("Timer announcement failed")
+                    logger.debug("Failed announcement was for timer %r", label)
             else:
-                logger.warning(
-                    "Timer '%s' expired but no speak_callback is configured", label
-                )
+                logger.warning("Timer expired but no speak_callback is configured")
+                logger.debug("Unannounced timer was %r", label)
         except asyncio.CancelledError:
-            logger.info("Timer '%s' cancelled", label)
+            logger.debug("Timer '%s' cancelled", label)
         finally:
             # Only remove our own entry. Re-setting a label cancels this
             # task and stores its replacement under the same key before

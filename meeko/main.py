@@ -69,7 +69,14 @@ LOG_FILE = "meeko.log"
 logger = logging.getLogger("meeko")
 
 
-def setup_logging(log_level: str = "DEBUG", log_target: str | None = None) -> None:
+def setup_logging(log_level: str = "INFO", log_target: str | None = None) -> None:
+    """Configure the `meeko` logger.
+
+    The default level is INFO on purpose: transcripts, assistant replies
+    and tool arguments are logged at DEBUG, so under systemd (stderr →
+    journald) nothing a user said or heard reaches the system log unless
+    the operator explicitly opts in with `log_level = "DEBUG"`.
+    """
     formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
     if log_target == "file":
@@ -81,7 +88,7 @@ def setup_logging(log_level: str = "DEBUG", log_target: str | None = None) -> No
 
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    logger.setLevel(getattr(logging, log_level.upper(), logging.DEBUG))
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
     # Route asyncio's own warnings through the same handler so they get
     # Meeko's timestamp format and land in the rotating log file when

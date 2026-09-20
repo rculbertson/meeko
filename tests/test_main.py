@@ -43,7 +43,9 @@ def test_setup_logging_defaults_to_stream_handler(clean_logger):
     setup_logging()
     assert len(clean_logger.handlers) == 1
     assert isinstance(clean_logger.handlers[0], logging.StreamHandler)
-    assert clean_logger.level == logging.DEBUG
+    # INFO, not DEBUG: conversation content is logged at DEBUG and the
+    # stream handler's output is the system journal under systemd.
+    assert clean_logger.level == logging.INFO
 
 
 def test_setup_logging_file_target(monkeypatch, tmp_path, clean_logger):
@@ -55,9 +57,9 @@ def test_setup_logging_file_target(monkeypatch, tmp_path, clean_logger):
     clean_logger.handlers[0].close()
 
 
-def test_setup_logging_invalid_level_falls_back_to_debug(clean_logger):
+def test_setup_logging_invalid_level_falls_back_to_info(clean_logger):
     setup_logging(log_level="NOT_A_REAL_LEVEL")
-    assert clean_logger.level == logging.DEBUG
+    assert clean_logger.level == logging.INFO
 
 
 def test_main_drives_run_to_completion(monkeypatch):
@@ -1672,7 +1674,9 @@ async def test_endofturn_during_speaking_is_logged_as_echo(
     mode). The check lives in the puller — decided synchronously at
     observation time so it can't race with the worker."""
     _set_env(monkeypatch, tmp_path)
-    caplog.set_level(logging.INFO, logger="meeko")
+    # DEBUG: the transcript itself is privacy-sensitive and only
+    # logged at that level (see tests/test_logging_privacy.py).
+    caplog.set_level(logging.DEBUG, logger="meeko")
 
     async with _running_meeko(
         fake_profiles, stt=_QueueDrivenSTTClient("dg-test"), tts=_BlockingTTSClient()
