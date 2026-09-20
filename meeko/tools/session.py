@@ -26,8 +26,9 @@ load is requested, so Sonnet doesn't need to chain end_session first.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from meeko.sessions import UNTITLED
 from meeko.tools.dispatch import ToolDefinition
@@ -248,23 +249,48 @@ def _handle_new(manager: SessionManager) -> str:
     return "Starting a fresh session. Meeko will swap the context after this turn."
 
 
-async def _handle_list(args: dict, store: SessionStore | None) -> str:
-    query = str(args.get("query", "")).strip() or None
-    since_arg = str(args.get("since", "")).strip() or None
-    until_arg = str(args.get("until", "")).strip() or None
-    if not (query or since_arg or until_arg):
+class _ListCriteria(NamedTuple):
+    """A parsed `list_sessions` request.
+
+    `since`/`until` keep the caller's local `YYYY-MM-DD` strings for the
+    spoken description; `since_iso`/`until_iso` are the UTC bounds the
+    query compares against.
+    """
+
+    query: str | None
+    since: str | None
+    until: str | None
+    since_iso: str | None
+    until_iso: str | None
+
+
+def _text_arg(args: dict, key: str) -> str | None:
+    """One tool argument as text, with blank read as absent.
+
+    Sonnet fills these in from speech, so they're coerced rather than
+    trusted: JSON can hand us a number, and a dictated field can arrive
+    as whitespace.
+    """
+    return str(args.get(key, "")).strip() or None
+
+
+def _parse_list_args(args: dict) -> _ListCriteria | str:
+    """Parsed criteria, or the message to say back if the args don't work."""
+    query = _text_arg(args, "query")
+    since = _text_arg(args, "since")
+    until = _text_arg(args, "until")
+    if not (query or since or until):
         return "Please provide a search query or date range."
-    if store is None:
-        return "Session search is not available."
     try:
-        since_iso = _local_date_to_utc_iso(since_arg) if since_arg else None
-        until_iso = _local_date_to_utc_iso(until_arg) if until_arg else None
+        since_iso = _local_date_to_utc_iso(since) if since else None
+        until_iso = _local_date_to_utc_iso(until) if until else None
     except ValueError:
         return "Invalid date format. Use YYYY-MM-DD for `since` and `until`."
-    results = await store.search_sessions(query, since=since_iso, until=until_iso)
-    criteria = _describe_criteria(query, since_arg, until_arg)
-    if not results:
-        return f"No sessions found {criteria}."
+    return _ListCriteria(query, since, until, since_iso, until_iso)
+
+
+def _format_results(results: Sequence[Any], criteria: str) -> str:
+    """Render search hits as lines Sonnet can read back."""
     lines = [f"Found {len(results)} session(s) {criteria}:"]
     for i, r in enumerate(results, 1):
         title = r["title"] or UNTITLED
@@ -275,17 +301,28 @@ async def _handle_list(args: dict, store: SessionStore | None) -> str:
     return "\n".join(lines)
 
 
+async def _handle_list(args: dict, store: SessionStore) -> str:
+    parsed = _parse_list_args(args)
+    if isinstance(parsed, str):
+        return parsed
+    results = await store.search_sessions(
+        parsed.query, since=parsed.since_iso, until=parsed.until_iso
+    )
+    criteria = _describe_criteria(parsed.query, parsed.since, parsed.until)
+    if not results:
+        return f"No sessions found {criteria}."
+    return _format_results(results, criteria)
+
+
 async def _handle_load(
     args: dict,
     manager: SessionManager,
-    store: SessionStore | None,
+    store: SessionStore,
     current_session_id: str | None,
 ) -> str:
     session_id = str(args.get("id", "")).strip()
     if not session_id:
         return "Please provide a session id."
-    if store is None:
-        return "Session loading is not available."
     row = await store.get_session(session_id)
     if row is None:
         return (
@@ -308,7 +345,7 @@ async def handle(
     args: dict,
     *,
     manager: SessionManager,
-    store: SessionStore | None = None,
+    store: SessionStore,
     current_session_id: str | None = None,
 ) -> str:
     if fn_name == "end_session":
