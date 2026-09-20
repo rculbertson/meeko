@@ -276,13 +276,17 @@ class LedController:
 
         A failing action is logged and the loop carries on — one bad USB
         transfer shouldn't cost the session its LEDs. "close" is handled
-        before that guard so a failure there can't swallow the stop
-        signal and strand the thread (`_apply_off` swallows its own
-        errors, so it can't raise anyway).
+        before that guard and keeps its own: a failure while turning the
+        ring off is logged, but the thread still stops. Sharing the
+        guard would make it look like a failed command, and the loop
+        would run on until `close()`'s join timed out.
         """
         action = self._queue.get()
         if action.kind == "close":
-            self._apply_off()
+            try:
+                self._apply_off()
+            except Exception:
+                logger.exception("LED: turning the ring off failed")
             return False
         try:
             if action.kind == "state":

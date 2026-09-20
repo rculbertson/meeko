@@ -383,9 +383,9 @@ def test_worker_survives_a_failing_action() -> None:
         controller.close()
 
 
-def test_close_stops_the_worker_even_if_the_device_is_failing() -> None:
-    """The stop signal must not be swallowed by a failing transfer, or
-    the thread outlives shutdown and `close()` blocks on its join."""
+def test_close_completes_when_every_transfer_is_failing() -> None:
+    """Turning the ring off is best-effort: `_apply_off` swallows USB
+    errors, so a dying device can't block shutdown."""
     fake = FlakyUsbDevice()
     controller = _make_controller(fake)
     _start_and_wait(fake, controller)
@@ -396,6 +396,29 @@ def test_close_stops_the_worker_even_if_the_device_is_failing() -> None:
     assert controller._thread is not None
     assert not controller._thread.is_alive()
     assert controller.enabled is False
+
+
+def test_close_stops_the_worker_even_if_applying_off_raises() -> None:
+    """The stop signal must not be mistaken for a failed command.
+
+    `close` is handled before the per-action `try`, so a raise here ends
+    the thread instead of being logged as a command failure and leaving
+    the loop running until `close()`'s join times out. Stubbing
+    `_apply_off` is what makes the two guards separable: it swallows USB
+    errors itself, so a failing device alone never reaches this path.
+    """
+    fake = FakeUsbDevice()
+    controller = _make_controller(fake)
+    _start_and_wait(fake, controller)
+
+    def boom() -> None:
+        raise OSError("usb gone")
+
+    controller._apply_off = boom  # type: ignore[method-assign]
+    controller.close()
+
+    assert controller._thread is not None
+    assert not controller._thread.is_alive()
 
 
 def test_startup_failure_leaves_the_worker_serving_actions() -> None:
