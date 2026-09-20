@@ -34,7 +34,19 @@ DEEPGRAM_API_KEY=your-deepgram-api-key
 ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
-That's all the setup required. On first run Meeko creates a config file at `~/.config/meeko/meeko.toml` (copied from the bundled `meeko/default_config.toml`) and starts with working defaults; edit that file to add personal settings like your home location.
+On first run Meeko creates a config file at `~/.config/meeko/meeko.toml` (copied from the bundled `meeko/default_config.toml`) and starts with working defaults; edit that file to add personal settings like your home location.
+
+The defaults assume a ReSpeaker XVF3800. **On a Mac's built-in mic and speakers**, add an `[audio]` table to that file — the bundled default ships none:
+
+```toml
+[audio]
+input_channels = 1
+mute_mic_while_speaking = true
+```
+
+`input_channels = 1` matches the built-in mic's single channel (the default `2` is the ReSpeaker's), and `mute_mic_while_speaking` stands in for the hardware echo cancellation a Mac doesn't have, so Meeko doesn't hear itself talk.
+
+The first run that uses the wake word also downloads openWakeWord's preprocessor models (~6.7 MB) into its own cache. If you're deploying to a device with no internet, run `uv run python -m meeko.wake_word` on a connected machine first to pre-populate it — see [models/README.md](models/README.md).
 
 ## Running
 
@@ -44,7 +56,7 @@ uv run python -m meeko.main
 
 Say "Hey Meeko" to wake it. Press `Ctrl+C` to quit.
 
-Two flags are available for working with prior sessions from the terminal:
+Prior sessions can also be worked with from the terminal:
 
 ```
 uv run python -m meeko.main --list-sessions        # print prior sessions and exit
@@ -69,7 +81,7 @@ Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[cl
 | TOML key       | Env var              | Default              | Description                                                                 |
 |----------------|----------------------|----------------------|-----------------------------------------------------------------------------|
 | `log_level`    | `MEEKO_LOG_LEVEL`    | `INFO`               | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` logs conversation content — see [Privacy](#privacy). |
-| `log_target`   | `MEEKO_LOG_TARGET`   | unset (stderr)       | Set to `file` to log to `meeko.log` (rotating, 5 MB × 3 files).             |
+| `log_target`   | `MEEKO_LOG_TARGET`   | unset (stderr)       | Set to `file` to log to `meeko.log` (rotating, 5 MB × 3 files), relative to the working directory. |
 | `db_path`      | `MEEKO_DB_PATH`      | `~/.local/share/meeko/meeko.db` | SQLite database location for sessions and transcripts (honors `$XDG_DATA_HOME`). |
 | `led_disabled` | `MEEKO_LED_DISABLED` | `false`              | Skip LED control. Auto-disabled when the XVF3800 isn't found.               |
 
@@ -87,7 +99,7 @@ Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[cl
 
 | TOML key    | Env var                       | Default                  | Description                                                                |
 |-------------|-------------------------------|--------------------------|----------------------------------------------------------------------------|
-| `model`     | `MEEKO_WAKE_WORD_MODEL`       | `models/hey_meeko.onnx`  | Path to the openWakeWord ONNX model.                                       |
+| `model`     | `MEEKO_WAKE_WORD_MODEL`       | `models/hey_meeko.onnx`  | Path to the openWakeWord ONNX model. The default is relative to the working directory; use an absolute path to run Meeko from elsewhere. See [models/README.md](models/README.md) to train your own phrase. |
 | `threshold` | `MEEKO_WAKE_WORD_THRESHOLD`   | `0.96`                   | Confidence threshold (0–1). Lower = more sensitive, more false wakes.      |
 | `disabled`  | `MEEKO_WAKE_WORD_DISABLED`    | `false`                  | Skip the wake gate; start directly in `LISTENING` (useful for development).|
 
@@ -116,21 +128,22 @@ Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Cla
 
 ### Profiles
 
-`[profiles.<name>]` blocks define personas. The name is free-form: the default config ships `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing), and you can add more — each is just another block, and "switch to <name> mode" switches to it by voice. Asking for the kind of interaction a profile's `description` covers works too ("let's have a long conversation"), and "what modes are available?" lists the profiles and which one is active. How a profile behaves when you go quiet is set entirely by its `idle_*` keys, not its name. A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required. Each profile has:
+`[profiles.<name>]` blocks define personas. The name is free-form: the default config ships `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing), and you can add more — each is just another block, and "switch to <name> mode" switches to it by voice. Asking for the kind of interaction a profile's `description` covers works too ("let's have a long conversation"), and "what modes are available?" lists the profiles and which one is active. How a profile behaves when you go quiet is set entirely by its `idle_*` keys, not its name. A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required.
+
+Within a profile, `prompt` is the only required key; every other key below is optional and falls back to the default shown.
 
 | Key                           | Description                                                                        |
 |-------------------------------|------------------------------------------------------------------------------------|
-| `wake_word`                   | Wake-phrase label (advisory; the ONNX model determines the actual phrase).         |
-| `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`. Optional; defaults to `asteria`.          |
-| `prompt`                      | The system prompt that defines the persona.                                        |
-| `description`                 | One line telling Claude when to switch to this profile. Optional but recommended; without it Claude only has the name to go on. |
+| `prompt`                      | **Required.** The system prompt that defines the persona.                          |
+| `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`. Defaults to `asteria`.                   |
+| `description`                 | One line telling Claude when to switch to this profile. Recommended; without it Claude only has the name to go on. |
 | `idle_timeout_seconds`        | silence after a turn before Meeko acts (check-in or close). Default `5.0`. Non-positive disables. |
 | `idle_prompt`                 | spoken check-in after that silence. Unset (default) skips straight to closing.     |
 | `idle_close_seconds`          | further silence after `idle_prompt` before closing. Only used with `idle_prompt`. Default `20.0`. |
 | `idle_close_text`             | spoken just before the session closes. Unset (default) closes silently.            |
 | `post_wake_timeout_seconds`   | silence window after the wake word, before the first turn; on expiry the session closes silently and returns to IDLE. Default `15.0`. Non-positive disables. |
 
-With no `idle_*` keys a profile closes silently after 5 seconds; the shipped `conversation` profile sets all four to get its spoken check-in. See the bundled `meeko/default_config.toml` for working examples of both profiles.
+With no `idle_*` keys a profile closes silently after 5 seconds; the shipped `conversation` profile sets all four `idle_*` keys to get its spoken check-in. See the bundled `meeko/default_config.toml` for working examples of both profiles.
 
 ## Notes for the ReSpeaker XVF3800
 
@@ -176,7 +189,7 @@ To have Meeko start automatically when your Pi boots — and keep running across
    cp scripts/meeko.service ~/.config/systemd/user/
    ```
 
-   The unit assumes the repo is at `~/meeko`. Edit `WorkingDirectory=` if you cloned somewhere else.
+   The unit assumes the repo is at `~/meeko`. Edit `WorkingDirectory=` if you cloned somewhere else — it is what the default wake-word model path and the `meeko.log` file resolve against.
 
 2. Enable lingering so your user manager starts at boot without a login session:
 
@@ -201,12 +214,13 @@ Useful commands:
 
 ## Privacy
 
-Meeko stores all conversation transcripts and summaries locally in SQLite on your device — nothing is uploaded to a third-party assistant cloud. Two external services do see data per turn:
+Meeko stores all conversation transcripts and summaries locally in SQLite on your device — nothing is uploaded to a third-party assistant cloud. Three external services see data:
 
 - **Deepgram** receives microphone audio for speech-to-text, and the text of Claude's responses for text-to-speech.
 - **Anthropic** receives the conversation history sent to Claude.
+- **Open-Meteo** receives coordinates when you ask about the weather — your `[location]` home coordinates, or the ones Claude supplies for a place you named. No account or API key is involved, and nothing else about the conversation is sent.
 
-Both are accessed with your own API keys; their handling of your data is governed by their respective terms of service.
+Deepgram and Anthropic are accessed with your own API keys; their handling of your data is governed by their respective terms of service.
 
 ### Logs
 
