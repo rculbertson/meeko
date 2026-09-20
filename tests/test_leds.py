@@ -339,3 +339,80 @@ def test_close_turns_leds_off() -> None:
     # Last call should be EFFECT_OFF from the close action.
     last = fake.snapshot()[-1]
     assert last == _vendor_out_call(12, bytes([EFFECT_OFF]))
+
+
+# --- worker resilience ----------------------------------------------------
+
+
+class FlakyUsbDevice(FakeUsbDevice):
+    """Fake device that can be told to fail the next N transfers.
+
+    Stands in for a transient USB error — the reason every action the
+    worker runs is wrapped rather than allowed to kill the thread.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next = 0
+
+    def ctrl_transfer(self, *args, **kwargs) -> None:  # type: ignore[override]
+        if self.fail_next > 0:
+            self.fail_next -= 1
+            raise OSError("usb write failed")
+        super().ctrl_transfer(*args, **kwargs)
+
+
+def test_worker_survives_a_failing_action() -> None:
+    """One bad transfer must not cost the session its LEDs: the worker
+    logs it and keeps serving later actions."""
+    fake = FlakyUsbDevice()
+    controller = _make_controller(fake)
+    _start_and_wait(fake, controller)
+    try:
+        fake.fail_next = 1
+        controller.set_state(LedState.LISTENING)  # this one blows up
+        controller.set_state(LedState.SPEAKING)
+        _wait_for_calls(fake, _STARTUP_WRITES + 2, timeout=2.0)
+
+        # SPEAKING was applied despite the failure before it.
+        calls = fake.snapshot()[_STARTUP_WRITES:]
+        assert calls[-1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
+        assert calls[-2] == _vendor_out_call(16, struct.pack("<I", PALETTE.speaking))
+        assert controller._thread is not None and controller._thread.is_alive()
+    finally:
+        controller.close()
+
+
+def test_close_stops_the_worker_even_if_the_device_is_failing() -> None:
+    """The stop signal must not be swallowed by a failing transfer, or
+    the thread outlives shutdown and `close()` blocks on its join."""
+    fake = FlakyUsbDevice()
+    controller = _make_controller(fake)
+    _start_and_wait(fake, controller)
+
+    fake.fail_next = 100  # every remaining transfer raises, including OFF
+    controller.close()
+
+    assert controller._thread is not None
+    assert not controller._thread.is_alive()
+    assert controller.enabled is False
+
+
+def test_startup_failure_leaves_the_worker_serving_actions() -> None:
+    """A USB error during the one-time configuration is logged, not
+    fatal — later state changes still reach the ring.
+
+    One failure is enough to abort configuration: all three writes share
+    a single `try`, so the first one that raises skips the rest.
+    """
+    fake = FlakyUsbDevice()
+    fake.fail_next = 1
+    controller = _make_controller(fake)
+    controller.start()
+    try:
+        controller.set_state(LedState.SPEAKING)
+        _wait_for_calls(fake, 2, timeout=2.0)
+        calls = fake.snapshot()
+        assert calls[-1] == _vendor_out_call(12, bytes([EFFECT_SOLID]))
+    finally:
+        controller.close()
