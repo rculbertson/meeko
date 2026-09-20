@@ -105,7 +105,8 @@ class TurnWorker:
                 continue
             text = item
             assert isinstance(text, str)
-            logger.info("[user] %s", text)
+            # Conversation content: debug only (see setup_logging).
+            logger.debug("[user] %s", text)
             self._state.set(State.PROCESSING)
             t_turn = time.perf_counter()
             # Run the turn as a sub-task so request_barge_in() can

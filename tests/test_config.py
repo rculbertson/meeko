@@ -30,7 +30,7 @@ def test_defaults_match_historical_env_defaults(tmp_path: Path):
     cfg = load_config(tmp_path / "missing.toml")
 
     expected = {
-        "log_level": "DEBUG",
+        "log_level": "INFO",
         "log_target": None,
         "led_disabled": False,
         "input_channels": 2,

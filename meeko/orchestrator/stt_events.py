@@ -103,7 +103,8 @@ class SttEventRouter:
             # No preceding StartOfTurn triggered barge-in (otherwise
             # state would already be LISTENING). With AEC on, this is
             # residual echo; drop it.
-            logger.info("[echo?] %s", text)
+            # Transcript content: debug only (see setup_logging).
+            logger.debug("[echo?] %s", text)
             return
         # Speech is over — drop back to the steady "ready" cyan. Without
         # this the ring stays on the brighter "hearing you" cue for the

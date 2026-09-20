@@ -91,7 +91,7 @@ class TimerManager:
     ) -> None:
         try:
             await asyncio.sleep(duration_seconds)
-            logger.info("Timer '%s' expired", label)
+            logger.debug("Timer '%s' expired", label)
             if custom_label:
                 message = f"The {duration_display} {custom_label} timer is done!"
             else:
@@ -109,7 +109,7 @@ class TimerManager:
                     "Timer '%s' expired but no speak_callback is configured", label
                 )
         except asyncio.CancelledError:
-            logger.info("Timer '%s' cancelled", label)
+            logger.debug("Timer '%s' cancelled", label)
         finally:
             # Only remove our own entry. Re-setting a label cancels this
             # task and stores its replacement under the same key before

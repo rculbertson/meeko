@@ -76,7 +76,7 @@ Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[cl
 
 | TOML key       | Env var              | Default              | Description                                                                 |
 |----------------|----------------------|----------------------|-----------------------------------------------------------------------------|
-| `log_level`    | `MEEKO_LOG_LEVEL`    | `DEBUG`              | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`.                                 |
+| `log_level`    | `MEEKO_LOG_LEVEL`    | `INFO`               | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` logs conversation content — see [Privacy](#privacy). |
 | `log_target`   | `MEEKO_LOG_TARGET`   | unset (stderr)       | Set to `file` to log to `meeko.log` (rotating, 5 MB × 3 files).             |
 | `db_path`      | `MEEKO_DB_PATH`      | `~/.local/share/meeko/meeko.db` | SQLite database location for sessions and transcripts (honors `$XDG_DATA_HOME`). |
 | `led_disabled` | `MEEKO_LED_DISABLED` | `false`              | Skip LED control. Auto-disabled when the XVF3800 isn't found.               |
@@ -217,6 +217,12 @@ Meeko stores all conversation transcripts and summaries locally in SQLite on you
 - **Anthropic** receives the conversation history sent to Claude.
 
 Both are accessed with your own API keys; their handling of your data is governed by their respective terms of service.
+
+### Logs
+
+Conversation content — your transcribed speech, Claude's replies, tool arguments, and session titles — is logged at `DEBUG` only. The default `log_level` is `INFO`, so when Meeko runs under systemd (stderr goes to journald) none of it reaches the system journal; `journalctl --user-unit=meeko` shows state transitions, timings, and errors.
+
+Setting `log_level = "DEBUG"` (or `MEEKO_LOG_LEVEL=DEBUG`) turns that content logging on. Pair it with `log_target = "file"` to keep it in `meeko.log` instead of the journal, and remember journald retains what it captured until its own rotation — `journalctl --user --vacuum-time=1s` clears your user journal.
 
 ## Contributing
 
