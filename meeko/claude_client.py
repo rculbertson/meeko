@@ -81,6 +81,30 @@ def _web_search_tool(max_uses: int) -> BetaWebSearchTool20260209Param:
 _SENTENCE_END_RE = re.compile(r"(?<![A-Z])[.!?](?=\s+[A-Z])")
 
 
+def _with_caller(
+    serialized: BetaContentBlockParam, block: Any
+) -> BetaContentBlockParam:
+    """Carry a block's ``caller`` through serialization when it has one.
+
+    `web_search_20260209`'s dynamic filtering lets Sonnet call
+    `web_search` from *inside* `code_execution`; each nested block then
+    carries ``caller: {"tool_id": <the code_execution id>, ...}`` tying
+    it back to that call. Rebuilding the block from canonical fields
+    alone drops it, and the API then reads the outer `code_execution`'s
+    result as missing and 400s the whole request — both on a
+    `pause_turn` resume and on the next ordinary turn of the session.
+    Verified by replaying a captured paused turn with and without the
+    field: identical otherwise, 400 without it, accepted with it.
+    """
+    caller = getattr(block, "caller", None)
+    if caller is None:
+        return serialized
+    dumped = caller.model_dump() if hasattr(caller, "model_dump") else caller
+    merged = dict(cast(dict[str, Any], serialized))
+    merged["caller"] = dumped
+    return cast(BetaContentBlockParam, merged)
+
+
 def _serialize_block(block: Any) -> BetaContentBlockParam:
     """Serialize an assistant content block for replay in later turns.
 
@@ -98,23 +122,29 @@ def _serialize_block(block: Any) -> BetaContentBlockParam:
             "input": block.input,
         }
     if block.type == "server_tool_use":
-        return {
-            "type": "server_tool_use",
-            "id": block.id,
-            "name": block.name,
-            "input": block.input,
-        }
+        return _with_caller(
+            {
+                "type": "server_tool_use",
+                "id": block.id,
+                "name": block.name,
+                "input": block.input,
+            },
+            block,
+        )
     if block.type == "web_search_tool_result":
         # `content` can be either a list of web_search_result blocks
         # (success) or a single error dict (e.g. max_uses_exceeded).
         # Preserve whichever the server sent — `encrypted_content` on
         # each result is required for citation continuity in later
         # turns.
-        return {
-            "type": "web_search_tool_result",
-            "tool_use_id": block.tool_use_id,
-            "content": _serialize_web_search_content(block.content),
-        }
+        return _with_caller(
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": block.tool_use_id,
+                "content": _serialize_web_search_content(block.content),
+            },
+            block,
+        )
     if block.type == "compaction":
         return {"type": "compaction", "content": block.content}
     # Unrecognized block type: pass the SDK's own dump through unchecked.

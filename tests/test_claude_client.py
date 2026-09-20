@@ -686,6 +686,101 @@ def test_serialize_server_tool_use_strips_helper_fields():
     }
 
 
+# `web_search_20260209` runs dynamic filtering: Sonnet calls `web_search`
+# from inside `code_execution`, and each nested block carries a `caller`
+# pointing back at the code_execution tool_use. Dropping it on replay
+# makes the API report the outer code_execution's result as missing and
+# 400 the request — confirmed against the live API by replaying a
+# captured paused turn with and without the field.
+_CALLER = {"tool_id": "srvtoolu_outer", "type": "code_execution_20260120"}
+
+
+def _caller_obj():
+    """A `caller` the way the SDK hands it over: a model, not a dict."""
+    return SimpleNamespace(model_dump=lambda: dict(_CALLER))
+
+
+def test_serialize_server_tool_use_preserves_caller():
+    from meeko.claude_client import _serialize_block
+
+    block = SimpleNamespace(
+        type="server_tool_use",
+        id="srvtoolu_nested",
+        name="web_search",
+        input={"query": "tallest building in Dallas"},
+        caller=_caller_obj(),
+    )
+    assert _serialize_block(block) == {
+        "type": "server_tool_use",
+        "id": "srvtoolu_nested",
+        "name": "web_search",
+        "input": {"query": "tallest building in Dallas"},
+        "caller": _CALLER,
+    }
+
+
+def test_serialize_web_search_tool_result_preserves_caller():
+    from meeko.claude_client import _serialize_block
+
+    block = SimpleNamespace(
+        type="web_search_tool_result",
+        tool_use_id="srvtoolu_nested",
+        content=[],
+        caller=_caller_obj(),
+    )
+    serialized = _serialize_block(block)
+    assert serialized["caller"] == _CALLER
+    assert serialized["tool_use_id"] == "srvtoolu_nested"
+
+
+def test_serialize_caller_accepts_a_plain_dict():
+    """Blocks reloaded from SQLite come back as dicts, not SDK models."""
+    from meeko.claude_client import _serialize_block
+
+    block = SimpleNamespace(
+        type="server_tool_use",
+        id="srvtoolu_nested",
+        name="web_search",
+        input={},
+        caller=dict(_CALLER),
+    )
+    assert _serialize_block(block)["caller"] == _CALLER
+
+
+def test_serialize_nested_search_turn_keeps_every_caller():
+    """The real shape of a dynamic-filtering turn: an outer
+    code_execution with no caller of its own, then nested web_search
+    calls and their results, each tagged with the outer call's id. Every
+    tag must survive, or the replay 400s."""
+    from meeko.claude_client import _serialize_block
+
+    turn = [
+        SimpleNamespace(
+            type="server_tool_use",
+            id="srvtoolu_outer",
+            name="code_execution",
+            input={"code": "web_search(...)"},
+        ),
+        SimpleNamespace(
+            type="server_tool_use",
+            id="srvtoolu_nested",
+            name="web_search",
+            input={"query": "x"},
+            caller=_caller_obj(),
+        ),
+        SimpleNamespace(
+            type="web_search_tool_result",
+            tool_use_id="srvtoolu_nested",
+            content=[],
+            caller=_caller_obj(),
+        ),
+    ]
+    serialized = [_serialize_block(b) for b in turn]
+
+    assert "caller" not in serialized[0]
+    assert all(b["caller"] == _CALLER for b in serialized[1:])
+
+
 def test_serialize_web_search_tool_result_preserves_encrypted_content():
     from meeko.claude_client import _serialize_block
 
