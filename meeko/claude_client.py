@@ -464,6 +464,28 @@ def _belongs_to_stranded(block: object, stranded: set[str]) -> bool:
     return isinstance(caller, dict) and caller.get("tool_id") in stranded
 
 
+def _repaired(messages: list[BetaMessageParam]) -> list[BetaMessageParam]:
+    """The send-time view of `messages`, with both tool-pairing repairs.
+
+    Stored history is verbatim, so anything a cancelled turn left
+    half-finished is fixed here rather than in the exit paths that
+    created it. The two repairs are opposites because the tools are:
+    a client `tool_use` gets an interrupted result fabricated for it,
+    while a server one can only be dropped — we can't invent what the
+    server would have returned.
+
+    Pairing runs first because it can *append* a trailing user message,
+    and whether a stranded `server_tool_use` may stay depends on its
+    message still being last. Dropping first would decide that against
+    a list pairing then changes underneath it, re-exposing the orphan:
+    an assistant message holding both an unanswered `server_tool_use`
+    and an unanswered client `tool_use` would come out as the 400 shape
+    this function exists to prevent. Whether the API ever emits that
+    combination is unknown, which is reason enough not to depend on it.
+    """
+    return _drop_stranded_server_tool_uses(_pair_orphan_tool_uses(messages))
+
+
 def _pair_orphan_tool_uses(
     messages: list[BetaMessageParam],
 ) -> list[BetaMessageParam]:
@@ -485,27 +507,43 @@ def _pair_orphan_tool_uses(
     """
     out: list[BetaMessageParam] = []
     pending: list[str] = []
-    for original in messages:
-        msg: BetaMessageParam = original
-        if pending:
-            answered = _tool_result_ids(msg["content"])
-            filler = _interrupted_results([i for i in pending if i not in answered])
-            if filler and msg["role"] == "user":
-                # tool_result blocks must lead the user message they sit in.
-                content = msg["content"]
-                rest: list[BetaContentBlockParam] = (
-                    [{"type": "text", "text": content}]
-                    if isinstance(content, str)
-                    else list(content)
-                )
-                msg = {"role": "user", "content": [*filler, *rest]}
-            elif filler:
-                out.append({"role": "user", "content": filler})
+    for msg in messages:
+        filler = _missing_results(pending, msg)
+        if filler and msg["role"] == "user":
+            msg = _lead_with_results(msg, filler)
+        elif filler:
+            out.append({"role": "user", "content": filler})
         out.append(msg)
         pending = _tool_use_ids(msg["content"]) if msg["role"] == "assistant" else []
     if pending:
+        # The conversation ends on the tool_use itself — nothing followed
+        # it to carry the results.
         out.append({"role": "user", "content": _interrupted_results(pending)})
     return out
+
+
+def _missing_results(
+    pending: list[str], msg: BetaMessageParam
+) -> list[BetaToolResultBlockParam]:
+    """Interrupted results for whichever `pending` ids `msg` leaves unanswered."""
+    if not pending:
+        return []
+    answered = _tool_result_ids(msg["content"])
+    return _interrupted_results([i for i in pending if i not in answered])
+
+
+def _lead_with_results(
+    msg: BetaMessageParam, filler: list[BetaToolResultBlockParam]
+) -> BetaMessageParam:
+    """`msg` with `filler` in front — tool_result blocks must lead the
+    user message they sit in."""
+    content = msg["content"]
+    rest: list[BetaContentBlockParam] = (
+        [{"type": "text", "text": content}]
+        if isinstance(content, str)
+        else list(content)
+    )
+    return {"role": "user", "content": [*filler, *rest]}
 
 
 class ClaudeClient:
@@ -611,11 +649,7 @@ class ClaudeClient:
                         self._profile_prompt, self._latitude, self._longitude
                     ),
                     tools=self._tools,
-                    messages=_with_cache_breakpoint(
-                        _pair_orphan_tool_uses(
-                            _drop_stranded_server_tool_uses(self._messages)
-                        )
-                    ),
+                    messages=_with_cache_breakpoint(_repaired(self._messages)),
                     betas=[COMPACTION_BETA],
                     context_management=self._context_management,
                 ) as stream:
