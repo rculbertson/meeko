@@ -1633,3 +1633,238 @@ async def test_barge_in_during_a_resume_keeps_both_rounds(monkeypatch):
     # The send-time view of the next turn drops the stranded call.
     sent = _drop_stranded_server_tool_uses(client._messages)
     assert [b["type"] for b in sent[1]["content"]] == ["text"]
+
+
+# A resumed pause_turn's continuation *starts* with the result for the
+# tool use the previous message left unanswered — verified against the
+# live API. With per-round commits the pair therefore spans two
+# assistant messages, so "answered" has to be judged conversation-wide.
+_RESUME_CONTINUATION = [
+    {
+        "type": "code_execution_tool_result",
+        "tool_use_id": "srvtoolu_paused",
+        "content": [],
+    },
+    {"type": "text", "text": "It's 54 and raining."},
+]
+
+
+def test_a_use_answered_by_the_next_message_is_not_stranded():
+    """The pair spans two messages after a resume. Dropping the call
+    here would strand its result instead — the mirror-image 400."""
+    messages = [
+        {"role": "user", "content": "what's the weather?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me look."},
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_paused",
+                    "name": "code_execution",
+                    "input": {},
+                },
+            ],
+        },
+        {"role": "assistant", "content": _RESUME_CONTINUATION},
+        {"role": "user", "content": "thanks"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages) == messages
+
+
+def test_only_the_still_unanswered_call_is_dropped_across_rounds():
+    """Two paused rounds: the first round's call gets answered by the
+    second, whose own trailing call never does. Only the latter goes."""
+    messages = [
+        {"role": "user", "content": "research this"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_one",
+                    "name": "code_execution",
+                    "input": {},
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "code_execution_tool_result",
+                    "tool_use_id": "srvtoolu_one",
+                    "content": [],
+                },
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_two",
+                    "name": "code_execution",
+                    "input": {},
+                },
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    out = _drop_stranded_server_tool_uses(messages)
+
+    # Round 1's call survives: round 2 answers it.
+    assert out[1] == messages[1]
+    # Round 2's own trailing call goes, and its result for round 1 stays.
+    assert [b["type"] for b in out[2]["content"]] == ["code_execution_tool_result"]
+
+
+def test_a_result_addressed_to_a_dropped_call_goes_with_it():
+    """Nothing may be left pointing at a block that isn't there."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_outer",
+                    "name": "code_execution",
+                    "input": {},
+                },
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_nested",
+                    "name": "web_search",
+                    "input": {},
+                    "caller": {
+                        "tool_id": "srvtoolu_outer",
+                        "type": "code_execution_20260120",
+                    },
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_nested",
+                    "content": [],
+                    "caller": {
+                        "tool_id": "srvtoolu_outer",
+                        "type": "code_execution_20260120",
+                    },
+                },
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    # The outer call is never answered, so the whole group goes and the
+    # message falls back to the placeholder.
+    assert _drop_stranded_server_tool_uses(messages)[1]["content"] == [
+        {"type": "text", "text": "…"}
+    ]
+
+
+def test_non_dict_blocks_do_not_crash_the_filter():
+    """Stored history is JSON cast in unchecked by `load_history`."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                "not a block",
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_a",
+                    "name": "web_search",
+                    "input": {},
+                },
+            ],
+        },
+        {"role": "user", "content": "never mind"},
+    ]
+    assert _drop_stranded_server_tool_uses(messages)[1]["content"] == ["not a block"]
+
+
+class _PauseThenResolveStream(_FakeStream):
+    """A faithful resume: round 1 pauses with an unanswered call, and
+    round 2 opens with that call's result, the way the live API does."""
+
+    def __init__(self, captured, kwargs, round_counter):
+        super().__init__(captured, kwargs)
+        self._round = round_counter
+
+    @property
+    def text_stream(self):
+        first = self._round["n"] == 0
+
+        async def _iter():
+            yield "Let me look. " if first else "It's raining."
+
+        return _iter()
+
+    async def get_final_message(self):
+        first = self._round["n"] == 0
+        self._round["n"] += 1
+        usage = SimpleNamespace(
+            input_tokens=10,
+            output_tokens=2,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        if first:
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(type="text", text="Let me look. "),
+                    SimpleNamespace(
+                        type="server_tool_use",
+                        id="srvtoolu_paused",
+                        name="code_execution",
+                        input={},
+                    ),
+                ],
+                stop_reason="pause_turn",
+                usage=usage,
+            )
+        return SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="code_execution_tool_result",
+                    tool_use_id="srvtoolu_paused",
+                    content=[],
+                    model_dump=lambda: {
+                        "type": "code_execution_tool_result",
+                        "tool_use_id": "srvtoolu_paused",
+                        "content": [],
+                    },
+                ),
+                SimpleNamespace(type="text", text="It's raining."),
+            ],
+            stop_reason="end_turn",
+            usage=usage,
+        )
+
+
+@pytest.mark.asyncio
+async def test_turn_after_a_completed_pause_keeps_the_answered_call(monkeypatch):
+    """End-to-end for the two-message pair: the paused round's call is
+    answered by the continuation round, so the next turn must send both
+    — dropping the call would strand its result and 400."""
+    round_counter = {"n": 0}
+    captured = _install_stream_factory(
+        monkeypatch,
+        lambda cap, kw: _PauseThenResolveStream(cap, kw, round_counter),
+    )
+    client = _make_client()
+    await _drain(client.stream_turn("what's the weather?"))
+    round_counter["n"] = 1  # keep the follow-up on the resolved branch
+    await _drain(client.stream_turn("thanks"))
+
+    sent = captured[-1]["messages"]
+    paused_msg = next(
+        m
+        for m in sent
+        if m["role"] == "assistant"
+        and any(b.get("type") == "server_tool_use" for b in m["content"])
+    )
+    ids = [b["id"] for b in paused_msg["content"] if b.get("type") == "server_tool_use"]
+    assert ids == ["srvtoolu_paused"]
+    # And its result is still there, in the following message.
+    assert any(
+        b.get("tool_use_id") == "srvtoolu_paused"
+        for m in sent
+        if isinstance(m["content"], list)
+        for b in m["content"]
+    )

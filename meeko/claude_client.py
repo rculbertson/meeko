@@ -369,15 +369,27 @@ def _drop_stranded_server_tool_uses(
       and, because SQLite stores history verbatim, it would reject
       every `--resume` of that session too.
 
+    Both shapes were verified by replaying a captured paused turn
+    against the API. A pause needs the server's 10-iteration limit, so
+    no test can provoke one on demand; the offline tests model the
+    shapes instead.
+
     So the rule is positional: keep the orphan when it trails the whole
     conversation, drop it once something follows. A server result can't
     be fabricated the way `_pair_orphan_tool_uses` fabricates a client
     one, so dropping is the only repair available. Blocks nested under a
-    dropped call (`caller.tool_id`) go with it, since they'd otherwise
-    point at a tool use that is no longer there. Like the client-side
-    pairing, this happens on the send-time view only, so stored history
-    stays verbatim.
+    dropped call (`caller.tool_id`) and any result addressed to one go
+    with it, so no block is left pointing at something that isn't there.
+
+    "Answered" is judged across the whole conversation, not per message.
+    Since each round commits its own blocks, a paused round's
+    `server_tool_use` and the result the continuation round returns for
+    it land in two *different* assistant messages; scoping the check to
+    one message would call that use stranded and drop it out from under
+    its own result. Like the client-side pairing, this happens on the
+    send-time view only, so stored history stays verbatim.
     """
+    answered = _server_tool_result_ids(messages)
     out: list[BetaMessageParam] = []
     last = len(messages) - 1
     for i, msg in enumerate(messages):
@@ -385,14 +397,12 @@ def _drop_stranded_server_tool_uses(
         if i == last or msg["role"] != "assistant" or not isinstance(content, list):
             out.append(msg)
             continue
-        stranded = _stranded_server_tool_use_ids(content)
+        stranded = _stranded_ids(content, answered)
         if not stranded:
             out.append(msg)
             continue
         kept = [
-            b
-            for b in content
-            if not _belongs_to_stranded(cast(dict[str, Any], b), stranded)
+            b for b in cast(list[Any], content) if not _belongs_to_stranded(b, stranded)
         ]
         # The API rejects an empty content list, so a message that was
         # nothing but a stranded call keeps a placeholder.
@@ -403,25 +413,52 @@ def _drop_stranded_server_tool_uses(
     return out
 
 
-def _stranded_server_tool_use_ids(content: list[Any]) -> set[str]:
-    uses = {
-        b["id"]
-        for b in content
-        if isinstance(b, dict) and b.get("type") == "server_tool_use"
-    }
-    answered = {
-        b["tool_use_id"]
-        for b in content
-        if isinstance(b, dict)
-        and isinstance(b.get("type"), str)
-        and b["type"].endswith("tool_result")
-        and "tool_use_id" in b
-    }
-    return uses - answered
+def _server_tool_result_ids(messages: list[BetaMessageParam]) -> set[str]:
+    """Every `tool_use_id` a server-tool result addresses, conversation-wide."""
+    answered: set[str] = set()
+    for msg in messages:
+        for block in _blocks(msg["content"]):
+            block_type = block.get("type")
+            # "tool_result" (no prefix) is a client result — that side is
+            # `_pair_orphan_tool_uses`'s business, not this one.
+            if (
+                isinstance(block_type, str)
+                and block_type.endswith("tool_result")
+                and block_type != "tool_result"
+                and isinstance(block.get("tool_use_id"), str)
+            ):
+                answered.add(block["tool_use_id"])
+    return answered
 
 
-def _belongs_to_stranded(block: dict[str, Any], stranded: set[str]) -> bool:
-    if block.get("id") in stranded:
+def _stranded_ids(content: object, answered: set[str]) -> set[str]:
+    return {
+        block["id"]
+        for block in _blocks(content)
+        if block.get("type") == "server_tool_use"
+        and isinstance(block.get("id"), str)
+        and block["id"] not in answered
+    }
+
+
+def _blocks(content: object) -> list[dict[str, Any]]:
+    """The dict blocks of a message's content, ignoring anything else.
+
+    Stored history is JSON the type checker can't see into, and
+    `load_history` casts it in unchecked, so this guards rather than
+    assumes — as `_tool_use_ids` and `_with_cache_breakpoint` do.
+    """
+    if not isinstance(content, list):
+        return []
+    return [b for b in cast(list[Any], content) if isinstance(b, dict)]
+
+
+def _belongs_to_stranded(block: object, stranded: set[str]) -> bool:
+    """True for a stranded call itself, a block nested under one, or a
+    result addressed to one."""
+    if not isinstance(block, dict):
+        return False
+    if block.get("id") in stranded or block.get("tool_use_id") in stranded:
         return True
     caller = block.get("caller")
     return isinstance(caller, dict) and caller.get("tool_id") in stranded
@@ -547,8 +584,15 @@ class ClaudeClient:
         # with the paused content, which is what the server needs to
         # pick up. `_drop_stranded_server_tool_uses` handles the one
         # real constraint — the unanswered `server_tool_use` a paused
-        # round trails. All three shapes verified in
-        # tests/test_claude_api_contract.py.
+        # round trails.
+        #
+        # Evidence: the same-role combining is checked live in
+        # tests/test_claude_api_contract.py; the paused-round shapes
+        # were verified by replaying a captured `pause_turn` against
+        # the API (resume with the orphan succeeds, a user turn after
+        # it 400s, and a continuation opens with the paused call's
+        # result) — see the commit messages on this change, since a
+        # pause can't be triggered on demand from a test.
         for round_idx in range(MAX_TOOL_ROUNDS):
             api_start = time.perf_counter()
             ttft_ms: int | None = None
