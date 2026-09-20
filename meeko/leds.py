@@ -247,41 +247,70 @@ class LedController:
     def _worker(self) -> None:
         assert self._device is not None
         try:
-            # Some settings can be applied once at startup, so
-            # we don't have to set them on each state change.
-            # Brightness and speed apply only to breath effect, and
-            # are ignored by other effects, so we can leave them set.
-            # Wrapped in try/except like each action below: a
-            # transient USB error here shouldn't kill the worker and
-            # silently disable LEDs for the rest of the session.
-            try:
-                self._device.set_brightness(PALETTE.breath_brightness)
-                self._device.set_speed(PALETTE.breath_speed)
-                # We want gammify always on.
-                self._device.set_gammify(True)
-            except Exception:
-                logger.exception("LED: startup configuration failed")
-            while True:
-                action = self._queue.get()
-                try:
-                    if action.kind == "close":
-                        self._apply_off()
-                        return
-                    if action.kind == "state":
-                        assert action.state is not None
-                        self._apply_state(action.state)
-                        self._current_state = action.state
-                    elif action.kind == "error":
-                        interrupted = self._apply_error_flash()
-                        if not interrupted and self._current_state is not None:
-                            self._apply_state(self._current_state)
-                except Exception:
-                    logger.exception("LED: command failed")
-        finally:
-            try:
-                self._device.close()
-            except Exception:  # noqa: BLE001
+            self._configure_device()
+            while self._run_next_action():
                 pass
+        finally:
+            self._close_device()
+
+    def _configure_device(self) -> None:
+        """Apply the settings that only need setting once.
+
+        Brightness and speed affect the breath effect only and are
+        ignored by the others, so they can be set here and left alone.
+        Failures are logged rather than raised, as with each action
+        below: a transient USB error at startup shouldn't kill the
+        worker and leave the LEDs dark for the rest of the session.
+        """
+        assert self._device is not None
+        try:
+            self._device.set_brightness(PALETTE.breath_brightness)
+            self._device.set_speed(PALETTE.breath_speed)
+            # We want gammify always on.
+            self._device.set_gammify(True)
+        except Exception:
+            logger.exception("LED: startup configuration failed")
+
+    def _run_next_action(self) -> bool:
+        """Block for the next action and apply it. False means stop.
+
+        A failing action is logged and the loop carries on — one bad USB
+        transfer shouldn't cost the session its LEDs. "close" is handled
+        before that guard and keeps its own: a failure while turning the
+        ring off is logged, but the thread still stops. Sharing the
+        guard would make it look like a failed command, and the loop
+        would run on until `close()`'s join timed out.
+        """
+        action = self._queue.get()
+        if action.kind == "close":
+            try:
+                self._apply_off()
+            except Exception:
+                logger.exception("LED: turning the ring off failed")
+            return False
+        try:
+            if action.kind == "state":
+                assert action.state is not None
+                self._apply_state(action.state)
+                self._current_state = action.state
+            elif action.kind == "error":
+                self._apply_error()
+        except Exception:
+            logger.exception("LED: command failed")
+        return True
+
+    def _apply_error(self) -> None:
+        """Flash red, then restore the state it interrupted — unless a
+        newer action arrived, which will set its own state."""
+        if not self._apply_error_flash() and self._current_state is not None:
+            self._apply_state(self._current_state)
+
+    def _close_device(self) -> None:
+        try:
+            assert self._device is not None
+            self._device.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _apply_state(self, state: LedState) -> None:
         assert self._device is not None
