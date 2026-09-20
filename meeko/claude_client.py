@@ -473,8 +473,17 @@ def _repaired(messages: list[BetaMessageParam]) -> list[BetaMessageParam]:
     a client `tool_use` gets an interrupted result fabricated for it,
     while a server one can only be dropped — we can't invent what the
     server would have returned.
+
+    Pairing runs first because it can *append* a trailing user message,
+    and whether a stranded `server_tool_use` may stay depends on its
+    message still being last. Dropping first would decide that against
+    a list pairing then changes underneath it, re-exposing the orphan:
+    an assistant message holding both an unanswered `server_tool_use`
+    and an unanswered client `tool_use` would come out as the 400 shape
+    this function exists to prevent. Whether the API ever emits that
+    combination is unknown, which is reason enough not to depend on it.
     """
-    return _pair_orphan_tool_uses(_drop_stranded_server_tool_uses(messages))
+    return _drop_stranded_server_tool_uses(_pair_orphan_tool_uses(messages))
 
 
 def _pair_orphan_tool_uses(

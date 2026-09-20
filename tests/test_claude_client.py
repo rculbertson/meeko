@@ -1941,3 +1941,58 @@ def test_repaired_applies_both_repairs_to_one_history():
     assert answered[1] == {"type": "text", "text": "never mind"}
     # Input untouched — stored history stays verbatim.
     assert len(messages[1]["content"]) == 2
+
+
+def test_repaired_drops_a_server_orphan_that_pairing_demotes():
+    """Pairing can append a trailing user message, which takes "last"
+    away from the message before it. A stranded `server_tool_use` is
+    only allowed to stay while its message *is* last, so the drop has
+    to see the list pairing produced, not the one it started from.
+
+    The shape: one assistant message holding both an unanswered server
+    call and an unanswered client call. Whether the API emits that is
+    unknown; the repair shouldn't depend on the answer.
+    """
+    messages = [
+        {"role": "user", "content": "set a timer and search for something"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_paused",
+                    "name": "code_execution",
+                    "input": {},
+                },
+                {"type": "tool_use", "id": "toolu_a", "name": "set_timer", "input": {}},
+            ],
+        },
+    ]
+    out = _repaired(messages)
+
+    # Pairing appended the interrupted result for the client call...
+    assert out[-1]["role"] == "user"
+    assert out[-1]["content"][0]["tool_use_id"] == "toolu_a"
+    # ...so the server call is no longer trailing, and must be gone.
+    assert [b["type"] for b in out[1]["content"]] == ["tool_use"]
+
+
+def test_repaired_keeps_a_trailing_server_orphan_when_nothing_follows():
+    """The resume case, unchanged by the ordering: the paused content is
+    last and its trailing orphan is what tells the server to pick up."""
+    messages = [
+        {"role": "user", "content": "what's the weather?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Looking."},
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_paused",
+                    "name": "code_execution",
+                    "input": {},
+                },
+            ],
+        },
+    ]
+    assert _repaired(messages) == messages
