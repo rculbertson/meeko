@@ -13,7 +13,6 @@ from meeko.speaker import INTER_SENTENCE_SILENCE, Speaker
 def profile():
     return Profile(
         name="query",
-        wake_word="meeko",
         prompt="sys",
         voice=None,
     )
@@ -243,7 +242,6 @@ async def test_default_voice_used_when_profile_voice_none(
 async def test_profile_voice_overrides_default(audio_mock, tts_mock, fast_sleep):
     profile = Profile(
         name="custom",
-        wake_word="meeko",
         prompt="sys",
         voice="aura-2-andromeda-en",
     )

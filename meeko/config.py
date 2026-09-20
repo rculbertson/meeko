@@ -101,7 +101,6 @@ def _default_wake_word_model() -> Path:
 @dataclass(frozen=True)
 class Profile:
     name: str
-    wake_word: str
     prompt: str
     voice: str | None = None
     description: str | None = None
@@ -195,7 +194,6 @@ def load_profiles(
     for name, fields in raw_profiles.items():
         profiles[name] = Profile(
             name=name,
-            wake_word=fields["wake_word"],
             prompt=fields["prompt"],
             voice=fields.get("voice"),
             description=fields.get("description"),

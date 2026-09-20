@@ -23,13 +23,11 @@ async def test_apply_post_turn_session_change_rebinds_profile_on_load(tmp_path):
     profiles = {
         "query": Profile(
             name="query",
-            wake_word="meeko",
             prompt="QUERY-PROMPT",
             voice="thalia",
         ),
         "conversation": Profile(
             name="conversation",
-            wake_word="meeko",
             prompt="CONVERSATION-PROMPT",
             voice="orion",
         ),
@@ -92,9 +90,7 @@ async def test_apply_post_turn_session_change_aborts_load_on_missing_row(
     abort the load rather than binding Claude to a nonexistent session."""
 
     profiles = {
-        "query": Profile(
-            name="query", wake_word="meeko", prompt="QUERY-PROMPT", voice=None
-        ),
+        "query": Profile(name="query", prompt="QUERY-PROMPT", voice=None),
     }
 
     db_path = tmp_path / "meeko.db"
@@ -146,9 +142,7 @@ async def _apply(
 ):
     """Run the hook with a mock Claude client and a recording fire_summary.
     Returns (new_state, claude, summarized session ids)."""
-    profiles = {
-        "query": Profile(name="query", wake_word="meeko", prompt="P", voice=None)
-    }
+    profiles = {"query": Profile(name="query", prompt="P", voice=None)}
     claude = MagicMock()
     profile_manager = ProfileManager(
         profiles, claude_client=claude, active_name="query"

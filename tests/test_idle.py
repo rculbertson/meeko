@@ -23,7 +23,6 @@ def _silent_profile(timeout: float = 0.05) -> Profile:
     """No idle text: closes silently after the idle window."""
     return Profile(
         name="quick",
-        wake_word="meeko",
         prompt="...",
         idle_timeout_seconds=timeout,
     )
@@ -33,7 +32,6 @@ def _check_in_profile(idle: float = 0.02, close: float = 0.02) -> Profile:
     """Speaks a check-in, waits the close window, then a closing line."""
     return Profile(
         name="brainstorm",
-        wake_word="meeko",
         prompt="...",
         idle_timeout_seconds=idle,
         idle_prompt=CHECK_IN_TEXT,
@@ -312,7 +310,6 @@ async def test_close_text_without_prompt_waits_once_then_speaks_close():
     calls, speak = _recording_speak()
     profile = Profile(
         name="custom",
-        wake_word="meeko",
         prompt="...",
         idle_timeout_seconds=0.01,
         idle_close_seconds=10.0,  # must be ignored without idle_prompt
@@ -333,7 +330,6 @@ async def test_prompt_without_close_text_ends_silently_after_close_window():
     calls, speak = _recording_speak()
     profile = Profile(
         name="custom",
-        wake_word="meeko",
         prompt="...",
         idle_timeout_seconds=0.01,
         idle_prompt=CHECK_IN_TEXT,
@@ -410,7 +406,6 @@ async def test_post_wake_timeout_ends_session_and_posts_sentinel():
     profile = _silent_profile()
     profile = Profile(
         name=profile.name,
-        wake_word=profile.wake_word,
         prompt=profile.prompt,
         post_wake_timeout_seconds=0.01,
     )
@@ -457,7 +452,6 @@ async def test_timeout_does_not_fire_when_a_transcript_is_already_queued():
 async def test_start_post_wake_is_a_noop_when_timeout_non_positive():
     profile = Profile(
         name="quick",
-        wake_word="meeko",
         prompt="...",
         post_wake_timeout_seconds=0,
     )
@@ -493,7 +487,6 @@ async def test_arming_again_replaces_the_running_window():
     the first — otherwise two timers race to end the same session."""
     profile = Profile(
         name="quick",
-        wake_word="meeko",
         prompt="...",
         idle_timeout_seconds=0.02,
         post_wake_timeout_seconds=0.02,
@@ -552,7 +545,6 @@ async def test_post_wake_timeout_does_not_fire_when_a_transcript_is_queued():
     the post-wake window expired."""
     profile = Profile(
         name="quick",
-        wake_word="meeko",
         prompt="...",
         post_wake_timeout_seconds=0.01,
     )

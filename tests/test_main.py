@@ -282,7 +282,6 @@ def fake_profiles():
     return {
         "query": Profile(
             name="query",
-            wake_word="meeko",
             prompt="system",
             voice=None,
             # Disable the post-turn idle monitor: orchestrator tests
@@ -334,7 +333,6 @@ def _profile(name="query", **overrides) -> Profile:
     can't fire them early."""
     fields = {
         "name": name,
-        "wake_word": "meeko",
         "prompt": "system",
         "voice": None,
         "idle_timeout_seconds": 0,

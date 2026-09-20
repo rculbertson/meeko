@@ -125,7 +125,7 @@ async def test_assistant_sentences_only_logged_at_debug(caplog, level):
     speaker = Speaker(
         tts,
         audio,
-        Profile(name="query", wake_word="meeko", prompt="sys", voice=None),
+        Profile(name="query", prompt="sys", voice=None),
         enter_speaking=lambda: None,
         exit_speaking=lambda prev: None,
     )

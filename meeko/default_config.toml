@@ -30,7 +30,6 @@ units = "imperial"
 # profile by adding another block, and switch to it by voice ("switch to
 # <name> mode").
 [profiles.query]
-wake_word = "meeko"
 voice = "mars"
 # Tells Claude when to switch to this profile. Optional.
 description = "Quick questions. Short replies; closes after a few seconds of silence."
@@ -84,7 +83,6 @@ conversation in the background before swapping to the loaded one.\
 """
 
 [profiles.conversation]
-wake_word = "meeko"
 voice = "mars"
 description = "Long, in-depth conversations and brainstorming. Stays open through pauses."
 # Idle behavior. Unlike [profiles.query], this profile checks in before
