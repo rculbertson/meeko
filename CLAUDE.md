@@ -124,6 +124,8 @@ Do not add: web/mobile UI, multi-user support, semantic search over sessions, se
 
 ## Complexity gate
 
-`xenon --max-absolute C --max-average A meeko` runs at pre-push and in CI: it fails on any block in `meeko/` above cyclomatic complexity 20, or on the package average leaving rank A (currently 2.82). `tests/` is excluded.
+`scripts/check_complexity.sh` (xenon) runs at pre-push and in CI. It fails on any block in `meeko/` above cyclomatic complexity 20, or on the package average exceeding 3.1 (currently 2.82 over 289 blocks). `tests/` is excluded. Thresholds live in the script so the two call sites can't drift.
 
-The absolute ceiling is deliberately loose — CC scores a flat `stop_reason` dispatch ladder the same as a branch buried in a hot loop, so it only catches unambiguous runaway and judgment calls stay with review. Do not tighten it to B: `ClaudeClient.stream_turn` and `load_profiles` both sit at CC 10, and a B ceiling would block the next legitimate dispatch arm. If the gate fires, prefer extracting a cohesive helper (as `_commit_assistant`, `_log_round_usage` and `_dispatch_tool_calls` were extracted from `stream_turn`) over splitting to satisfy the number.
+The absolute ceiling is deliberately loose — CC scores a flat `stop_reason` dispatch arm in `stream_turn` the same as a branch buried in its `async for delta` hot loop, so it only catches unambiguous runaway and judgment calls stay with review. Do not tighten it to B: `ClaudeClient.stream_turn` and `load_profiles` both sit at CC 10, and a B ceiling would block the next legitimate dispatch arm. If the gate fires, prefer extracting a cohesive helper (as `_commit_assistant`, `_log_round_usage` and `_dispatch_tool_calls` were extracted from `stream_turn`) over splitting to satisfy the number.
+
+The numeric average is the actual ratchet; re-pin it downward as the average improves. Do not swap it for xenon's letter-grade `--max-average A`, which runs to CC 5.0 and would pass 42 more CC-20 functions. Note the gate's blind spot: the average is a per-block mean, so re-inlining small helpers can leave both checks green while the code gets worse — it does not substitute for review.

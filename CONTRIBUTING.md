@@ -71,24 +71,26 @@ Neither CI nor the maintainer can validate every path. Changes to `meeko/leds.py
 uv run ruff check .
 uv run ruff format .
 uv run pyright
-uv run xenon --max-absolute C --max-average A meeko
+./scripts/check_complexity.sh
 ```
 
-Ruff runs on commit, and pyright (basic mode, over `meeko/`), pytest and xenon run on push, via the hooks installed above; the same checks run in CI.
+Ruff runs on commit, and pyright (basic mode, over `meeko/`), the complexity gate and pytest run on push, via the hooks installed above; the same checks run in CI.
 
 ### Complexity
 
-[xenon](https://github.com/rubik/xenon) fails the build if any block in `meeko/` exceeds cyclomatic complexity 20 (radon rank D or worse), or if the package average leaves rank A.
+`scripts/check_complexity.sh` wraps [xenon](https://github.com/rubik/xenon) and holds the thresholds, so CI and the pre-push hook can't drift apart. It fails if any block in `meeko/` exceeds cyclomatic complexity 20 (radon rank D or worse), or if the package average exceeds **3.1** (currently 2.82 over 289 blocks).
 
-The ceiling is deliberately loose. Cyclomatic complexity can't tell a flat dispatch ladder from a branch buried in a hot loop, and the two score the same — so the absolute gate is set where it only catches unambiguous runaway, and judgment calls are left to review. The average gate is the part that does real work: it stops the package decaying wholesale even while no single function crosses the line.
+Two different jobs. The **absolute** ceiling is deliberately loose, because cyclomatic complexity can't tell a flat dispatch ladder from a branch buried in a hot loop and scores the two identically — so it only catches unambiguous runaway, and judgment calls are left to review. The **average** is the ratchet, and it has to be numeric to be worth anything: xenon's letter-grade `--max-average A` runs all the way to CC 5.0, which would let 42 more CC-20 functions through while the build stayed green. Re-pin it downward as the real average improves.
+
+Neither gate catches everything, and it's worth knowing the hole: because the average is a per-block mean, inlining two small helpers back into their caller can leave both checks green while the code gets worse. Complexity gates catch decay in bulk; they don't replace review.
 
 `tests/` is excluded. Test functions are linear setup-then-assert and score badly for reasons that don't indicate a maintenance problem.
 
 To see where a change landed rather than just whether it passed:
 
 ```bash
-uv run radon cc -s -n C meeko/     # every block ranked C or worse
-uv run radon cc meeko/ --total-average
+uv run radon cc -s -n C meeko/            # blocks ranked C or worse (silent when clean)
+uv run radon cc meeko --total-average -n F  # just the package average
 ```
 
 ## Git workflow

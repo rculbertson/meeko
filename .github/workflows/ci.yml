@@ -43,13 +43,11 @@ jobs:
       - name: Pyright
         run: uv run pyright
 
-      # Complexity ceiling, not a style rule: --max-absolute C fails only on
-      # genuine runaway (CC 21+), leaving judgment calls to review. The average
-      # gate is what protects past decomposition work from wholesale decay.
-      # tests/ is excluded — linear setup-then-assert scores badly for reasons
-      # that don't signal a maintenance problem.
+      # Thresholds and rationale live in the script, shared with the pre-push
+      # hook. Runs before the test suite so a complexity failure comes back in
+      # a second rather than after full coverage.
       - name: Complexity
-        run: uv run xenon --max-absolute C --max-average A meeko
+        run: ./scripts/check_complexity.sh
 
       - name: Test
         run: uv run pytest --cov-report=xml

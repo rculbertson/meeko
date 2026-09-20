@@ -1,4 +1,4 @@
-# pyright, pytest and xenon run at pre-push; without this, `pre-commit install`
+# pyright, the complexity gate and pytest run at pre-push; without this, `pre-commit install`
 # would only install the pre-commit hook and those gates would never run locally.
 default_install_hook_types: [pre-commit, pre-push]
 
@@ -20,19 +20,19 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
-      - id: pytest
-        name: pytest
-        entry: uv run pytest
+      # Ahead of pytest deliberately: hooks run in declaration order, and this
+      # takes a second where the suite takes fifteen. Same all-of-meeko/
+      # reasoning as pyright — the average threshold is a whole-package metric,
+      # so per-file invocation would compute the wrong number.
+      - id: complexity
+        name: complexity
+        entry: ./scripts/check_complexity.sh
         language: system
         pass_filenames: false
         stages: [pre-push]
-      # Same all-of-meeko/ reasoning as pyright: the average threshold is a
-      # whole-package metric, so per-file invocation would compute the wrong
-      # number. --max-absolute C fails only on genuine runaway (CC 21+);
-      # tests/ is out of scope.
-      - id: xenon
-        name: xenon
-        entry: uv run xenon --max-absolute C --max-average A meeko
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
         language: system
         pass_filenames: false
         stages: [pre-push]
