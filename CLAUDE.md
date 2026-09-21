@@ -8,7 +8,7 @@ Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed
 
 ## Current State
 
-Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** directly, with **Claude called directly via the Anthropic SDK** (`claude-sonnet-4-6`). Wake-word gating (openWakeWord), SQLite turn persistence, end-of-session summarization with FTS recall, CLI session resume, and a Claude-native tool-use loop for timers, profile switching, and session management (`end_session`, `new_session`, `list_sessions`, `load_session`) are all implemented.
+Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** directly, with **Claude called directly via the Anthropic SDK** (`claude-sonnet-5`). Wake-word gating (openWakeWord), SQLite turn persistence, end-of-session summarization with FTS recall, CLI session resume, and a Claude-native tool-use loop for timers, profile switching, and session management (`end_session`, `new_session`, `list_sessions`, `load_session`) are all implemented.
 
 ## Tech Stack
 
@@ -29,7 +29,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - Loading happens once in `run()`: `ensure_config_exists()` resolves/creates the path, then `load_config()` and `load_profiles()` are both passed that path. Components receive their values via constructor kwargs (no module-level `os.environ.get` reads).
 
 ### Claude API calls
-- Model: `claude-sonnet-4-6` for main conversation and end-of-session summarization (long transcripts + summary quality drives resume-by-voice recall)
+- Model: `claude-sonnet-5` for main conversation and end-of-session summarization (long transcripts + summary quality drives resume-by-voice recall)
 - Prompt caching (`cache_control` on the stable prefix) and server-side compaction are wired up in `meeko/claude_client.py` (compaction beta `compact-2026-01-12`, strategy `compact_20260112`). Both operate on the in-memory message array only
 - The on-disk SQLite transcript is the source of truth — the server-emitted `compaction` block stays in-memory and is filtered out before persistence so transcripts remain verbatim
 - Compaction threshold: `[claude] compaction_trigger_tokens` in `meeko.toml` (default `150000`). Env override: `MEEKO_COMPACTION_TRIGGER_TOKENS`.
