@@ -20,7 +20,7 @@ Meeko is engineered as a dedicated hardware appliance:
 
 - **Target Hardware**:
   - **Raspberry Pi 5** (8 GB recommended, with active cooler and NVMe SSD HAT)
-  - **[ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html)** USB 4-Mic Array with onboard hardware AEC and WS2812 LED ring
+  - **[ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-XVF3800-USB-4-Mic-Array-With-Case-p-6490.html)** USB 4-Mic Array with onboard hardware AEC and WS2812 LED ring
   - **Powered speaker** plugged into the XVF3800's 3.5mm jack
 - **Software Dependencies**:
   - Python 3.14+
@@ -200,7 +200,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, tests, complexity gates, a
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Note that openWakeWord's pre-trained preprocessor models, which the wake-word path downloads at runtime, are CC-BY-NC-SA-4.0; see [docs/wake-word.md](docs/wake-word.md) before using Meeko commercially.
+MIT — see [LICENSE](LICENSE). Note that the bundled wake-word model (`models/hey_meeko.onnx`) and openWakeWord's pre-trained preprocessor models downloaded at runtime are CC-BY-NC-SA-4.0; see [docs/wake-word.md](docs/wake-word.md) before using Meeko commercially.
 
 ## Inspiration
 

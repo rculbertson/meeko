@@ -24,9 +24,10 @@ labels: bug
 **Logs**
 
 <!--
-DEBUG is already the default log level, and logs go to stderr unless you redirect them.
-To get a file you can excerpt, run with MEEKO_LOG_TARGET=file — Meeko writes meeko.log
-in the working directory.
+The default log_level is INFO (which logs state transitions, tool names, and errors without conversation content).
+To capture debug logs containing detailed operational traces or transcripts, run with:
+MEEKO_LOG_LEVEL=DEBUG MEEKO_LOG_TARGET=file uv run python -m meeko.main
 
-Transcripts of what you said appear in the logs — trim anything private before pasting.
+Meeko will write meeko.log in the working directory.
+NOTE: DEBUG logs contain transcripts of what you said — please trim any private or sensitive content before pasting.
 -->

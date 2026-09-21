@@ -10,7 +10,7 @@ Before starting hardware configuration, make sure you have cloned the repository
 
 - **Raspberry Pi 5** (8 GB recommended) with active cooling (Raspberry Pi Active Cooler or equivalent).
 - **NVMe SSD** via PCIe HAT (recommended) — micro-SD cards are significantly slower for ONNX model loading and SQLite disk I/O.
-- **[ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html) USB 4-Mic Array** with hardware acoustic echo cancellation (AEC), beamforming, and an onboard WS2812 LED ring.
+- **[ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-XVF3800-USB-4-Mic-Array-With-Case-p-6490.html) USB 4-Mic Array** with hardware acoustic echo cancellation (AEC), beamforming, and an onboard WS2812 LED ring.
 - **Powered external speaker** connected via a standard 3.5mm audio cable.
 - **System dependencies**: PortAudio (`sudo apt install portaudio19-dev`).
 

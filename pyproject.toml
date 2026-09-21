@@ -4,6 +4,32 @@ version = "0.1.0"
 description = "A self-hosted voice assistant built on Deepgram and Claude"
 readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+authors = [
+    { name = "Ryan Culbertson" }
+]
+keywords = [
+    "anthropic",
+    "claude",
+    "deepgram",
+    "openwakeword",
+    "raspberry-pi",
+    "self-hosted",
+    "voice-assistant",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
 dependencies = [
     "anthropic>=0.40.0",
     "deepgram-sdk>=6.1.1",
@@ -15,6 +41,19 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests>=2.33.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rculbertson/meeko"
+Documentation = "https://github.com/rculbertson/meeko#readme"
+Repository = "https://github.com/rculbertson/meeko.git"
+Issues = "https://github.com/rculbertson/meeko/issues"
+
+[project.scripts]
+meeko = "meeko.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
