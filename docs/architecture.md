@@ -174,7 +174,7 @@ The shipped config provides two: `query` (terse one- to two-sentence replies, si
 | Shipped profile | Keys | Behavior |
 |---|---|---|
 | `query` | defaults only | After 5s of silence, close silently. Optimized for one-shot questions. |
-| `conversation` | all four set | After 60s, "Would you like to continue, or should we end the session now?"; after 20s more, "Okay, ending the session now." and close. Pauses are first-class. |
+| `conversation` | all four set | After 60s, "Still thinking, or should we wrap up?"; after 20s more, "Ending the session now. Talk later." and close. Pauses are first-class. |
 
 This used to be two hardcoded modes selected by the profile name, which is why names were once restricted to `query` and `conversation`. Collapsing the modes into config is what lets a user add a third profile without touching code.
 

@@ -136,7 +136,7 @@ Meeko ships with two pre-configured profiles in `meeko/default_config.toml`:
    - Closes silently after 5 seconds of silence (`idle_timeout_seconds = 5.0`).
 2. **`conversation`** (Deep Brainstorming):
    - Designed for long, open-ended discussions where you need time to think.
-   - Waits 60 seconds before speaking a check-in (*"Would you like to continue, or should we end the session now?"*), then waits another 20 seconds before saying *"Okay, ending the session now"* and closing.
+   - Waits 60 seconds before speaking a check-in (*"Still thinking, or should we wrap up?"*), then waits another 20 seconds before saying *"Ending the session now. Talk later"* and closing.
 
 ### Adding a Custom Profile
 
