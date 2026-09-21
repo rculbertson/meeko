@@ -1,247 +1,176 @@
 # Meeko
 
-Meeko is a personal voice assistant backed by Claude. It runs on Raspberry Pi and Mac. Meeko remembers the full text of every conversation, so you can pause mid-thought, come back days later, and pick up exactly where you left off. Just say "let's go back to the conversation about the app I'm building" and Meeko finds it and resumes.
+Meeko is a screenless, tabletop voice assistant powered by Claude. Built as a dedicated appliance for the **Raspberry Pi**, Meeko acts as an always-ready thinking partner that remembers the full context of every conversation. Brainstorm an idea, step away for days, and pick up right where you left off—just say, *"let's go back to the conversation about the app I'm building,"* and Meeko seamlessly resumes.
+
+*(You can also test and develop Meeko on a Mac before assembling dedicated hardware — see [Testing on macOS](#testing-on-macos).)*
 
 ## Features
 
-- **Named, resumable sessions** — every conversation is saved and searchable by voice.
-- **Natural session management** — start, end, and resume sessions by voice with no rigid command syntax; Claude decides when to call session tools from full conversation context.
-- **Transcripts stay on your device** — every conversation is saved to SQLite on your own Raspberry Pi or Mac.
-- **Customizable behavior** — define new profiles to change Meeko's behavior. Comes with two default profiles: `query` for quick questions, and `conversation` for open-ended discussions.
-- **Bring your own API keys** — talks to Deepgram and Anthropic directly, billed at provider rates with no assistant-vendor markup or middleman account.
-- **Stays cheap on long conversations** — prompt caching keeps token costs low even as sessions grow.
-- **Never fills the context window** — long sessions are summarized automatically in-flight, without losing the full transcript on disk.
+- **Natural voice session management** — start, end, switch, and resume conversations without rigid commands or syntax; Claude infers session intents naturally from context.
+- **Hardware-level barge-in** — onboard acoustic echo cancellation (AEC) lets you speak over and interrupt Meeko naturally while it is talking.
+- **Local-first privacy** — full conversation transcripts and metadata are stored in a local SQLite database on your hardware, never in a vendor cloud.
+- **Configurable personality profiles** — switch between quick query-and-answer responses or deep, open-ended conversational modes, or define your own.
+- **Automatic context summarization** — long-running sessions are summarized dynamically in-flight so conversations never overflow Claude's context window.
+- **Cost-efficient prompt caching** — Anthropic prompt caching keeps input token costs negligible even across extended, multi-turn discussions.
+- **Direct provider billing (BYOK)** — connect directly to Deepgram and Anthropic with your own API keys, with zero middleman markup or subscription fees.
 
-## Prerequisites
+## Hardware & System Requirements
 
-- Python 3.14+
-- [uv](https://docs.astral.sh/uv/)
-- PortAudio — `brew install portaudio` on macOS, `sudo apt install portaudio19-dev` on Debian/Ubuntu/Raspberry Pi OS
-- A microphone and speakers — anything PyAudio can see. Meeko was built using a Raspberry Pi 5 with a [ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html) USB mic array (see "Notes for the ReSpeaker XVF3800" below). But using any device's built-in mic and speakers works fine with `mute_mic_while_speaking = true`.
-- A [Deepgram](https://deepgram.com/) API key (the free tier includes ~$200 of credit)
-- An [Anthropic](https://www.anthropic.com/) API key
+Meeko is engineered as a dedicated hardware appliance:
 
-## Setup
+- **Target Hardware**:
+  - **Raspberry Pi 5** (8 GB recommended, with active cooler and NVMe SSD HAT)
+  - **[ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html)** USB 4-Mic Array with onboard hardware AEC and WS2812 LED ring
+  - **Powered speaker** plugged into the XVF3800's 3.5mm jack
+- **Software Dependencies**:
+  - Python 3.14+
+  - [uv](https://docs.astral.sh/uv/) package manager
+  - PortAudio (`sudo apt install portaudio19-dev` on Debian/Ubuntu/Raspberry Pi OS, `brew install portaudio` on macOS)
+- **API Keys & Operating Costs**:
+  - [Deepgram](https://deepgram.com/) (STT & TTS; free tier includes ~$200 credit, covering hundreds of hours of voice)
+  - [Anthropic](https://www.anthropic.com/) (Claude 3.7 Sonnet; prompt caching discounts cached input tokens by 90%, keeping daily conversational costs to pennies)
 
-```
-uv sync
-```
+---
 
-Create a `.env` file in the project root with your API keys:
+## Getting Started
 
-```
-DEEPGRAM_API_KEY=your-deepgram-api-key
-ANTHROPIC_API_KEY=your-anthropic-api-key
-```
+1. **Clone and install**:
 
-On first run Meeko creates a config file at `~/.config/meeko/meeko.toml` (copied from the bundled `meeko/default_config.toml`) and starts with working defaults; edit that file to add personal settings like your home location.
+   ```bash
+   git clone https://github.com/rculbertson/meeko.git
+   cd meeko
+   uv sync
+   ```
 
-The defaults assume a ReSpeaker XVF3800. **On a Mac's built-in mic and speakers**, add an `[audio]` table to that file — the bundled default ships none:
+2. **Add API keys**: Create a `.env` file in the project root:
 
-```toml
-[audio]
-input_channels = 1
-mute_mic_while_speaking = true
-```
+   ```bash
+   DEEPGRAM_API_KEY=your-deepgram-api-key
+   ANTHROPIC_API_KEY=your-anthropic-api-key
+   ```
 
-`input_channels = 1` matches the built-in mic's single channel (the default `2` is the ReSpeaker's), and `mute_mic_while_speaking` stands in for the hardware echo cancellation a Mac doesn't have, so Meeko doesn't hear itself talk.
+3. **Prime the wake word cache**:
+   The first run that uses the wake word automatically downloads openWakeWord's preprocessor models (~6.7 MB). For offline devices, see [docs/wake-word.md](docs/wake-word.md).
 
-The first run that uses the wake word also downloads openWakeWord's preprocessor models (~6.7 MB) into its own cache. If you're deploying to a device with no internet, run `uv run python -m meeko.wake_word` on a connected machine first to pre-populate it — see [models/README.md](models/README.md).
+---
+
+## Raspberry Pi Appliance Setup
+
+Meeko's built-in defaults are preconfigured for the Raspberry Pi + ReSpeaker XVF3800 setup (2-channel audio, hardware AEC, and WS2812 LED control).
+
+Follow the **[Raspberry Pi Setup Guide](docs/raspberry-pi-setup.md)** to complete the one-time hardware configuration:
+- Tune the ReSpeaker's AEC sensitivity registers (`xvf_host PP_DTSENSITIVE 12`)
+- Install the udev rule for LED ring permissions (`scripts/99-meeko-xvf3800.rules`)
+- Configure the systemd user service to start Meeko automatically on boot
+
+---
+
+## Testing on macOS
+
+You do not need a Raspberry Pi to try Meeko out. You can run Meeko on a Mac using its built-in microphone and speakers for testing and development:
+
+1. Run Meeko once to generate the default config at `~/.config/meeko/meeko.toml`:
+
+   ```bash
+   uv run python -m meeko.main
+   ```
+
+2. Add an `[audio]` section to `~/.config/meeko/meeko.toml` to match your single-channel built-in mic and enable software echo suppression:
+
+   ```toml
+   [audio]
+   input_channels = 1
+   mute_mic_while_speaking = true
+   ```
+
+*(Note: `mute_mic_while_speaking = true` prevents Meeko from hearing itself talk on hardware lacking acoustic echo cancellation; true barge-in is disabled in this mode).*
+
+---
 
 ## Running
 
-```
+Start Meeko:
+
+```bash
 uv run python -m meeko.main
 ```
 
-Say "Hey Meeko" to wake it. Press `Ctrl+C` to quit.
+Say **"Hey Meeko"** to wake it. Press `Ctrl+C` to quit.
 
-Prior sessions can also be worked with from the terminal:
+On a Raspberry Pi with the ReSpeaker XVF3800, the onboard LED ring indicates Meeko's live state (listening, thinking, speaking, errors). See [What the LED Ring Shows](docs/raspberry-pi-setup.md#3-what-the-led-ring-shows).
 
-```
+### What You Can Say
+
+Meeko understands natural conversational phrasing with no rigid syntax, routing intents dynamically to built-in tools:
+
+- **Sessions & Memory**:
+  - *"Let's go back to our brainstorm about the mobile app from yesterday."*
+  - *"What were we discussing earlier this morning?"*
+  - *"Wrap up this session."*
+- **Built-in Utilities**:
+  - *"What's the weather forecast for tomorrow afternoon?"* (Open-Meteo)
+  - *"Set a 15-minute timer for baking."*
+  - *"Search the web for the latest Python 3.14 release notes."* (Claude web search)
+- **Personality Profiles**:
+  - *"Switch to conversation profile."* (For open-ended brainstorming)
+  - *"Switch to query profile."* (For concise, 1–2 sentence answers)
+
+### Managing Sessions from the Terminal
+
+You can also inspect or resume prior sessions directly from the CLI:
+
+```bash
 uv run python -m meeko.main --list-sessions        # print prior sessions and exit
 uv run python -m meeko.main --resume               # resume the most recent session
 uv run python -m meeko.main --resume SESSION_ID    # resume a specific session
 ```
 
-## How it works
-
-A turn flows: mic audio → Deepgram STT (Flux, with semantic end-of-turn detection) → Claude (called directly via the Anthropic SDK, with prompt caching, tool use, web search, and server-side compaction) → Deepgram TTS (Aura-2) → speaker. Every turn is persisted to SQLite immediately, so the on-disk transcript is always the source of truth. Wake-word gating ("Hey Meeko") runs on-device with [openWakeWord](https://github.com/dscripka/openWakeWord). Session-management intents (end, new, list, load) are exposed to Claude as tools, so Sonnet decides when to call them based on the full conversation rather than a separate classifier.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — state machine, session persistence, prompt caching, server-side compaction, and the rationale behind the key design decisions.
+---
 
 ## Configuration
 
-All non-secret settings live in `meeko.toml`. Meeko looks for it in this order: `$MEEKO_CONFIG`, then `$XDG_CONFIG_HOME/meeko/meeko.toml` (i.e. `~/.config/meeko/meeko.toml`), then `./meeko.toml` in the working directory. If none exist, it auto-creates `~/.config/meeko/meeko.toml` from the bundled `meeko/default_config.toml` on first run. Edit that file to customize. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file. (API keys stay in `.env` in the project root.)
+All non-secret settings live in `meeko.toml` (searched in `$MEEKO_CONFIG`, `~/.config/meeko/meeko.toml`, then `./meeko.toml`). Every setting can also be overridden at runtime with a corresponding `MEEKO_*` environment variable.
 
-Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, and `[weather]`. Profiles are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
+Configuration tables include:
+- `[system]` — logging levels, rotating log files, SQLite database path, LED toggle.
+- `[audio]` — mic/speaker device selection, channel counts, software mute toggle.
+- `[wake_word]` — ONNX model path, confidence threshold, bypass switch.
+- `[claude]` — context compaction token trigger, web search toggle and limits.
+- `[location]` & `[weather]` — home coordinates and imperial/metric units for forecasts via Open-Meteo.
+- `[profiles.<name>]` — custom personas, TTS voice IDs, and pause/idle timeout behaviors.
 
-### `[system]`
+See [docs/configuration.md](docs/configuration.md) for the complete list of options, default values, and a guide to authoring custom profiles.
 
-| TOML key       | Env var              | Default              | Description                                                                 |
-|----------------|----------------------|----------------------|-----------------------------------------------------------------------------|
-| `log_level`    | `MEEKO_LOG_LEVEL`    | `INFO`               | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` logs conversation content — see [Privacy](#privacy). |
-| `log_target`   | `MEEKO_LOG_TARGET`   | unset (stderr)       | Set to `file` to log to `meeko.log` (rotating at 5 MB, keeping 3 older files), relative to the working directory. |
-| `db_path`      | `MEEKO_DB_PATH`      | `~/.local/share/meeko/meeko.db` | SQLite database location for sessions and transcripts (honors `$XDG_DATA_HOME`). |
-| `led_disabled` | `MEEKO_LED_DISABLED` | `false`              | Skip LED control. Auto-disabled when the XVF3800 isn't found.               |
+---
 
-### `[audio]`
+## How It Works
 
-| TOML key                  | Env var                          | Default | Description                                                              |
-|---------------------------|----------------------------------|---------|--------------------------------------------------------------------------|
-| `input_device_index`      | `MEEKO_INPUT_DEVICE_INDEX`       | unset   | PyAudio device index for the mic. Unset = OS default. Run `uv run python -m meeko.audio_io` to list devices. |
-| `output_device_index`     | `MEEKO_OUTPUT_DEVICE_INDEX`      | unset   | PyAudio device index for the speaker.                                    |
-| `input_channels`          | `MEEKO_INPUT_CHANNELS`           | `2`     | Native input channel count. Use `1` for most built-in laptop mics.       |
-| `output_channels`         | `MEEKO_OUTPUT_CHANNELS`          | `2`     | Native output channel count.                                             |
-| `mute_mic_while_speaking` | `MEEKO_MUTE_MIC_WHILE_SPEAKING`  | `false` | Software-mute the mic during TTS playback. Set `true` on hardware with no AEC (e.g. Mac built-in mic). |
+Each conversational turn flows through a direct, low-latency pipeline:
 
-### `[wake_word]`
+> **Mic Audio** → **Deepgram STT** (Flux, with semantic end-of-turn) → **Claude** (Anthropic SDK) → **Deepgram TTS** (Aura-2) → **Speaker**
 
-| TOML key    | Env var                       | Default                  | Description                                                                |
-|-------------|-------------------------------|--------------------------|----------------------------------------------------------------------------|
-| `model`     | `MEEKO_WAKE_WORD_MODEL`       | `models/hey_meeko.onnx`  | Path to the openWakeWord ONNX model. The default is relative to the working directory; use an absolute path to run Meeko from elsewhere. See [models/README.md](models/README.md) to train your own phrase. |
-| `threshold` | `MEEKO_WAKE_WORD_THRESHOLD`   | `0.96`                   | Confidence threshold (0–1). Lower = more sensitive, more false wakes.      |
-| `disabled`  | `MEEKO_WAKE_WORD_DISABLED`    | `false`                  | Skip the wake gate; start directly in `LISTENING` (useful for development).|
+- **On-Device Wake Word:** Gated locally by [openWakeWord](https://github.com/dscripka/openWakeWord) running on CPU—audio is only streamed externally after "Hey Meeko" is detected.
+- **Tool-Based Session Management:** Intents like starting, ending, listing, or resuming sessions are exposed as Claude tools. Claude decides when to invoke them from conversational context rather than relying on a rigid classifier.
+- **Immediate Local Persistence:** Turns are committed to SQLite instantly, ensuring the local transcript remains the authoritative source of truth.
 
-### `[claude]`
+See [docs/architecture.md](docs/architecture.md) for the full design — state machine, session persistence, prompt caching, server-side compaction, and the rationale behind key design decisions.
 
-| TOML key                    | Env var                            | Default  | Description                                                                |
-|-----------------------------|------------------------------------|----------|----------------------------------------------------------------------------|
-| `compaction_trigger_tokens` | `MEEKO_COMPACTION_TRIGGER_TOKENS`  | `150000` | Input-token threshold that triggers server-side compaction.                |
-| `web_search_enabled`        | `MEEKO_WEB_SEARCH_ENABLED`         | `true`   | Expose Anthropic's server-side web search tool to the model.               |
-| `web_search_max_uses`       | `MEEKO_WEB_SEARCH_MAX_USES`        | `4`      | Max web-search *attempts* per turn. A circuit breaker on searches that hang server-side, not a quality dial — raising it makes slow turns far slower (see `meeko/claude_client.py`). |
-
-### `[location]`
-
-| TOML key    | Env var            | Default | Description                                                                                                                                          |
-|-------------|--------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `latitude`  | `MEEKO_LATITUDE`   | unset   | Home latitude (decimal degrees). Used by the weather tool when you don't name a place, and injected into Claude's system prompt so it can answer location-aware questions (sunset/sunrise, regional references, climate, etc.). Must be set with `longitude` or not at all. |
-| `longitude` | `MEEKO_LONGITUDE`  | unset   | Home longitude (decimal degrees). Look both up once via Google Maps (right-click → copy coordinates).                                                |
-
-### `[weather]`
-
-| TOML key | Env var               | Default    | Description                                            |
-|----------|-----------------------|------------|--------------------------------------------------------|
-| `units`  | `MEEKO_WEATHER_UNITS` | `imperial` | `imperial` (°F, mph, inch) or `metric` (°C, km/h, mm). |
-
-Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Claude can ask for either a single day — today by default, any day up to two weeks out — or an hour-by-hour forecast covering the next 48 hours, which it picks automatically for questions about part of a day ("what's it doing this afternoon?"). Name a place ("weather in Tokyo") and Claude supplies the coordinates itself; otherwise `[location]` is used.
-
-### Profiles
-
-Each profile is defined by a `[profiles.<name>]` block. The default config ships two profiles — `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing). You can modify these or add new ones. To switch between profiles, just ask Meeko, e.g. "switch to the conversation profile". You can also ask "what profiles are available?" to hear the list and which one is active.
-
-A top-level `default_profile = "<name>"` key selects which one a fresh session starts in, and is required. Within a profile, `prompt` is the only required key; every other key below is optional and falls back to the default shown.
-
-| Key                           | Description                                                                        |
-|-------------------------------|------------------------------------------------------------------------------------|
-| `prompt`                      | **Required.** The system prompt that defines the profile.                          |
-| `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`. Defaults to `asteria`.                   |
-| `description`                 | One line telling Claude when to switch to this profile. Recommended; without it Claude only has the name to go on. |
-| `idle_timeout_seconds`        | silence after a turn before Meeko acts (check-in or close). Default `5.0`. Non-positive disables. |
-| `idle_prompt`                 | spoken check-in after that silence. Unset (default) skips straight to closing.     |
-| `idle_close_seconds`          | further silence after `idle_prompt` before closing. Only used with `idle_prompt`. Default `20.0`. |
-| `idle_close_text`             | spoken just before the session closes. Unset (default) closes silently.            |
-| `post_wake_timeout_seconds`   | silence window after the wake word, before the first turn; on expiry the session closes silently and returns to IDLE. Default `15.0`. Non-positive disables. |
-
-With no `idle_*` keys a profile closes silently after 5 seconds. See the bundled `meeko/default_config.toml` to see how the default profiles are configured.
-
-## Notes for the ReSpeaker XVF3800
-
-If you're using the ReSpeaker XVF3800 USB mic array (4-mic, hardware AEC), two one-time setup steps are required.
-
-### Tune the AEC sensitivity
-
-On the Pi + XVF3800 path, the chip's default AEC tuning suppresses near-end speech aggressively during far-end playback, which prevents barge-in: your voice never reaches Deepgram while Meeko is talking. Raise the double-talk sensitivity once and persist it to flash.
-
-Grab `xvf_host` from the [reSpeaker XVF3800 repo](https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY/tree/master/host_control) (`host_control/rpi_64bit/`) and run:
-
-```bash
-sudo ./xvf_host PP_DTSENSITIVE 12
-sudo ./xvf_host SAVE_CONFIGURATION 1
-```
-
-`PP_DTSENSITIVE 12` enables the chip's extra near-end speech detector and biases the AEC toward double-talk performance; `SAVE_CONFIGURATION 1` writes the value to flash so it survives power cycles. This is the only parameter that needed changing. To revert, `sudo ./xvf_host CLEAR_CONFIGURATION 1` and reboot the device.
-
-The speaker must be connected to the XVF3800's **3.5mm audio jack**, not the Pi's audio output — the chip uses the speaker signal as the AEC reference.
-
-### Install the udev rule for LED control
-
-Meeko talks to the XVF3800's WS2812 LED ring directly over libusb. Linux defaults the USB control interface to root-only; install the udev rule once so a non-root user (in `plugdev`) can drive it:
-
-```bash
-sudo cp scripts/99-meeko-xvf3800.rules /etc/udev/rules.d/
-sudo udevadm control --reload
-sudo udevadm trigger --action=add --subsystem-match=usb
-```
-
-No reboot or replug needed.
-
-To skip LED control entirely, set `led_disabled = true` in `[system]`. The controller also auto-disables when no XVF3800 is found, so no special handling is needed on a Mac dev machine.
-
-### What the ring shows
-
-The LED ring mirrors the state machine, which on a device with no screen is the only way to tell what Meeko is doing:
-
-| Ring                    | State              | Meaning                                              |
-|-------------------------|--------------------|------------------------------------------------------|
-| Off                     | `IDLE`             | Waiting for the wake word. Nothing reaches Deepgram. |
-| Solid cyan              | `LISTENING`        | Awake and ready for your turn.                       |
-| Solid brighter cyan     | `LISTENING_ACTIVE` | Hearing you speak right now.                         |
-| Breathing blue          | `PROCESSING`       | Waiting on Claude. Speak to cancel the turn.         |
-| Solid green             | `SPEAKING`         | Talking back. Speak over it to barge in.             |
-| Breathing red (~3s)     | —                  | A turn failed; Meeko returns to `LISTENING` after.   |
-
-Colors and the breath speed are in `PALETTE` at the top of `meeko/leds.py`.
-
-## Run Meeko at boot (Raspberry Pi)
-
-To have Meeko start automatically when your Pi boots — and keep running across reboots without you SSH'ing in — install the shipped systemd user service.
-
-1. Copy the unit into your user systemd directory:
-
-   ```bash
-   mkdir -p ~/.config/systemd/user
-   cp scripts/meeko.service ~/.config/systemd/user/
-   ```
-
-   The unit assumes the repo is at `~/meeko`. Edit `WorkingDirectory=` if you cloned somewhere else — it is what the default wake-word model path and the `meeko.log` file resolve against.
-
-2. Enable lingering so your user manager starts at boot without a login session:
-
-   ```bash
-   sudo loginctl enable-linger $USER
-   ```
-
-3. Enable and start the service:
-
-   ```bash
-   systemctl --user daemon-reload
-   systemctl --user enable --now meeko
-   ```
-
-Useful commands:
-
-- Tail logs: `journalctl --user-unit=meeko -f`
-- Logs since boot: `journalctl --user-unit=meeko -b`
-- Status: `systemctl --user status meeko`
-- Restart (e.g. to pick up code changes): `systemctl --user restart meeko`
-- Stop: `systemctl --user stop meeko`
+---
 
 ## Troubleshooting
 
-**Meeko doesn't wake up.** Lower `[wake_word] threshold` from its default `0.96` — the lower the value, the more readily it fires, at the cost of more false wakes. If it wakes on its own instead, raise it. `uv run python -m meeko.wake_word` confirms the preprocessor models are cached; a first run with no network fails here.
+- **Meeko doesn't wake up:** Lower `[wake_word] threshold` (default `0.96`) in `meeko.toml` to increase sensitivity. If it wakes spontaneously from room noise, raise it. Run `uv run python -m meeko.wake_word` to verify preprocessor models are properly cached.
+- **Meeko talks over you or ignores interruptions:** Barge-in requires acoustic isolation. On the Pi with an XVF3800, ensure the speaker is plugged into the XVF3800's 3.5mm jack (not the Pi's audio out) and AEC is tuned. On macOS or hardware without AEC, ensure `mute_mic_while_speaking = true` is set in `[audio]`.
+- **Wrong mic/speaker or silent audio:** Run `uv run python -m meeko.audio_io` to inspect device indices:
 
-**Meeko talks over me, or won't let me interrupt.** Barge-in needs Meeko's own voice kept out of the mic. On the Pi with an XVF3800, that's hardware echo cancellation — see [Tune the AEC sensitivity](#tune-the-aec-sensitivity), and check the speaker is in the XVF3800's 3.5mm jack rather than the Pi's own output. On anything without hardware AEC (a Mac's built-in mic, most USB mics), set `mute_mic_while_speaking = true` in `[audio]` instead.
+  ```bash
+  uv run python -m meeko.audio_io
+  ```
 
-**Meeko uses the wrong mic or speaker, or hears nothing.** List what PyAudio can see:
+  Set `input_device_index` and `output_device_index` in `[audio]` to pin devices, and make sure `input_channels` matches your hardware (`2` for ReSpeaker, `1` for built-in Mac mics). A channel mismatch is the most common cause of silence or distorted audio.
+- **LED ring doesn't light up:** LED control is Linux/XVF3800-specific and requires the udev rule; see [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md). The ring remains off when no XVF3800 is detected (expected on macOS).
 
-```
-uv run python -m meeko.audio_io
-```
-
-Each line gives an index, a name, and the device's channel count — `[0] MacBook Air Microphone  (in=1ch, DEFAULT-IN)`. Set `input_device_index` / `output_device_index` in `[audio]` to pin a device, and make `input_channels` / `output_channels` match the `in=`/`out=` counts shown. A channel-count mismatch is the usual cause of silence or garbled audio: the default of `2` is the ReSpeaker's, and most built-in mics are `1`.
-
-**The LED ring does nothing on Linux.** The USB control interface is root-only by default — install the udev rule, see [Install the udev rule for LED control](#install-the-udev-rule-for-led-control). The ring also stays dark when no XVF3800 is present, which is expected on a Mac.
+---
 
 ## Privacy
 
@@ -249,29 +178,32 @@ Meeko stores all conversation transcripts and summaries locally in SQLite on you
 
 - **Deepgram** receives microphone audio for speech-to-text, and the text of Claude's responses for text-to-speech.
 - **Anthropic** receives the conversation history sent to Claude.
-- **Open-Meteo** receives coordinates when you ask about the weather — your `[location]` home coordinates, or the ones Claude supplies for a place you named. No account or API key is involved, and nothing else about the conversation is sent.
+- **Open-Meteo** receives coordinates when you ask about the weather — your `[location]` home coordinates, or coordinates Claude provides for a named place. No account or API key is involved, and no conversation text is sent.
 
-Deepgram and Anthropic are accessed with your own API keys; their handling of your data is governed by their respective terms of service.
+Deepgram and Anthropic are accessed using your own API keys under their respective terms of service.
 
-### Logs
+### Logs & Content Privacy
 
-Conversation content — your transcribed speech, Claude's replies, tool-call arguments, timer labels, and session titles — is logged at `DEBUG` only. The default `log_level` is `INFO`, so when Meeko runs under systemd (stderr goes to journald) none of it reaches the system journal. What `journalctl --user-unit=meeko` does show is the content-free trace: state transitions, which tool was called (not with what), how long a dropped echo transcript was (not what it said), and errors. Per-turn `[timing]` lines are `DEBUG`.
+Conversation content — user speech, Claude's responses, tool arguments, timer labels, and session titles — is logged at `DEBUG` level only. The default `log_level` is `INFO`, which records only a content-free operational trace (state transitions, tool names, and errors). When Meeko runs under systemd, private conversation content never enters the system journal.
 
-Setting `log_level = "DEBUG"` (or `MEEKO_LOG_LEVEL=DEBUG`) turns that content logging on. Pair it with `log_target = "file"` to keep it in `meeko.log` instead of the journal, and remember journald retains what it captured until its own rotation — `journalctl --user --vacuum-time=1s` clears your user journal.
+To enable content logging for debugging, set `log_level = "DEBUG"` (or `MEEKO_LOG_LEVEL=DEBUG`). Set `log_target = "file"` to keep debug logs in `meeko.log` rather than system journals.
 
-## Project status
+---
 
-Meeko is a personal project, maintained in spare time. It works and I use it daily, but I review issues and pull requests in batches — expect weeks, not days. Contributions are genuinely welcome anyway; please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open an issue before starting anything large so you don't build something I end up declining.
+## Project Status
+
+Meeko is a personal project, maintained in spare time. It works and I use it daily, but I review issues and pull requests in batches — expect weeks, not days. Contributions are welcome; please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open an issue before starting large changes.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, tests, and lint.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, tests, complexity gates, and coding conventions.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Note that openWakeWord's pre-trained preprocessor models, which the wake-word path downloads at runtime, are CC-BY-NC-SA-4.0; see [models/README.md](models/README.md) before using Meeko commercially.
+MIT — see [LICENSE](LICENSE). Note that openWakeWord's pre-trained preprocessor models, which the wake-word path downloads at runtime, are CC-BY-NC-SA-4.0; see [docs/wake-word.md](docs/wake-word.md) before using Meeko commercially.
 
 ## Inspiration
+
 After a concussion left me unable to look at screens for a week, I couldn't use my laptop, my phone, or even watch TV. What saved my sanity was talking to Claude's voice mode — hours of conversation about whatever was on my mind, no screen required.
 
-That experience made me want to build something purpose-built for it: a voice assistant designed from the ground up for long, open-ended conversation, with no screen dependency at all. Meeko is that.
+That experience inspired Meeko: a physical, screenless appliance purpose-built for deep, open-ended brainstorming, with no display, no browser, and zero screen dependency.

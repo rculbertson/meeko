@@ -1,7 +1,7 @@
 """The orchestrator's state machine and its LED mirror.
 
 `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING`, with barge-in
-returning to LISTENING. See ARCHITECTURE.md §5.1 for the full diagram
+returning to LISTENING. See docs/architecture.md §5.1 for the full diagram
 and the three paths back to IDLE.
 
 `StateManager` is the single writer: it holds the current state and

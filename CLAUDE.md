@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The architecture overview — component tour, state machine, session persistence, and the rationale behind the key design decisions — is in `ARCHITECTURE.md`. Read it before making significant changes.
+Meeko is a personal voice assistant for macOS and Raspberry Pi 5. It is designed for long, deep brainstorming conversations — not command-and-control. The architecture overview — component tour, state machine, session persistence, and the rationale behind the key design decisions — is in `docs/architecture.md`. Read it before making significant changes.
 
 `meeko/main.py` is the entry point and composition root: `run()` builds every component and injects its dependencies. The orchestration logic (state machine, mic pump, STT event routing, idle windows, turn worker, post-turn session changes) lives in the `meeko/orchestrator/` package. `meeko/stt_supervisor.py` stays top-level as the STT connection layer.
 
@@ -23,7 +23,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 
 ### Configuration
 - Secrets (`DEEPGRAM_API_KEY`, `ANTHROPIC_API_KEY`) live in `.env`.
-- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold, home location) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, `[weather]` tables. See `README.md §Configuration` for the full list of options and defaults. `meeko/default_config.toml` (the bundled default, copied to the XDG location on first run) shows the minimum required config (profiles only); all other tables are optional and fall back to defaults when absent.
+- Everything else (audio, wake word, LEDs, logging, DB path, compaction threshold, home location) lives in `meeko.toml` under `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, `[weather]` tables. See `docs/configuration.md` for the full list of options and defaults. `meeko/default_config.toml` (the bundled default, copied to the XDG location on first run) shows the minimum required config (profiles only); all other tables are optional and fall back to defaults when absent.
 - **Config location** follows XDG. `meeko.config.resolve_config_path()` resolves it by precedence: `$MEEKO_CONFIG` → `$XDG_CONFIG_HOME/meeko/meeko.toml` (i.e. `~/.config/meeko/meeko.toml`) → `./meeko.toml` (cwd fallback, kept for dev). On first run `ensure_config_exists()` copies the bundled `meeko/default_config.toml` into the XDG location, so a fresh checkout starts with working defaults — no manual copy step. Do not re-track `meeko.toml` (still gitignored for the cwd-fallback dev case). The DB lives separately in the XDG data dir (`meeko.sessions.default_db_path()`, `~/.local/share/meeko/`).
 - Any `MEEKO_*` environment variable overrides the corresponding TOML value at runtime — useful for one-off testing without editing the file.
 - Loading happens once in `run()`: `ensure_config_exists()` resolves/creates the path, then `load_config()` and `load_profiles()` are both passed that path. Components receive their values via constructor kwargs (no module-level `os.environ.get` reads).
@@ -33,7 +33,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 - Prompt caching (`cache_control` on the stable prefix) and server-side compaction are wired up in `meeko/claude_client.py` (compaction beta `compact-2026-01-12`, strategy `compact_20260112`). Both operate on the in-memory message array only
 - The on-disk SQLite transcript is the source of truth — the server-emitted `compaction` block stays in-memory and is filtered out before persistence so transcripts remain verbatim
 - Compaction threshold: `[claude] compaction_trigger_tokens` in `meeko.toml` (default `150000`). Env override: `MEEKO_COMPACTION_TRIGGER_TOKENS`.
-- `_serialize_block` rebuilds assistant blocks from canonical fields for replay. Never drop `caller` from `server_tool_use` / `web_search_tool_result`: web search's dynamic filtering nests searches inside `code_execution`, and without `caller` the API 400s the *next* turn of the session. See `ARCHITECTURE.md` §4.3 and the live checks in `tests/test_claude_api_contract.py`.
+- `_serialize_block` rebuilds assistant blocks from canonical fields for replay. Never drop `caller` from `server_tool_use` / `web_search_tool_result`: web search's dynamic filtering nests searches inside `code_execution`, and without `caller` the API 400s the *next* turn of the session. See `docs/architecture.md` §4.3 and the live checks in `tests/test_claude_api_contract.py`.
 
 ### Turn persistence
 - Write every turn to SQLite immediately on completion, not buffered, not at session end (see `meeko/sessions.py` and `ClaudeClient._persist`)
@@ -68,7 +68,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
   - `threshold` (env: `MEEKO_WAKE_WORD_THRESHOLD`) — confidence (0–1). Default `0.96`.
   - `disabled = true` (env: `MEEKO_WAKE_WORD_DISABLED=1`) — skip the gate; start directly in `LISTENING`.
 - `post_wake_timeout_seconds` is a **per-profile** key (not `[wake_word]`), default `15.0`: the silence window between the wake word firing and the user's first turn. On expiry the session always closes silently and returns to `IDLE`, whatever the profile's `idle_*` keys say. Non-positive disables it.
-- First run downloads openWakeWord's melspectrogram, embedding and VAD models (~6.7 MB; its six bundled wake words are suppressed, see `models/README.md`). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
+- First run downloads openWakeWord's melspectrogram, embedding and VAD models (~6.7 MB; its six bundled wake words are suppressed, see `docs/wake-word.md`). Run `uv run python -m meeko.wake_word` to pre-populate the cache on a network-connected host before deploying offline (e.g. Pi image bake).
 
 ### LEDs
 - The XVF3800's WS2812 ring is driven by `meeko/leds.py` to mirror the state machine: IDLE off, LISTENING solid cyan, LISTENING_ACTIVE solid brighter cyan while the user is speaking, PROCESSING blue breath, SPEAKING solid green. Errors get a ~3s red breath.
@@ -94,7 +94,7 @@ Meeko uses **Deepgram STT (Flux, v2 live)** and **Deepgram TTS (Aura-2)** direct
 ### State machine
 States: `IDLE → (wake word) → LISTENING → PROCESSING → SPEAKING → (barge-in back to LISTENING)`. The wake-word gate is one-shot per session — follow-up turns do not require re-wakeing.
 
-Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout (silently, or after a spoken check-in, per the active profile's `idle_*` keys), and the post-wake timeout when no first turn ever arrives. See `ARCHITECTURE.md` §5.1.
+Three paths return to `IDLE`: the `end_session` tool, the post-turn idle timeout (silently, or after a spoken check-in, per the active profile's `idle_*` keys), and the post-wake timeout when no first turn ever arrives. See `docs/architecture.md` §5.1.
 
 Both silence windows live in `meeko/orchestrator/idle.py` (`IdleController`), not in `main.py`. They don't end the session themselves — they set the `SessionManager` end flag and post `IDLE_TIMEOUT_SENTINEL` to the turn queue, and `TurnWorker` (`meeko/orchestrator/turn_worker.py`) runs the normal post-turn handling without a Claude/TTS round-trip.
 
@@ -109,7 +109,7 @@ Both silence windows live in `meeko/orchestrator/idle.py` (`IdleController`), no
 
 ## What's Out of Scope (v1)
 
-Do not add: web/mobile UI, multi-user support, semantic search over sessions, session deletion or editing by voice, cross-device sync. See `ARCHITECTURE.md` §9.
+Do not add: web/mobile UI, multi-user support, semantic search over sessions, session deletion or editing by voice, cross-device sync. See `docs/architecture.md` §9.
 
 ## Testing
 

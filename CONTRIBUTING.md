@@ -1,6 +1,6 @@
 # Contributing to Meeko
 
-Thanks for your interest in contributing. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design rationale and a tour of the components before making non-trivial changes.
+Thanks for your interest in contributing. See [docs/architecture.md](docs/architecture.md) for the design rationale and a tour of the components before making non-trivial changes.
 
 ## Before you start
 
@@ -16,7 +16,7 @@ Meeko is deliberately a voice-only, single-user, single-device assistant. These 
 - Session deletion or editing by voice
 - Cross-device sync
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) §9 for the reasoning. If you think real-world usage justifies revisiting one of these, open an issue and make the case — the list isn't permanent, it just isn't v1.
+See [docs/architecture.md §9](docs/architecture.md#9-deliberate-scope) for the reasoning. If you think real-world usage justifies revisiting one of these, open an issue and make the case — the list isn't permanent, it just isn't v1.
 
 Windows is also unsupported; the code targets macOS and Raspberry Pi OS.
 

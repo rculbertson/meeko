@@ -181,7 +181,7 @@ def load_profiles(
             data = tomllib.load(f)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"Config file '{path}' not found (see README.md §Configuration)."
+            f"Config file '{path}' not found (see docs/configuration.md)."
         ) from exc
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"Invalid TOML in '{path}': {exc}") from exc
