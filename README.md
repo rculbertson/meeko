@@ -28,7 +28,7 @@ Meeko is engineered as a dedicated hardware appliance:
   - PortAudio (`sudo apt install portaudio19-dev` on Debian/Ubuntu/Raspberry Pi OS, `brew install portaudio` on macOS)
 - **API Keys & Operating Costs**:
   - [Deepgram](https://deepgram.com/) (STT & TTS; free tier includes ~$200 credit, covering hundreds of hours of voice)
-  - [Anthropic](https://www.anthropic.com/) (Claude 3.7 Sonnet; prompt caching discounts cached input tokens by 90%, keeping daily conversational costs to pennies)
+  - [Anthropic](https://www.anthropic.com/) (Claude Sonnet 5; prompt caching discounts cached input tokens by 90%, keeping daily conversational costs to pennies)
 
 ---
 

@@ -31,7 +31,7 @@ from meeko.sessions import SessionStore
 
 logger = logging.getLogger("meeko")
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 MAX_TOKENS = 1024
 
 # Chunking for very long transcripts is deferred (docs/architecture.md §6.3
