@@ -20,7 +20,7 @@ from meeko.audio_io import AudioIO
 logger = logging.getLogger("meeko")
 
 # How often to send a Deepgram KeepAlive text frame while we're not
-# streaming mic audio. Deepgram documents 3–5s as the recommended cadence.
+# streaming mic audio. Deepgram documents 3-5s as the recommended cadence.
 # This pump only prevents server-side idle close; dead-connection
 # detection is handled by the websockets library's auto-ping, tuned in
 # meeko/deepgram_stt.py (ping_interval / ping_timeout).

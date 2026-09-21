@@ -124,7 +124,7 @@ uv run pyright                        # Type check meeko/ (basic mode)
 ## Code Style & Standards
 
 - **Target:** Python 3.14+ (`target-version = "py314"` in Ruff).
-- **Formatting & Linting:** 88-char line length. En dashes (`–`, `—`) are permitted in prose and comments (RUF001–RUF003 disabled).
+- **Formatting & Linting:** 88-char line length. Use standard hyphens (`-`) for ranges; em dashes (`—`) are permitted in prose and comments.
 - **Type Annotations:** Checked with Pyright (`typeCheckingMode = "basic"` over `meeko/`). All functions and methods in `meeko/` should have type annotations. Tests use duck typing and fakes.
 - **Async Hygiene:** Never perform blocking I/O on the asyncio event loop. SQLite queries run in worker threads (`SessionStore._run`), and hardware streams run in dedicated threads.
 

@@ -1081,7 +1081,7 @@ async def test_server_side_compaction_fires_on_long_prefix(caplog):
     compaction `trigger.value` of 50 000 input tokens, so to force compaction
     the test ships ~55k tokens of padded system prompt across two turns plus
     a server-side summarization pass over the same prefix. That works out to
-    roughly $0.30–0.40 per run on Sonnet 5 — too expensive to leave on the
+    roughly $0.30-0.40 per run on Sonnet 5 — too expensive to leave on the
     default `-m integration` runs. Set `RUN_EXPENSIVE_TESTS=1` to opt in
     (`ANTHROPIC_API_KEY` is loaded from `.env` by `tests/conftest.py`):
 

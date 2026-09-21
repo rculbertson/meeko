@@ -151,7 +151,7 @@ def test_patch_installed_on_every_sdk_module_that_imports_connect():
 
 def test_websocket_connect_is_patched_with_tight_pings():
     """The patched function injects ping_interval and ping_timeout so
-    dead TCP connections are detected in seconds, not ~17–40s."""
+    dead TCP connections are detected in seconds, not ~17-40s."""
     captured: dict = {}
 
     def fake_orig(*args, **kwargs):
