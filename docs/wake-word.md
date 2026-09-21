@@ -21,11 +21,11 @@ To bypass wake-word detection entirely (e.g., during development), set `disabled
 > [!IMPORTANT]
 > **Read this before using Meeko in a commercial product.**
 
-While Meeko's own source code is licensed under the **MIT License** and openWakeWord's code is licensed under **Apache-2.0**, openWakeWord's **pre-trained preprocessor models are licensed under [CC-BY-NC-SA-4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)** (Creative Commons Attribution-NonCommercial-ShareAlike 4.0):
+While Meeko's own source code is licensed under the **MIT License** and openWakeWord's code is licensed under **Apache-2.0**, both the bundled `models/hey_meeko.onnx` model (generated via openWakeWord's training pipeline) and openWakeWord's **pre-trained preprocessor models are licensed under [CC-BY-NC-SA-4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)** (Creative Commons Attribution-NonCommercial-ShareAlike 4.0):
 
 > *"All of the included pre-trained models are licensed under [CC-BY-NC-SA-4.0] due to the inclusion of datasets with unknown or restrictive licensing as part of the training data."*
 
-The shared preprocessor models downloaded on first run (`melspectrogram.onnx`, `embedding_model.onnx`) are subject to this NonCommercial restriction.
+Both `hey_meeko.onnx` and the shared preprocessor models downloaded on first run (`melspectrogram.onnx`, `embedding_model.onnx`) are subject to this NonCommercial restriction.
 
 Therefore:
 - **Personal and non-commercial use** is completely unrestricted.
