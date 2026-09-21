@@ -3,7 +3,7 @@
 # config exists, so your edits here are preserved across restarts.
 # Edit freely to customize.
 #
-# See README.md §Configuration for the full list of options, defaults, and
+# See docs/configuration.md for the full list of options, defaults, and
 # MEEKO_* environment-variable overrides.
 
 # Which profile a fresh session starts in. Must match one of the

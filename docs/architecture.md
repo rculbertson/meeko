@@ -1,6 +1,6 @@
 # Meeko Architecture
 
-How Meeko works under the hood — the components, the data flow, and the design decisions behind them. If you just want to install and run Meeko, see [README.md](README.md) instead.
+How Meeko works under the hood — the components, the data flow, and the design decisions behind them. If you just want to install and run Meeko, see [README.md](../README.md) instead.
 
 ## 1. Overview
 
@@ -80,7 +80,7 @@ The ReSpeaker XVF3800 deserves a dedicated subsection because of its tight AEC r
 
 ## 4. Component Details
 
-[meeko/main.py](meeko/main.py) is the entry point and composition root: `run()` builds every component and injects its dependencies. The orchestration logic those components drive — the state machine, the mic pump, STT event routing, the idle windows, the turn worker and the post-turn session-change hook — lives in the [meeko/orchestrator/](meeko/orchestrator/) package. The STT connection lifecycle (reconnect, backoff, keepalive) stays in [meeko/stt_supervisor.py](meeko/stt_supervisor.py), next to the Deepgram client it supervises.
+[meeko/main.py](../meeko/main.py) is the entry point and composition root: `run()` builds every component and injects its dependencies. The orchestration logic those components drive — the state machine, the mic pump, STT event routing, the idle windows, the turn worker and the post-turn session-change hook — lives in the [meeko/orchestrator/](../meeko/orchestrator/) package. The STT connection lifecycle (reconnect, backoff, keepalive) stays in [meeko/stt_supervisor.py](../meeko/stt_supervisor.py), next to the Deepgram client it supervises.
 
 ### 4.1 Mic / speaker layer (and the XVF3800)
 
@@ -91,7 +91,7 @@ Audio I/O is implemented with PyAudio (not `sounddevice`) — PortAudio gives di
 1. **Speaker must be plugged into the XVF3800's 3.5mm jack**, not the host's audio output. The chip needs the "far end" reference signal to subtract speaker audio from the mic input. Without it, AEC does not work and barge-in becomes impossible.
 2. **Take the left channel on input** (channel 0 = AEC-processed output on the XVF3800); duplicate mono TTS to both output channels.
 
-The maintainer also raised `PP_DTSENSITIVE` to `12` and persisted it to flash — see the README's "XVF3800 setup" section for the exact commands. Without it, the chip's default AEC tuning suppresses near-end speech too aggressively during far-end playback and barge-in stops working.
+The maintainer also raised `PP_DTSENSITIVE` to `12` and persisted it to flash — see [raspberry-pi-setup.md](raspberry-pi-setup.md) for the exact commands. Without it, the chip's default AEC tuning suppresses near-end speech too aggressively during far-end playback and barge-in stops working.
 
 For other hardware (Mac built-in mic, generic USB mics with no hardware AEC), set `mute_mic_while_speaking = true` so Meeko software-mutes the mic during TTS playback.
 
@@ -103,7 +103,7 @@ Used for real-time transcription and end-of-turn detection. The Flux model is sp
 - `StartOfTurn` — user has begun speaking; used to trigger barge-in if a reply is being generated or played
 - `EndOfTurn` — user has finished their turn; triggers the Claude API call
 
-What each event *means* depends on the current state, and that decision table lives in `SttEventRouter` ([meeko/orchestrator/stt_events.py](meeko/orchestrator/stt_events.py)). The cases that matter are the ones that deliberately do nothing: an `EndOfTurn` in IDLE (mic audio is gated behind the wake word, so a stray transcript must not start a conversation), and an `EndOfTurn` in SPEAKING (a barge-in would already have flipped the state to LISTENING, so reaching that branch means the transcript is the assistant's own voice). The router must always drain the event stream — backpressure there parks the websocket's transfer_data task, starves pong frames and trips Deepgram's keepalive watchdog with a 1011 mid-reply — so routing is one synchronous decision per event and the Claude+TTS work happens on the far side of the turn queue.
+What each event *means* depends on the current state, and that decision table lives in `SttEventRouter` ([meeko/orchestrator/stt_events.py](../meeko/orchestrator/stt_events.py)). The cases that matter are the ones that deliberately do nothing: an `EndOfTurn` in IDLE (mic audio is gated behind the wake word, so a stray transcript must not start a conversation), and an `EndOfTurn` in SPEAKING (a barge-in would already have flipped the state to LISTENING, so reaching that branch means the transcript is the assistant's own voice). The router must always drain the event stream — backpressure there parks the websocket's transfer_data task, starves pong frames and trips Deepgram's keepalive watchdog with a 1011 mid-reply — so routing is one synchronous decision per event and the Claude+TTS work happens on the far side of the turn queue.
 
 ### 4.3 Claude API (direct)
 
@@ -125,7 +125,7 @@ Used for speech synthesis. Text is streamed to the TTS WebSocket as Claude gener
 
 ### 4.5 Session Management via Claude Tools
 
-Session-management intents — end, new, list, and load (resume) — are exposed to Sonnet as Claude-native tools, not detected by a separate classifier. This mirrors the pattern already used for timers ([meeko/tools/timer.py](meeko/tools/timer.py)) and profile switching ([meeko/tools/profile.py](meeko/tools/profile.py)): tools are registered via `ToolDispatcher`, Sonnet decides when to call them based on the conversation, and `ClaudeClient`'s tool-use loop dispatches to the tool's handler, which executes the side effect, when Sonnet emits a `tool_use` block.
+Session-management intents — end, new, list, and load (resume) — are exposed to Sonnet as Claude-native tools, not detected by a separate classifier. This mirrors the pattern already used for timers ([meeko/tools/timer.py](../meeko/tools/timer.py)) and profile switching ([meeko/tools/profile.py](../meeko/tools/profile.py)): tools are registered via `ToolDispatcher`, Sonnet decides when to call them based on the conversation, and `ClaudeClient`'s tool-use loop dispatches to the tool's handler, which executes the side effect, when Sonnet emits a `tool_use` block. (For the complete data model, persistence architecture, and resume flow, see §6 and §7.)
 
 **Tools exposed to Sonnet:**
 
@@ -146,15 +146,15 @@ Session-management intents — end, new, list, and load (resume) — are exposed
 2. After Sonnet's verbal confirmation/wrap-up is fully spoken (SPEAKING ends), the post-turn hook fires the abandoned session's summary in the background, calls `store.load_turns(target_id)`, swaps the in-memory message array via `claude.load_history`, and `claude.rebind_session(target_id)`.
 3. Subsequent turns hit the cache with the injected history (one-time cache-write cost on the first post-load turn).
 
-See `apply_post_turn_session_change` in [meeko/orchestrator/session_change.py](meeko/orchestrator/session_change.py), which `TurnWorker` ([meeko/orchestrator/turn_worker.py](meeko/orchestrator/turn_worker.py)) calls once each turn's speech has finished.
+See `apply_post_turn_session_change` in [meeko/orchestrator/session_change.py](../meeko/orchestrator/session_change.py), which `TurnWorker` ([meeko/orchestrator/turn_worker.py](../meeko/orchestrator/turn_worker.py)) calls once each turn's speech has finished.
 
 ### 4.6 Wake-word gating
 
 On startup Meeko sits in `IDLE` with the mic open, but audio is fed to an [openWakeWord](https://github.com/dscripka/openWakeWord) detector running on-device (ONNX) instead of Deepgram STT. Saying "Hey Meeko" transitions the session to `LISTENING`, after which mic audio flows to Deepgram normally — the gate is **one-shot per session**, follow-up turns do not require re-waking. After `end_session`, the detector is reset and the session returns to `IDLE`.
 
-The gate is enforced in `MicPump` ([meeko/orchestrator/mic_pump.py](meeko/orchestrator/mic_pump.py)), which decides per 50ms chunk whether it goes to the detector or to Deepgram. Nothing is streamed off-device before the wake word fires, and the chunk that fires it isn't forwarded either — it holds the wake phrase, not the question. The same pump implements the `mute_mic_while_speaking` drop (§4.1) for hosts without hardware AEC.
+The gate is enforced in `MicPump` ([meeko/orchestrator/mic_pump.py](../meeko/orchestrator/mic_pump.py)), which decides per 50ms chunk whether it goes to the detector or to Deepgram. Nothing is streamed off-device before the wake word fires, and the chunk that fires it isn't forwarded either — it holds the wake phrase, not the question. The same pump implements the `mute_mic_while_speaking` drop (§4.1) for hosts without hardware AEC.
 
-Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/hey_meeko.onnx`, threshold `0.96`. First run downloads openWakeWord's melspectrogram, embedding and VAD models (~6.7 MB; its six bundled wake words are suppressed, see `models/README.md`); for offline deploys, run `uv run python -m meeko.wake_word` on a network-connected host first to pre-populate the cache.
+Configuration lives in `[wake_word]` in `meeko.toml`. Defaults: model `models/hey_meeko.onnx`, threshold `0.96`. First run downloads openWakeWord's melspectrogram, embedding and VAD models (~6.7 MB; its six bundled wake words are suppressed, see [wake-word.md](wake-word.md)); for offline deploys, run `uv run python -m meeko.wake_word` on a network-connected host first to pre-populate the cache.
 
 ### 4.7 Profiles and idle behavior
 
@@ -169,7 +169,7 @@ Meeko runs under one of several **profiles** defined in `[profiles.<name>]` tabl
 
 The shipped config provides two: `query` (terse one- to two-sentence replies, silent close) and `conversation` (substantive thinking-partner persona, spoken check-in). Users call them "modes", and the `switch_profile` tool description tells Sonnet so.
 
-**Post-turn idle behavior** is one code path, `run_idle_window` ([meeko/orchestrator/idle.py](meeko/orchestrator/idle.py)), shaped by four keys. After `idle_timeout_seconds` of silence in LISTENING: if `idle_prompt` is set, speak it and wait `idle_close_seconds` more (timed from when the check-in *finishes*, so Meeko's own talking doesn't eat into the user's response time); then, if `idle_close_text` is set, speak it; then end the session. The two shipped profiles are the two natural points in that space:
+**Post-turn idle behavior** is one code path, `run_idle_window` ([meeko/orchestrator/idle.py](../meeko/orchestrator/idle.py)), shaped by four keys. After `idle_timeout_seconds` of silence in LISTENING: if `idle_prompt` is set, speak it and wait `idle_close_seconds` more (timed from when the check-in *finishes*, so Meeko's own talking doesn't eat into the user's response time); then, if `idle_close_text` is set, speak it; then end the session. The two shipped profiles are the two natural points in that space:
 
 | Shipped profile | Keys | Behavior |
 |---|---|---|
@@ -178,13 +178,13 @@ The shipped config provides two: `query` (terse one- to two-sentence replies, si
 
 This used to be two hardcoded modes selected by the profile name, which is why names were once restricted to `query` and `conversation`. Collapsing the modes into config is what lets a user add a third profile without touching code.
 
-**Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It ignores the `idle_*` keys: on expiry the session always closes silently and returns to IDLE, requiring a fresh wake word. Non-positive disables it. Both windows are owned by `IdleController` ([meeko/orchestrator/idle.py](meeko/orchestrator/idle.py)), which arms them (`start_post_wake` / `start_post_turn`) and shares one task slot between them, so every teardown path — user activity, barge-in, the next turn, shutdown — is a single `cancel()`.
+**Post-wake timeout.** `post_wake_timeout_seconds` (default `15.0`) is a separate silence window covering the gap between the wake word firing and the user's *first* turn — the "Hey Meeko" that nobody follows up on. It ignores the `idle_*` keys: on expiry the session always closes silently and returns to IDLE, requiring a fresh wake word. Non-positive disables it. Both windows are owned by `IdleController` ([meeko/orchestrator/idle.py](../meeko/orchestrator/idle.py)), which arms them (`start_post_wake` / `start_post_turn`) and shares one task slot between them, so every teardown path — user activity, barge-in, the next turn, shutdown — is a single `cancel()`.
 
-**Voice-driven profile switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. The `switch_profile` description is built from the loaded profiles — one line per profile, from its `description` key ([meeko/tools/profile.py](meeko/tools/profile.py)) — so Sonnet can match both "switch to conversation mode" and indirect asks like "let's have a long conversation" to a profile, including user-added ones. It calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new profile's idle behavior takes effect on the next turn. The active profile persists for the rest of the session, and the switch is also written to the session's `profile_name` in SQLite, so `--resume` and `load_session` bring the session back in the profile it was left in, not the one it started in. (`_build_dispatcher` in [meeko/main.py](meeko/main.py) wraps the profile tools to do this; the write is best-effort, since the in-memory switch has already been confirmed to the user.)
+**Voice-driven profile switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. The `switch_profile` description is built from the loaded profiles — one line per profile, from its `description` key ([meeko/tools/profile.py](../meeko/tools/profile.py)) — so Sonnet can match both "switch to conversation mode" and indirect asks like "let's have a long conversation" to a profile, including user-added ones. It calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new profile's idle behavior takes effect on the next turn. The active profile persists for the rest of the session, and the switch is also written to the session's `profile_name` in SQLite, so `--resume` and `load_session` bring the session back in the profile it was left in, not the one it started in. (`_build_dispatcher` in [meeko/main.py](../meeko/main.py) wraps the profile tools to do this; the write is best-effort, since the in-memory switch has already been confirmed to the user.)
 
 ### 4.8 Session Manager
 
-Responsible for storing and retrieving sessions. See §6 for the full data model.
+Responsible for storing and retrieving sessions. See §6 for the full SQLite data model, turn persistence, end-of-session summarization, and resume flow.
 
 **Responsibilities:**
 - Write every turn to SQLite immediately on completion
@@ -229,6 +229,8 @@ Responsible for storing and retrieving sessions. See §6 for the full data model
    BARGE-IN: stop playback, cancel Claude request → LISTENING
 ```
 
+*(Note: When user speech is actively detected during `LISTENING`, Meeko enters an internal `LISTENING_ACTIVE` sub-state to drive live visual indicators like the brighter cyan LED ring, before transitioning to `PROCESSING` once `EndOfTurn` fires.)*
+
 ### 5.2 Normal Turn Lifecycle
 
 1. `EndOfTurn` fires with finalized transcript.
@@ -254,7 +256,7 @@ The PROCESSING case matters as much as the SPEAKING one: the window between `End
 
 Hardware AEC (on the XVF3800) ensures Deepgram STT does not hear speaker audio as user speech. `StartOfTurn` events during TTS playback are therefore genuine barge-ins, not echo artifacts. On hardware without AEC, software mic-muting (`mute_mic_while_speaking = true`) provides the equivalent guarantee at the cost of disallowing barge-in.
 
-Barge-in is implemented in `TurnWorker` ([meeko/orchestrator/turn_worker.py](meeko/orchestrator/turn_worker.py)), the long-lived consumer of the turn queue. Each Claude+TTS turn runs as its own sub-task, so `request_barge_in()` can cancel that turn without stopping the worker. The worker lives at `run()` scope, outside the per-STT-session workers, so an STT reconnect mid-reply doesn't cut TTS off. A barge-in cancel and a shutdown cancel both reach the worker as a `CancelledError` from the turn. The first must leave the worker running and the second must propagate, and a flag set by `request_barge_in()` before it cancels is the only thing that tells them apart. `stop_event` can't be used, because asyncio's shutdown cancels the worker before `run()`'s `finally` sets it. `request_barge_in()` also switches to LISTENING synchronously, with or without a turn to cancel, because `SttEventRouter` handles the `EndOfTurn` that follows without yielding, and in SPEAKING that transcript would be dropped as echo.
+Barge-in is implemented in `TurnWorker` ([meeko/orchestrator/turn_worker.py](../meeko/orchestrator/turn_worker.py)), the long-lived consumer of the turn queue. Each Claude+TTS turn runs as its own sub-task, so `request_barge_in()` can cancel that turn without stopping the worker. The worker lives at `run()` scope, outside the per-STT-session workers, so an STT reconnect mid-reply doesn't cut TTS off. A barge-in cancel and a shutdown cancel both reach the worker as a `CancelledError` from the turn. The first must leave the worker running and the second must propagate, and a flag set by `request_barge_in()` before it cancels is the only thing that tells them apart. `stop_event` can't be used, because asyncio's shutdown cancels the worker before `run()`'s `finally` sets it. `request_barge_in()` also switches to LISTENING synchronously, with or without a turn to cancel, because `SttEventRouter` handles the `EndOfTurn` that follows without yielding, and in SPEAKING that transcript would be dropped as echo.
 
 ---
 
@@ -310,7 +312,7 @@ When a session ends, a separate Claude API call generates a `{title, summary}` p
 
 **Model choice.** Summarization runs on `claude-sonnet-4-6`, not Haiku. Sessions routinely grow to 50k–150k tokens, and summary quality directly drives voice-resume recall — a weak title means the user says *"go back to the todo app"* and FTS misses. The call is once per session and runs in the background, so Haiku's cost/latency advantages don't apply.
 
-**Not yet implemented: chunking.** The whole transcript is sent in one call. A transcript that exceeds Sonnet's context window errors, and since summarization is fire-and-forget the failure is logged and skipped — the session simply never gets a title or an FTS row, so it can't be recalled by voice. Splitting into chunks, summarizing each, then summarizing the summaries is the intended fix; at personal-use volumes it hasn't been worth building yet. See the note at the top of [meeko/session_summary.py](meeko/session_summary.py).
+**Not yet implemented: chunking.** The whole transcript is sent in one call. A transcript that exceeds Sonnet's context window errors, and since summarization is fire-and-forget the failure is logged and skipped — the session simply never gets a title or an FTS row, so it can't be recalled by voice. Splitting into chunks, summarizing each, then summarizing the summaries is the intended fix; at personal-use volumes it hasn't been worth building yet. See the note at the top of [meeko/session_summary.py](../meeko/session_summary.py).
 
 ### 6.4 Session Resume Flow
 
