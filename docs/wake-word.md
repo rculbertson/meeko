@@ -35,7 +35,7 @@ Setting `[wake_word] disabled = true` skips the wake-word engine completely and 
 
 ---
 
-## First-Run Model Download & Offline Caching
+## First-Run Model Download
 
 On its first run, openWakeWord automatically downloads its core preprocessor models (~6.7 MB) into its local cache:
 - `melspectrogram.onnx`
@@ -43,14 +43,6 @@ On its first run, openWakeWord automatically downloads its core preprocessor mod
 - `silero_vad.onnx`
 
 *(Note: openWakeWord by default attempts to download six bundled wake-word models totaling ~12 MB (`alexa`, `hey_jarvis`, `hey_mycroft`, `hey_rhasspy`, `timer`, `weather`). Meeko's `_ensure_preprocessors()` explicitly suppresses those unused downloads).*
-
-### Pre-populating Cache for Offline Devices
-
-If you are deploying Meeko to a Raspberry Pi or other device with no internet access (or baking a disk image), pre-populate the openWakeWord cache by running the downloader on a connected machine:
-
-```bash
-uv run python -m meeko.wake_word
-```
 
 ---
 
