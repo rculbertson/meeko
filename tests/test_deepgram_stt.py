@@ -1,5 +1,7 @@
 """Unit tests for the Deepgram STT wrapper."""
 
+import asyncio
+import os
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +11,7 @@ from deepgram.listen.v2 import raw_client as _dg_raw_client
 
 import meeko.deepgram_stt as deepgram_stt
 from meeko.deepgram_stt import DeepgramSTT, TurnEvent
+from meeko.deepgram_tts import DeepgramTTS
 
 
 def _make_msg(msg_type: str, **attrs):
@@ -196,3 +199,49 @@ async def test_multiple_turn_events_in_order():
 
     assert [e.event for e in events] == ["StartOfTurn", "Update", "EndOfTurn"]
     assert events[-1].transcript == "hello"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_stt_session_transcribes_audio():
+    api_key = os.environ.get("DEEPGRAM_API_KEY")
+    if not api_key:
+        pytest.skip("DEEPGRAM_API_KEY not set")
+
+    tts = DeepgramTTS(api_key=api_key)
+    chunks = [c async for c in tts.stream("Testing one two three.")]
+    assert chunks
+
+    stt = DeepgramSTT(api_key=api_key)
+    async with stt.session() as sess:
+        await sess.send_keepalive()
+
+        async def feeder():
+            for c in chunks:
+                await sess.send_audio(c)
+                await asyncio.sleep(0.05)
+            # Send trailing silence so Flux detects EndOfTurn
+            for _ in range(10):
+                await sess.send_audio(b"\x00" * 3200)
+                await asyncio.sleep(0.1)
+
+        async def reader():
+            events = []
+            async for e in sess.events():
+                events.append(e)
+                if e.event == "EndOfTurn":
+                    break
+            return events
+
+        feed_task = asyncio.create_task(feeder())
+        read_task = asyncio.create_task(reader())
+        done, _ = await asyncio.wait([read_task], timeout=10.0)
+        feed_task.cancel()
+        read_task.cancel()
+
+        assert read_task in done, "timed out waiting for EndOfTurn"
+        events = read_task.result()
+        assert any(e.event == "StartOfTurn" for e in events)
+        assert any(e.event == "EndOfTurn" for e in events)
+        end_event = next(e for e in reversed(events) if e.event == "EndOfTurn")
+        assert "testing" in end_event.transcript.lower()

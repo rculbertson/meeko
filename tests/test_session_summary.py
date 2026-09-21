@@ -8,9 +8,11 @@ which owns when summaries run and how they're torn down at shutdown."""
 import asyncio
 import json
 import logging
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anthropic
 import pytest
 
 from meeko import session_summary
@@ -456,3 +458,45 @@ async def test_finished_tasks_are_released(store, monkeypatch):
     await _settle()
 
     assert sched._tasks == set()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_summarize_session(store):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        pytest.skip("ANTHROPIC_API_KEY not set")
+
+    session_id = await store.create_session("default")
+    await store.persist_turn(
+        session_id=session_id,
+        role="user",
+        content="What should we name our open-source voice assistant project?",
+    )
+    await store.persist_turn(
+        session_id=session_id,
+        role="assistant",
+        content=[
+            {
+                "type": "text",
+                "text": "How about Meeko? It is friendly and memorable.",
+            }
+        ],
+    )
+
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+    try:
+        await summarize_session(store, session_id, client)
+    finally:
+        await client.close()
+
+    row = store._conn.execute(
+        "SELECT title, summary FROM sessions WHERE id = ?", (session_id,)
+    ).fetchone()
+    assert row is not None
+    title, summary = row
+    assert title and len(title.strip()) > 0
+    assert summary and len(summary.strip()) > 0
+
+    results = await store.search_sessions("voice assistant")
+    assert any(r["session_id"] == session_id for r in results)

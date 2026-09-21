@@ -30,7 +30,7 @@ from meeko.claude_client import (
     _repaired,
     _with_cache_breakpoint,
 )
-from meeko.tools.dispatch import ToolDispatcher
+from meeko.tools.dispatch import ToolDefinition, ToolDispatcher
 
 
 class _FakeStream:
@@ -1059,6 +1059,55 @@ async def test_second_turn_hits_prompt_cache(caplog):
         f"turn 2 cache_read ({cache_reads[1]}) should exceed turn 1's "
         f"({cache_reads[0]}) — the breakpoint moves forward each turn"
     )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_claude_client_dispatches_tool_and_returns_speech():
+    """End-to-end check that ClaudeClient actually invokes a tool via ToolDispatcher,
+    returns the tool result to the API, and yields the model's final verbal response."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        pytest.skip("ANTHROPIC_API_KEY not set")
+
+    called_with: dict | None = None
+
+    async def _handler(name: str, args: dict) -> str:
+        nonlocal called_with
+        called_with = args
+        return "Secret code is 8492."
+
+    tool_def: ToolDefinition = {
+        "name": "lookup_secret_code",
+        "description": "Look up the secret code for a given username.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "The user's name."}
+            },
+            "required": ["username"],
+        },
+    }
+
+    dispatcher = ToolDispatcher()
+    dispatcher.register([tool_def], _handler)
+
+    client = ClaudeClient(
+        api_key=api_key,
+        system_prompt="You are a helpful test assistant. Reply concisely.",
+        dispatcher=dispatcher,
+    )
+
+    chunks = []
+    async for sentence in client.stream_turn(
+        "What is the secret code for user Alice? Call lookup_secret_code."
+    ):
+        chunks.append(sentence)
+
+    assert called_with is not None
+    assert called_with.get("username") == "Alice"
+    full_response = " ".join(chunks)
+    assert "8492" in full_response
 
 
 # Padding sized to push the system prompt past the API's 50 000-token

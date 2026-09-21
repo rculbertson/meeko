@@ -1,6 +1,9 @@
 """Unit tests for the streaming Deepgram TTS wrapper."""
 
+import os
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from meeko.deepgram_tts import DeepgramTTS
 
@@ -60,3 +63,19 @@ async def test_stream_handles_empty_response():
     received = [c async for c in tts.stream("silent")]
 
     assert received == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_tts_stream_yields_audio():
+    api_key = os.environ.get("DEEPGRAM_API_KEY")
+    if not api_key:
+        pytest.skip("DEEPGRAM_API_KEY not set")
+    tts = DeepgramTTS(api_key=api_key)
+    chunks = [
+        c async for c in tts.stream("Testing Meeko text to speech.", voice="asteria")
+    ]
+    assert len(chunks) > 0
+    total_bytes = sum(len(c) for c in chunks)
+    assert total_bytes > 0
+    assert total_bytes % 2 == 0
