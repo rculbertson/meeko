@@ -113,7 +113,7 @@ Meeko understands natural conversational phrasing with no rigid syntax, routing 
   - *"Search the web for the latest Python 3.14 release notes."* (Claude web search)
 - **Personality Profiles**:
   - *"Switch to conversation profile."* (For open-ended brainstorming)
-  - *"Switch to query profile."* (For concise, 1–2 sentence answers)
+  - *"Switch to query profile."* (For concise, 1-2 sentence answers)
 
 ### Managing Sessions from the Terminal
 

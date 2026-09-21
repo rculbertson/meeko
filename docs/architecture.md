@@ -6,7 +6,7 @@ How Meeko works under the hood — the components, the data flow, and the design
 
 Meeko is a personal voice assistant designed to serve as a long-running brainstorming partner. The core use case is extended, deep conversations — the kind where the user might pause for minutes at a time to think, then resume, or return days later to pick up a prior thread. This is fundamentally different from a command-and-control voice assistant or a customer service bot. Meeko needs to:
 
-- Support conversations that grow to 50k–150k tokens over time
+- Support conversations that grow to 50k-150k tokens over time
 - Allow the user to pause and resume naturally, including across sessions
 - Resume prior conversations by voice ("let's go back to the todo app conversation")
 - Remain cost-efficient despite large conversation histories
@@ -310,7 +310,7 @@ Turns are written to SQLite immediately on completion — not buffered and not d
 
 When a session ends, a separate Claude API call generates a `{title, summary}` pair from the full on-disk transcript. This is independent of whatever state compaction has left the in-memory message array in. The transcript is written to `sessions_fts.transcript` alongside `title` and `summary` so FTS search has a fallback match surface when the summarizer misses a specific keyword the user later recalls.
 
-**Model choice.** Summarization runs on `claude-sonnet-5`, not Haiku. Sessions routinely grow to 50k–150k tokens, and summary quality directly drives voice-resume recall — a weak title means the user says *"go back to the todo app"* and FTS misses. The call is once per session and runs in the background, so Haiku's cost/latency advantages don't apply.
+**Model choice.** Summarization runs on `claude-sonnet-5`, not Haiku. Sessions routinely grow to 50k-150k tokens, and summary quality directly drives voice-resume recall — a weak title means the user says *"go back to the todo app"* and FTS misses. The call is once per session and runs in the background, so Haiku's cost/latency advantages don't apply.
 
 **Not yet implemented: chunking.** The whole transcript is sent in one call. A transcript that exceeds Sonnet's context window errors, and since summarization is fire-and-forget the failure is logged and skipped — the session simply never gets a title or an FTS row, so it can't be recalled by voice. Splitting into chunks, summarizing each, then summarizing the summaries is the intended fix; at personal-use volumes it hasn't been worth building yet. See the note at the top of [meeko/session_summary.py](../meeko/session_summary.py).
 

@@ -251,7 +251,7 @@ async def test_future_day_selection_and_no_current_conditions(monkeypatch):
 
 
 def test_precip_window_filters_by_supplied_now_hour():
-    # 24 hourly rows, rain 14:00–16:00. With no cutoff the window renders;
+    # 24 hourly rows, rain 14:00-16:00. With no cutoff the window renders;
     # a cutoff past those hours filters them out entirely — independent of
     # the machine's wall clock.
     wet = (14, 15, 16)
@@ -260,15 +260,15 @@ def test_precip_window_filters_by_supplied_now_hour():
         "precipitation_probability": [90 if h in wet else 0 for h in range(24)],
         "precipitation": [0.1 if h in wet else 0.0 for h in range(24)],
     }
-    assert _precip_window(hourly, now_hour=None) == "around 2–4 PM"
-    assert _precip_window(hourly, now_hour=12) == "around 2–4 PM"
+    assert _precip_window(hourly, now_hour=None) == "around 2-4 PM"
+    assert _precip_window(hourly, now_hour=12) == "around 2-4 PM"
     # Current hour is kept (14 is not < 14); 17 onward drops the window.
-    assert _precip_window(hourly, now_hour=14) == "around 2–4 PM"
+    assert _precip_window(hourly, now_hour=14) == "around 2-4 PM"
     assert _precip_window(hourly, now_hour=17) == ""
 
 
 def test_precip_window_falls_back_to_amount_when_probability_missing():
-    # No probability for 9–10 AM, but a measurable amount → wet. Elsewhere a
+    # No probability for 9-10 AM, but a measurable amount → wet. Elsewhere a
     # missing probability with zero/missing amount stays dry.
     wet = (9, 10)
     hourly = {
@@ -276,7 +276,7 @@ def test_precip_window_falls_back_to_amount_when_probability_missing():
         "precipitation_probability": [None if h in wet else 0 for h in range(24)],
         "precipitation": [0.2 if h in wet else 0.0 for h in range(24)],
     }
-    assert _precip_window(hourly, now_hour=None) == "around 9–10 AM"
+    assert _precip_window(hourly, now_hour=None) == "around 9-10 AM"
 
 
 def test_precip_window_unparseable_timestamp_does_not_split_run():
@@ -289,7 +289,7 @@ def test_precip_window_unparseable_timestamp_does_not_split_run():
         "time": times,
         "precipitation_probability": [90 if h in wet else 0 for h in range(24)],
     }
-    assert _precip_window(hourly, now_hour=None) == "around 2–4 PM"
+    assert _precip_window(hourly, now_hour=None) == "around 2-4 PM"
 
 
 def test_hourly_series_skips_bad_timestamps_and_pads_short_arrays():
@@ -338,7 +338,7 @@ def test_now_hour_local_uses_api_offset_not_server_tz():
     secs_since_utc_midnight = now.hour * 3600 + now.minute * 60 + now.second
     payload = {"utc_offset_seconds": -secs_since_utc_midnight}
     assert _now_hour_local(payload, is_today=True) == 0
-    # Missing offset falls back to a sane 0–23 hour rather than raising.
+    # Missing offset falls back to a sane 0-23 hour rather than raising.
     fallback = _now_hour_local({}, is_today=True)
     assert isinstance(fallback, int) and 0 <= fallback <= 23
 
@@ -353,7 +353,7 @@ async def test_precip_timing_window_rendered(monkeypatch):
         {"date": day},
     )
 
-    assert "precipitation likely around 2–4 PM" in result
+    assert "precipitation likely around 2-4 PM" in result
 
 
 @pytest.mark.asyncio
@@ -515,7 +515,7 @@ async def test_hourly_rows_cross_midnight_with_day_labels(monkeypatch):
     rows = _hourly_rows(result)
 
     tomorrow = local_today + timedelta(days=1)
-    # Rows 0–23 are today, 24–47 tomorrow — starting from local midnight.
+    # Rows 0-23 are today, 24-47 tomorrow — starting from local midnight.
     assert rows[23].startswith(f"{local_today.strftime('%a')} 11 PM")
     assert rows[24].startswith(f"{tomorrow.strftime('%a')} 12 AM")
     assert rows[47].startswith(f"{tomorrow.strftime('%a')} 11 PM")

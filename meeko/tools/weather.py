@@ -105,12 +105,12 @@ def _fmt_run(run: list[datetime]) -> str:
     first, last = run[0], run[-1]
     if first.hour == last.hour:
         return f"around {_fmt_hour(first)}"
-    # Drop the meridiem from the start when both ends share it ("2–4 PM"),
-    # keep it when they straddle noon/midnight ("11 AM–1 PM").
+    # Drop the meridiem from the start when both ends share it ("2-4 PM"),
+    # keep it when they straddle noon/midnight ("11 AM-1 PM").
     same_ampm = first.strftime("%p") == last.strftime("%p")
     start = _fmt_hour(first, with_ampm=not same_ampm)
     end = _fmt_hour(last)
-    return f"around {start}–{end}"
+    return f"around {start}-{end}"
 
 
 def _now_local(forecast: dict[str, Any]) -> datetime:
@@ -128,7 +128,7 @@ def _now_local(forecast: dict[str, Any]) -> datetime:
 
 
 def _now_hour_local(forecast: dict[str, Any], is_today: bool) -> int | None:
-    """The current hour (0–23) at the forecast location, or None for a future
+    """The current hour (0-23) at the forecast location, or None for a future
     day (where every hour of that day is still ahead)."""
     if not is_today:
         return None
@@ -179,7 +179,7 @@ def _wet_runs(hours: Iterable[tuple[datetime, bool]]) -> list[list[datetime]]:
 def _precip_window(hourly: dict[str, Any], *, now_hour: int | None) -> str:
     """Scan one day of hourly data and describe when precipitation is likely.
 
-    Returns a phrase like "around 2–4 PM" or "around 8–9 AM and 4–6 PM", or
+    Returns a phrase like "around 2-4 PM" or "around 8-9 AM and 4-6 PM", or
     "" when no hour crosses the threshold. When `now_hour` is set (the day is
     today, *in the forecast location's timezone*), hours already past are
     skipped so we don't report rain that supposedly happened this morning.
