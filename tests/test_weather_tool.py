@@ -631,3 +631,26 @@ def test_now_local_uses_api_offset_not_server_tz():
     assert local.hour == 0
     # Missing offset falls back to this machine's local time rather than raising.
     assert _now_local({}).tzinfo is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_weather_client_daily_and_hourly():
+    client = WeatherClient()
+    result = await client.get_weather(
+        latitude=37.7749,
+        longitude=-122.4194,
+        place_label="San Francisco",
+    )
+    assert "San Francisco" in result
+    assert "°F" in result
+    assert "High" in result
+
+    hourly_result = await client.get_weather(
+        latitude=37.7749,
+        longitude=-122.4194,
+        place_label="San Francisco",
+        hourly=True,
+    )
+    assert "San Francisco, next" in hourly_result
+    assert "°F" in hourly_result

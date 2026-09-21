@@ -133,7 +133,10 @@ async def test_split_web_search_turn_is_accepted():
     client = _client()
     tools = [_web_search_tool(2)]
 
-    query = "Search the web: what is the capital of France?"
+    query = (
+        "Search the web for the height of the tallest building in Dallas "
+        "and separately the tallest in Atlanta."
+    )
     first = await _send(
         client,
         [{"role": "user", "content": query}],
@@ -152,7 +155,7 @@ async def test_split_web_search_turn_is_accepted():
             {"role": "user", "content": query},
             {"role": "assistant", "content": head},
             {"role": "assistant", "content": tail},
-            {"role": "user", "content": "Name that city again."},
+            {"role": "user", "content": "Which building was taller?"},
         ],
         tools=tools,
     )
