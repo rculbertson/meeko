@@ -117,7 +117,27 @@ target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "ASYNC", "BLE", "RUF"]
+select = [
+    "E",
+    "F",
+    "I",
+    "N",
+    "W",
+    "UP",
+    "B",
+    "ASYNC",
+    "BLE",
+    "RUF",
+    "C4",
+    "PIE",
+    "RSE",
+    "PGH",
+    "T10",
+    "ISC",
+    "LOG",
+    "YTT",
+    "ICN",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # Test helpers poll with a timeout parameter and sleep loops by design.
