@@ -2,6 +2,18 @@
 
 Meeko is a personal voice assistant backed by Claude. It runs on Raspberry Pi and Mac. Meeko remembers the full text of every conversation, so you can pause mid-thought, come back days later, and pick up exactly where you left off. Just say "let's go back to the conversation about the app I'm building" and Meeko finds it and resumes.
 
+## Contents
+
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running](#running)
+- [How it works](#how-it-works)
+- [Configuration](#configuration)
+- [Raspberry Pi](#raspberry-pi)
+- [Troubleshooting](#troubleshooting)
+- [Privacy](#privacy)
+
 ## Features
 
 - **Named, resumable sessions** — every conversation is saved and searchable by voice.
@@ -17,7 +29,7 @@ Meeko is a personal voice assistant backed by Claude. It runs on Raspberry Pi an
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
 - PortAudio — `brew install portaudio` on macOS, `sudo apt install portaudio19-dev` on Debian/Ubuntu/Raspberry Pi OS
-- A microphone and speakers — anything PyAudio can see. Meeko was built using a Raspberry Pi 5 with a [ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html) USB mic array (see "Notes for the ReSpeaker XVF3800" below). But using any device's built-in mic and speakers works fine with `mute_mic_while_speaking = true`.
+- A microphone and speakers — anything PyAudio can see. Meeko was built using a Raspberry Pi 5 with a [ReSpeaker XVF3800](https://www.seeedstudio.com/ReSpeaker-USB-Mic-Array-p-4247.html) USB mic array (see [Raspberry Pi](#raspberry-pi) below). But using any device's built-in mic and speakers works fine with `mute_mic_while_speaking = true`.
 - A [Deepgram](https://deepgram.com/) API key (the free tier includes ~$200 of credit)
 - An [Anthropic](https://www.anthropic.com/) API key
 
@@ -145,11 +157,13 @@ A top-level `default_profile = "<name>"` key selects which one a fresh session s
 
 With no `idle_*` keys a profile closes silently after 5 seconds. See the bundled `meeko/default_config.toml` to see how the default profiles are configured.
 
-## Notes for the ReSpeaker XVF3800
+## Raspberry Pi
 
-If you're using the ReSpeaker XVF3800 USB mic array (4-mic, hardware AEC), two one-time setup steps are required.
+Optional — skip this section if you're running on a Mac; nothing here is needed beyond the `[audio]` block in [Setup](#setup).
 
-### Tune the AEC sensitivity
+Meeko was built on a Raspberry Pi 5 with a ReSpeaker XVF3800 USB mic array, and this section covers that pairing. The XVF3800 is a USB device that works on any host, so the AEC tuning below applies wherever you use it; the udev rule and the systemd unit are Linux-specific.
+
+### Tune the ReSpeaker's AEC sensitivity
 
 On the Pi + XVF3800 path, the chip's default AEC tuning suppresses near-end speech aggressively during far-end playback, which prevents barge-in: your voice never reaches Deepgram while Meeko is talking. Raise the double-talk sensitivity once and persist it to flash.
 
@@ -178,7 +192,7 @@ No reboot or replug needed.
 
 To skip LED control entirely, set `led_disabled = true` in `[system]`. The controller also auto-disables when no XVF3800 is found, so no special handling is needed on a Mac dev machine.
 
-### What the ring shows
+### What the LED ring shows
 
 The LED ring mirrors the state machine, which on a device with no screen is the only way to tell what Meeko is doing:
 
@@ -193,7 +207,7 @@ The LED ring mirrors the state machine, which on a device with no screen is the 
 
 Colors and the breath speed are in `PALETTE` at the top of `meeko/leds.py`.
 
-## Run Meeko at boot (Raspberry Pi)
+### Run at boot with systemd
 
 To have Meeko start automatically when your Pi boots — and keep running across reboots without you SSH'ing in — install the shipped systemd user service.
 
@@ -231,7 +245,7 @@ Useful commands:
 
 **Meeko doesn't wake up.** Lower `[wake_word] threshold` from its default `0.96` — the lower the value, the more readily it fires, at the cost of more false wakes. If it wakes on its own instead, raise it. `uv run python -m meeko.wake_word` confirms the preprocessor models are cached; a first run with no network fails here.
 
-**Meeko talks over me, or won't let me interrupt.** Barge-in needs Meeko's own voice kept out of the mic. On the Pi with an XVF3800, that's hardware echo cancellation — see [Tune the AEC sensitivity](#tune-the-aec-sensitivity), and check the speaker is in the XVF3800's 3.5mm jack rather than the Pi's own output. On anything without hardware AEC (a Mac's built-in mic, most USB mics), set `mute_mic_while_speaking = true` in `[audio]` instead.
+**Meeko talks over me, or won't let me interrupt.** Barge-in needs Meeko's own voice kept out of the mic. On the Pi with an XVF3800, that's hardware echo cancellation — see [Tune the ReSpeaker's AEC sensitivity](#tune-the-respeakers-aec-sensitivity), and check the speaker is in the XVF3800's 3.5mm jack rather than the Pi's own output. On anything without hardware AEC (a Mac's built-in mic, most USB mics), set `mute_mic_while_speaking = true` in `[audio]` instead.
 
 **Meeko uses the wrong mic or speaker, or hears nothing.** List what PyAudio can see:
 
