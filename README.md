@@ -50,7 +50,7 @@ Meeko is engineered as a dedicated hardware appliance:
    ```
 
 3. **Prime the wake word cache**:
-   The first run that uses the wake word automatically downloads openWakeWord's preprocessor models (~6.7 MB). For offline devices, see [docs/wake-word.md](docs/wake-word.md).
+   The first run that uses the wake word automatically downloads openWakeWord's preprocessor models (~6.7 MB). See [docs/wake-word.md](docs/wake-word.md).
 
 ---
 
