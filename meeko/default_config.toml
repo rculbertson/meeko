@@ -25,10 +25,10 @@ default_profile = "query"
 # Env override: MEEKO_WEATHER_UNITS
 units = "imperial"
 
-# Each [profiles.<name>] table is a persona: its own system prompt, voice,
+# Each [profiles.<name>] table defines its own system prompt, voice,
 # and behavior when you go quiet. The table name is free-form — add a third
 # profile by adding another block, and switch to it by voice ("switch to
-# <name> mode").
+# the <name> profile").
 [profiles.query]
 voice = "mars"
 # Tells Claude when to switch to this profile. Optional.
