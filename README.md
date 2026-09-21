@@ -74,7 +74,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — state machine, se
 
 All non-secret settings live in `meeko.toml`. Meeko looks for it in this order: `$MEEKO_CONFIG`, then `$XDG_CONFIG_HOME/meeko/meeko.toml` (i.e. `~/.config/meeko/meeko.toml`), then `./meeko.toml` in the working directory. If none exist, it auto-creates `~/.config/meeko/meeko.toml` from the bundled `meeko/default_config.toml` on first run. Edit that file to customize. Each setting also has a `MEEKO_*` environment variable that overrides the TOML value at runtime — useful for one-off testing without editing the file. (API keys stay in `.env` in the project root.)
 
-Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, and `[weather]`. Profiles (personas) are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
+Settings are grouped into six tables: `[system]`, `[audio]`, `[wake_word]`, `[claude]`, `[location]`, and `[weather]`. Profiles are defined under `[profiles.<name>]`, and a top-level `default_profile = "<name>"` key selects which profile a fresh session starts in.
 
 ### `[system]`
 
@@ -128,13 +128,13 @@ Forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key). Cla
 
 ### Profiles
 
-`[profiles.<name>]` blocks define personas. The name is free-form: the default config ships `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing), and you can add more — each is just another block, and "switch to <name> mode" switches to it by voice. Asking for the kind of interaction a profile's `description` covers works too ("let's have a long conversation"), and "what modes are available?" lists the profiles and which one is active. How a profile behaves when you go quiet is set entirely by its `idle_*` keys, not its name. A top-level `default_profile = "<name>"` key selects which profile a fresh session starts in and is required.
+Each profile is defined by a `[profiles.<name>]` block. The default config ships two profiles — `query` (auto-closes after a short silence) and `conversation` (stays open through pauses, asks before closing). You can modify these or add new ones. To switch between profiles, just ask Meeko, e.g. "switch to the conversation profile". You can also ask "what profiles are available?" to hear the list and which one is active.
 
-Within a profile, `prompt` is the only required key; every other key below is optional and falls back to the default shown.
+A top-level `default_profile = "<name>"` key selects which one a fresh session starts in, and is required. Within a profile, `prompt` is the only required key; every other key below is optional and falls back to the default shown.
 
 | Key                           | Description                                                                        |
 |-------------------------------|------------------------------------------------------------------------------------|
-| `prompt`                      | **Required.** The system prompt that defines the persona.                          |
+| `prompt`                      | **Required.** The system prompt that defines the profile.                          |
 | `voice`                       | Aura-2 voice id, e.g. `mars`, `andromeda`. Defaults to `asteria`.                   |
 | `description`                 | One line telling Claude when to switch to this profile. Recommended; without it Claude only has the name to go on. |
 | `idle_timeout_seconds`        | silence after a turn before Meeko acts (check-in or close). Default `5.0`. Non-positive disables. |
@@ -143,7 +143,7 @@ Within a profile, `prompt` is the only required key; every other key below is op
 | `idle_close_text`             | spoken just before the session closes. Unset (default) closes silently.            |
 | `post_wake_timeout_seconds`   | silence window after the wake word, before the first turn; on expiry the session closes silently and returns to IDLE. Default `15.0`. Non-positive disables. |
 
-With no `idle_*` keys a profile closes silently after 5 seconds; the shipped `conversation` profile sets all four `idle_*` keys to get its spoken check-in. See the bundled `meeko/default_config.toml` for working examples of both profiles.
+With no `idle_*` keys a profile closes silently after 5 seconds. See the bundled `meeko/default_config.toml` to see how the default profiles are configured.
 
 ## Notes for the ReSpeaker XVF3800
 
@@ -177,6 +177,21 @@ sudo udevadm trigger --action=add --subsystem-match=usb
 No reboot or replug needed.
 
 To skip LED control entirely, set `led_disabled = true` in `[system]`. The controller also auto-disables when no XVF3800 is found, so no special handling is needed on a Mac dev machine.
+
+### What the ring shows
+
+The LED ring mirrors the state machine, which on a device with no screen is the only way to tell what Meeko is doing:
+
+| Ring                    | State              | Meaning                                              |
+|-------------------------|--------------------|------------------------------------------------------|
+| Off                     | `IDLE`             | Waiting for the wake word. Nothing reaches Deepgram. |
+| Solid cyan              | `LISTENING`        | Awake and ready for your turn.                       |
+| Solid brighter cyan     | `LISTENING_ACTIVE` | Hearing you speak right now.                         |
+| Breathing blue          | `PROCESSING`       | Waiting on Claude. Speak to cancel the turn.         |
+| Solid green             | `SPEAKING`         | Talking back. Speak over it to barge in.             |
+| Breathing red (~3s)     | —                  | A turn failed; Meeko returns to `LISTENING` after.   |
+
+Colors and the breath speed are in `PALETTE` at the top of `meeko/leds.py`.
 
 ## Run Meeko at boot (Raspberry Pi)
 
