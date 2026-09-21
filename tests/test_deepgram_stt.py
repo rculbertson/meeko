@@ -238,6 +238,7 @@ async def test_live_stt_session_transcribes_audio():
         done, _ = await asyncio.wait([read_task], timeout=10.0)
         feed_task.cancel()
         read_task.cancel()
+        await asyncio.gather(feed_task, read_task, return_exceptions=True)
 
         assert read_task in done, "timed out waiting for EndOfTurn"
         events = read_task.result()

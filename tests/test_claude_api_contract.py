@@ -155,7 +155,7 @@ async def test_split_web_search_turn_is_accepted():
             {"role": "user", "content": query},
             {"role": "assistant", "content": head},
             {"role": "assistant", "content": tail},
-            {"role": "user", "content": "Name that city again."},
+            {"role": "user", "content": "Which building was taller?"},
         ],
         tools=tools,
     )
