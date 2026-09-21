@@ -227,6 +227,22 @@ Useful commands:
 - Restart (e.g. to pick up code changes): `systemctl --user restart meeko`
 - Stop: `systemctl --user stop meeko`
 
+## Troubleshooting
+
+**Meeko doesn't wake up.** Lower `[wake_word] threshold` from its default `0.96` — the lower the value, the more readily it fires, at the cost of more false wakes. If it wakes on its own instead, raise it. `uv run python -m meeko.wake_word` confirms the preprocessor models are cached; a first run with no network fails here.
+
+**Meeko talks over me, or won't let me interrupt.** Barge-in needs Meeko's own voice kept out of the mic. On the Pi with an XVF3800, that's hardware echo cancellation — see [Tune the AEC sensitivity](#tune-the-aec-sensitivity), and check the speaker is in the XVF3800's 3.5mm jack rather than the Pi's own output. On anything without hardware AEC (a Mac's built-in mic, most USB mics), set `mute_mic_while_speaking = true` in `[audio]` instead.
+
+**Meeko uses the wrong mic or speaker, or hears nothing.** List what PyAudio can see:
+
+```
+uv run python -m meeko.audio_io
+```
+
+Each line gives an index, a name, and the device's channel count — `[0] MacBook Air Microphone  (in=1ch, DEFAULT-IN)`. Set `input_device_index` / `output_device_index` in `[audio]` to pin a device, and make `input_channels` / `output_channels` match the `in=`/`out=` counts shown. A channel-count mismatch is the usual cause of silence or garbled audio: the default of `2` is the ReSpeaker's, and most built-in mics are `1`.
+
+**The LED ring does nothing on Linux.** The USB control interface is root-only by default — install the udev rule, see [Install the udev rule for LED control](#install-the-udev-rule-for-led-control). The ring also stays dark when no XVF3800 is present, which is expected on a Mac.
+
 ## Privacy
 
 Meeko stores all conversation transcripts and summaries locally in SQLite on your device — nothing is uploaded to a third-party assistant cloud. Three external services see data:
