@@ -1,4 +1,4 @@
-# Meeko — Instructions for Claude Code & AI Assistants
+# Meeko — Instructions for Claude Code
 
 ## Project Overview
 
@@ -130,12 +130,6 @@ uv run pyright                        # Type check meeko/ (basic mode)
 
 ---
 
-## What's Out of Scope (v1)
-
-Do not add: web/mobile UI, multi-user support, semantic search over sessions, session deletion or editing by voice, cross-device sync. See `docs/architecture.md` §9.
-
----
-
 ## Git Workflow & Pre-PR Verification
 
 - Always implement features on a new branch: `<github-username>/<short-description>`.
@@ -156,9 +150,9 @@ Do not add: web/mobile UI, multi-user support, semantic search over sessions, se
 ## Complexity Gate
 
 `scripts/check_complexity.sh` (xenon) runs at pre-push and in CI:
-- **Ceiling:** Fails on any block in `meeko/` above cyclomatic complexity 20 (radon rank D or worse).
-- **Ratchet:** Package average complexity must not exceed **3.1** (currently 2.82 over 289 blocks).
-- Re-pin `AVERAGE` downward as the package mean improves. Do not loosen to Xenon's letter-grade `--max-average A` (which allows up to CC 5.0).
+- **Ceiling:** Fails on any block in `meeko/` with cyclomatic complexity above 20 (radon rank D or worse).
+- **Ratchet:** Fails if package average complexity exceeds `AVERAGE` in `scripts/check_complexity.sh`.
+- Re-pin `AVERAGE` in the script downward as the package mean improves. Do not loosen to Xenon's letter-grade `--max-average A` (which allows up to CC 5.0).
 - Prefer extracting cohesive helper functions over arbitrary splitting or inlining.
 
 Diagnostic inspection (if the gate fails or to check scores before re-pinning):
