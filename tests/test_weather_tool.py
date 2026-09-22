@@ -654,3 +654,22 @@ async def test_live_weather_client_daily_and_hourly():
     )
     assert "San Francisco, next" in hourly_result
     assert "°F" in hourly_result
+
+
+@pytest.mark.asyncio
+async def test_weather_client_reuses_http_client_and_aclose(monkeypatch):
+    stub = _StubClient({_FORECAST: [_forecast_payload(), _forecast_payload()]})
+    _install_stub_client(monkeypatch, stub)
+
+    client = WeatherClient()
+    client.configure(latitude=40.7, longitude=-74.0, units="imperial")
+    await client.get_weather(None, None, None)
+    first_client = client._client
+    assert first_client is stub
+
+    await client.get_weather(None, None, None)
+    assert client._client is first_client
+    assert len(stub.calls) == 2
+
+    await client.aclose()
+    assert client._client is None

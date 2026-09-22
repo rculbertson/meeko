@@ -256,10 +256,12 @@ class WeatherClient:
     them from its own knowledge, no geocoder needed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._latitude: float | None = None
         self._longitude: float | None = None
         self._units: str = "imperial"
+        self._client = client
+        self._owns_client = client is None
 
     def configure(
         self,
@@ -384,10 +386,21 @@ class WeatherClient:
         return await self._get(params)
 
     async def _get(self, params: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(_FORECAST_URL, params=params)
-            resp.raise_for_status()
-            return resp.json()
+        if self._client is None or getattr(self._client, "is_closed", False):
+            self._client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+            self._owns_client = True
+        resp = await self._client.get(_FORECAST_URL, params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client if owned by this instance."""
+        if self._client is not None and self._owns_client:
+            if hasattr(self._client, "aclose") and not getattr(
+                self._client, "is_closed", False
+            ):
+                await self._client.aclose()
+            self._client = None
 
 
 def _round(value: Any) -> str:
