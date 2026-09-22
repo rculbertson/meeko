@@ -522,10 +522,6 @@ def _hourly_header(
     return header
 
 
-# Singleton instance. meeko/main.py calls `configure()` on startup.
-weather_client = WeatherClient()
-
-
 def get_tool_definitions() -> list[ToolDefinition]:
     return [
         {
@@ -589,10 +585,15 @@ def get_tool_definitions() -> list[ToolDefinition]:
     ]
 
 
-async def handle(fn_name: str, args: dict) -> str:
+async def handle(
+    fn_name: str,
+    args: dict,
+    *,
+    client: WeatherClient,
+) -> str:
     """Handle a weather-related function call."""
     if fn_name == "get_weather":
-        return await weather_client.get_weather(
+        return await client.get_weather(
             latitude=args.get("latitude"),
             longitude=args.get("longitude"),
             place_label=args.get("place_label"),

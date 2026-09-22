@@ -151,10 +151,6 @@ class TimerManager:
         return f"All {count} timer{'s' if count != 1 else ''} cancelled."
 
 
-# Singleton instance. meeko/main.py installs a speak_callback on startup.
-timer_manager = TimerManager()
-
-
 def get_tool_definitions() -> list[ToolDefinition]:
     return [
         {
@@ -217,18 +213,23 @@ def get_tool_definitions() -> list[ToolDefinition]:
     ]
 
 
-async def handle(fn_name: str, args: dict) -> str:
+async def handle(
+    fn_name: str,
+    args: dict,
+    *,
+    manager: TimerManager,
+) -> str:
     """Handle a timer-related function call."""
     if fn_name == "set_timer":
-        return await timer_manager.set_timer(
+        return await manager.set_timer(
             duration_seconds=args.get("duration_seconds", 60),
             duration_display=args.get("duration_display", "1 minute"),
             label=args.get("label"),
         )
     elif fn_name == "list_timers":
-        return timer_manager.list_timers()
+        return manager.list_timers()
     elif fn_name == "cancel_timer":
-        return timer_manager.cancel_timer(label=args.get("label", ""))
+        return manager.cancel_timer(label=args.get("label", ""))
     elif fn_name == "cancel_all_timers":
-        return timer_manager.cancel_all_timers()
+        return manager.cancel_all_timers()
     return f"Unknown timer function: {fn_name}"

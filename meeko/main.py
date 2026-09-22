@@ -56,12 +56,12 @@ from meeko.tools.profile import handle as profile_handle
 from meeko.tools.session import SessionManager
 from meeko.tools.session import get_tool_definitions as session_tools
 from meeko.tools.session import handle as session_handle
+from meeko.tools.timer import TimerManager
 from meeko.tools.timer import get_tool_definitions as timer_tools
 from meeko.tools.timer import handle as timer_handle
-from meeko.tools.timer import timer_manager
+from meeko.tools.weather import WeatherClient
 from meeko.tools.weather import get_tool_definitions as weather_tools
 from meeko.tools.weather import handle as weather_handle
-from meeko.tools.weather import weather_client
 from meeko.wake_word import WakeWordDetector
 
 LOG_FILE = "meeko.log"
@@ -223,12 +223,17 @@ def _build_dispatcher(
     profiles: dict[str, Profile],
     profile_manager: ProfileManager,
     session_manager: SessionManager,
+    timer_manager: TimerManager,
+    weather_client: WeatherClient,
     store: SessionStore,
     get_session_id: Callable[[], str | None],
-    config: MeekoConfig,
 ) -> ToolDispatcher:
     dispatcher = ToolDispatcher()
-    dispatcher.register(timer_tools(), timer_handle)
+
+    async def timer_handle_wrapper(fn_name: str, args: dict) -> str:
+        return await timer_handle(fn_name, args, manager=timer_manager)
+
+    dispatcher.register(timer_tools(), timer_handle_wrapper)
 
     async def profile_handle_wrapper(fn_name: str, args: dict) -> str:
         before = profile_manager.active_profile.name
@@ -266,12 +271,10 @@ def _build_dispatcher(
 
     dispatcher.register(session_tools(), session_handle_wrapper)
 
-    weather_client.configure(
-        latitude=config.latitude,
-        longitude=config.longitude,
-        units=config.weather_units,
-    )
-    dispatcher.register(weather_tools(), weather_handle)
+    async def weather_handle_wrapper(fn_name: str, args: dict) -> str:
+        return await weather_handle(fn_name, args, client=weather_client)
+
+    dispatcher.register(weather_tools(), weather_handle_wrapper)
 
     return dispatcher
 
@@ -318,6 +321,13 @@ async def run(resume: str | None = None, list_sessions: bool = False):
 
     profile_manager = ProfileManager(profiles, active_name=profile.name)
     session_manager = SessionManager()
+    timer_manager = TimerManager()
+    weather_client = WeatherClient()
+    weather_client.configure(
+        latitude=config.latitude,
+        longitude=config.longitude,
+        units=config.weather_units,
+    )
 
     # Lazy session creation: the row is INSERTed on the first persisted
     # turn so killing the process before any conversation doesn't litter
@@ -335,9 +345,10 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         profiles,
         profile_manager,
         session_manager,
+        timer_manager,
+        weather_client,
         store,
         lambda: claude.session_id,
-        config,
     )
 
     claude = ClaudeClient(
@@ -569,11 +580,12 @@ def main() -> None:
     args = _parse_args()
     loop = asyncio.new_event_loop()
 
-    def handle_sigint():
+    def handle_signal():
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
-    loop.add_signal_handler(signal.SIGINT, handle_sigint)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, handle_signal)
 
     try:
         loop.run_until_complete(

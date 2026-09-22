@@ -13,6 +13,7 @@ import functools
 import json
 import logging
 import logging.handlers
+import signal
 import time
 from importlib import resources
 from pathlib import Path
@@ -1376,7 +1377,12 @@ async def test_new_session_after_profile_switch_records_active_profile(
 # ---------------------------------------------------------------------------
 
 
-def _profile_dispatcher(session_id="sid-1", store=None):
+def _profile_dispatcher(
+    session_id="sid-1",
+    store=None,
+    timer_manager=None,
+    weather_client=None,
+):
     """The real dispatcher from _build_dispatcher over a query + pirate
     profile set, with a fake store so the row write can be inspected."""
     profiles = {
@@ -1385,15 +1391,52 @@ def _profile_dispatcher(session_id="sid-1", store=None):
     }
     manager = ProfileManager(profiles, active_name="query")
     store = store if store is not None else MagicMock(set_session_profile=AsyncMock())
+    timer_mgr = timer_manager if timer_manager is not None else MagicMock()
+    weather_cl = weather_client if weather_client is not None else MagicMock()
     dispatcher = meeko_main._build_dispatcher(
         profiles,
         manager,
         MagicMock(),
+        timer_mgr,
+        weather_cl,
         store,
         lambda: session_id,
-        meeko_main.MeekoConfig(),
     )
     return dispatcher, manager, store
+
+
+async def test_build_dispatcher_delegates_to_injected_timer_and_weather():
+    fake_timer_mgr = MagicMock()
+    fake_timer_mgr.set_timer = AsyncMock(return_value="timer set")
+    fake_weather_client = MagicMock()
+    fake_weather_client.get_weather = AsyncMock(return_value="weather 72F")
+
+    dispatcher, _, _ = _profile_dispatcher(
+        timer_manager=fake_timer_mgr,
+        weather_client=fake_weather_client,
+    )
+
+    timer_res = await dispatcher.dispatch(
+        "set_timer", {"duration_seconds": 60, "duration_display": "1 minute"}
+    )
+    assert timer_res == "timer set"
+    fake_timer_mgr.set_timer.assert_awaited_once_with(
+        duration_seconds=60,
+        duration_display="1 minute",
+        label=None,
+    )
+
+    weather_res = await dispatcher.dispatch(
+        "get_weather", {"latitude": 37.77, "longitude": -122.41}
+    )
+    assert weather_res == "weather 72F"
+    fake_weather_client.get_weather.assert_awaited_once_with(
+        latitude=37.77,
+        longitude=-122.41,
+        place_label=None,
+        date_str=None,
+        hourly=False,
+    )
 
 
 async def test_switch_profile_records_the_new_profile_on_the_session():
@@ -1928,3 +1971,38 @@ async def test_end_session_before_any_turn_fire_summary_is_noop(
     # No session row was created — lazy creation never fired and
     # fire_summary(None) was a no-op rather than crashing.
     assert await _list_sessions(db_path) == []
+
+
+def test_main_registers_sigint_and_sigterm():
+    """main() must register signal handlers for both SIGINT and SIGTERM."""
+    signals_registered: dict[int, object] = {}
+
+    class FakeLoop:
+        def add_signal_handler(self, sig, handler):
+            signals_registered[sig] = handler
+
+        def run_until_complete(self, coro):
+            coro.close()
+
+        def close(self):
+            pass
+
+    with (
+        patch("asyncio.new_event_loop", return_value=FakeLoop()),
+        patch(
+            "meeko.main._parse_args",
+            return_value=SimpleNamespace(resume=None, list_sessions=False),
+        ),
+    ):
+        meeko_main.main()
+
+    assert signal.SIGINT in signals_registered
+    assert signal.SIGTERM in signals_registered
+    assert signals_registered[signal.SIGINT] is signals_registered[signal.SIGTERM]
+
+    fake_task = MagicMock()
+    with patch("asyncio.all_tasks", return_value={fake_task}):
+        handler = signals_registered[signal.SIGINT]
+        assert callable(handler)
+        handler()
+        fake_task.cancel.assert_called_once()
