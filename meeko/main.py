@@ -553,6 +553,7 @@ async def run(resume: str | None = None, list_sessions: bool = False):
         await summaries.aclose()
         audio.close()
         leds.close()
+        await weather_client.aclose()
         await store.close()
         logger.info("Shutting down.")
 
