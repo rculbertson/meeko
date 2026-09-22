@@ -470,38 +470,36 @@ Turn-level errors never crash the application:
 
 ## 9. Key Decisions
 
-### Why call Claude directly instead of using Deepgram's managed Claude?
+### 1. Direct Claude API vs. Managed Voice Platforms
 
-Deepgram's Voice Agent API manages the Claude API calls internally, which means there is no way to add `cache_control` headers, enable auto compaction, or control what gets injected on session resume. For Meeko's use case — long conversations with persistent sessions — these features are essential. The cost of forgoing them (ever-growing token costs, no compaction, shallow resume) outweighs the convenience of the managed integration.
+All-in-one managed voice services (such as Deepgram's Voice Agent API or OpenAI's Realtime API) package STT, LLM inference, and TTS into a single WebSocket connection. While convenient, they obscure the underlying LLM call and strip away critical context management features:
 
-### Why use Deepgram for STT at all, rather than Whisper or similar?
+- **Prompt Caching**: Long brainstorming sessions regularly reach 50k–150k tokens. Direct Anthropic API calls allow Meeko to stamp `cache_control` breakpoints, slashing input token costs by ~90% on cached prefixes.
+- **Server-Side Compaction**: Using the Anthropic compaction beta (`betas=["compact-2026-01-12"]`), Sonnet automatically summarizes earlier conversational turns when approaching token thresholds, keeping sessions running indefinitely without manual context clipping.
+- **Verbatim Session Persistence**: Managed services handle history ephemerally. Direct control allows Meeko to commit every raw turn to local SQLite immediately upon completion, preserving an immutable transcript even after in-memory compaction.
 
-Deepgram's Flux model provides end-of-turn detection that is semantically aware — it distinguishes a mid-thought pause from an actual turn completion. This is a genuinely hard problem to solve well. Building equivalent quality turn detection from scratch would be a significant project. Flux gives it for free as part of the STT API.
+### 2. Deepgram Flux STT vs. Local Whisper & Silence VAD
 
-### Why store turns immediately rather than at session end?
+Many open-source voice assistants run Whisper (or `faster-whisper`) paired with a local Voice Activity Detector (such as Silero VAD) to avoid recurring cloud STT costs. 
 
-Server-side compaction modifies the in-memory message array during long sessions — early turns get replaced by a summary. If turns were only persisted at session end, those early turns would be lost. Writing to SQLite on every turn ensures the on-disk transcript always contains the full verbatim history regardless of what compaction has done in memory.
+For a brainstorming assistant, traditional VAD breaks conversational pacing. Standard VAD relies on fixed silence windows (e.g. 500–800ms) to detect turn completion. In deep, reflective discussions, people routinely pause mid-thought to think, causing standard VAD to prematurely cut them off and trigger an unwanted response. 
 
-### Why keep both full transcript and summary per session?
+Deepgram Flux performs **semantic end-of-turn detection** in the cloud. Rather than relying purely on silence timers, it analyzes the grammatical and conversational completeness of the incoming speech, cleanly distinguishing between a thoughtful pause and an actual finished turn.
 
-The summary is used for resume matching — it's fast to search and compact enough to pass to Claude for disambiguation. The full transcript is used for the actual resume — injecting the summary alone would lose the nuance that makes brainstorming sessions valuable. They serve different purposes.
+### 3. Hardware Echo Cancellation via 3.5mm Jack vs. Software AEC
 
-### Why Claude tool-use for session management rather than a two-stage intent classifier?
+The ReSpeaker XVF3800's onboard XMOS DSP chip performs hardware-level acoustic echo cancellation (AEC), noise suppression, and 4-microphone beamforming. 
 
-An earlier draft proposed a keyword filter + Haiku classifier running on every turn to detect session-management intents. We chose tool-use instead:
+For hardware AEC to work, the DSP must receive the exact "far-end" reference signal being played into the room so it can subtract it from the microphone stream in real time. **Plugging the powered speaker directly into the XVF3800's 3.5mm analog jack provides this reference signal in hardware.** 
 
-- **Context awareness:** Sonnet sees the full conversation; a per-turn classifier sees one turn in isolation. Ambiguous phrasings ("that's enough about X, let's talk about Y", "I was going to stop but…") are exactly where an isolated classifier breaks. Sonnet gets the nuance right.
-- **Cost:** Session commands are rare (≈once per session). With prompt caching at ~90% input discount on cached prefixes, the cost of routing session intents through Sonnet is negligible.
-- **Latency:** Session commands aren't time-critical — an extra ~1s on "goodnight" doesn't meaningfully affect UX.
-- **Reliability:** One code path, one failure mode. Two-stage has two (keyword miss, Haiku miss).
-- **Mid-conversation resume** falls out naturally when `list_sessions` / `load_session` are tools — Sonnet chains them inside a single turn. The two-stage framework would need a dedicated out-of-loop flow.
+Plugging speakers into the Raspberry Pi's audio output, an HDMI display, or a Bluetooth speaker bypasses the DSP chip. Without a reference signal, the microphones capture the assistant's own voice as incoming speech, resulting in false barge-in triggers, feedback loops, and hallucinated user turns. Offloading AEC to dedicated DSP hardware also frees the Pi's CPU from the heavy latency and processing overhead of running software echo cancellation algorithms.
 
-The one operational wrinkle — `load_session` replaces Sonnet's own message array — is handled as a single post-dispatch hook (§4.5).
+### 4. On-Device Wake-Word Gating vs. Continuous Cloud Streaming
 
-### Why the ReSpeaker XVF3800's 3.5mm jack for the speaker?
+A developer new to voice systems might wonder why Meeko doesn't simply leave a streaming STT connection open to the cloud 24/7 and detect *"Hey Meeko"* directly in the transcription stream.
 
-The XVF3800 performs acoustic echo cancellation using a reference signal — the audio being played through the speaker. For hardware AEC to work, the speaker audio must reach the chip as a reference. Plugging the speaker into the 3.5mm jack on the XVF3800 provides this reference automatically. Without it, the microphones pick up speaker audio as user speech, causing false `StartOfTurn` events and hallucinated transcriptions.
+Continuous cloud audio streaming has two major drawbacks for a tabletop assistant:
+- **Room Privacy**: An open microphone streaming ambient room sound to a third-party cloud provider 24/7 is a significant privacy concern. On-device wake-word gating guarantees that zero audio leaves the local network while Meeko is in `IDLE`.
+- **Bandwidth and API Costs**: Streaming live audio to cloud STT services continuously costs hundreds of dollars per month just to transcribe the silence of an empty room, while consuming unnecessary upstream bandwidth.
 
-### Why not use Deepgram's built-in echo cancellation?
-
-Deepgram's documentation defers echo cancellation to the browser's WebRTC stack or telephone hardware. In a Python process on a Pi or laptop, neither is available. Hardware AEC (XVF3800) or software mic-muting (`mute_mic_while_speaking`) handle this instead.
+Running [openWakeWord](https://github.com/dscripka/openWakeWord) locally on the Raspberry Pi via an ONNX runtime evaluates audio chunks in ~2ms with minimal CPU overhead, providing a rock-solid privacy boundary at zero operational cost.
