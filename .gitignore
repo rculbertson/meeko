@@ -40,9 +40,6 @@ tests/fixtures/
 .coverage
 htmlcov/
 
-# Private docs (not for public repo)
-private/
-
 # Editor/IDE directories (defensive: never belongs in the public repo)
 .idea/
 .vscode/
