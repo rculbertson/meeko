@@ -1389,9 +1389,10 @@ def _profile_dispatcher(session_id="sid-1", store=None):
         profiles,
         manager,
         MagicMock(),
+        MagicMock(),
+        MagicMock(),
         store,
         lambda: session_id,
-        meeko_main.MeekoConfig(),
     )
     return dispatcher, manager, store
 

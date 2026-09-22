@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from meeko.tools.timer import TimerManager
+from meeko.tools.timer import TimerManager, handle
 
 
 async def test_named_timer_announcement():
@@ -132,4 +132,22 @@ async def test_failed_announcement_is_logged_and_the_timer_cleaned_up(caplog):
     assert "Timer announcement failed" in caplog.text
     # The label is user-chosen and stays out of the system log.
     assert "pasta" not in caplog.text
+    assert mgr.list_timers() == "No active timers."
+
+
+async def test_handle_with_injected_manager():
+    mgr = TimerManager()
+    res = await handle(
+        "set_timer",
+        {"duration_seconds": 60, "duration_display": "1 minute", "label": "tea"},
+        manager=mgr,
+    )
+    assert "Timer 'tea' set" in res
+    assert "tea" in mgr.list_timers()
+
+    listed = await handle("list_timers", {}, manager=mgr)
+    assert "tea" in listed
+
+    cancelled = await handle("cancel_timer", {"label": "tea"}, manager=mgr)
+    assert "Timer 'tea' cancelled." in cancelled
     assert mgr.list_timers() == "No active timers."

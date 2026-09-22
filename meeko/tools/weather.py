@@ -571,10 +571,16 @@ def get_tool_definitions() -> list[ToolDefinition]:
     ]
 
 
-async def handle(fn_name: str, args: dict) -> str:
+async def handle(
+    fn_name: str,
+    args: dict,
+    *,
+    client: WeatherClient | None = None,
+) -> str:
     """Handle a weather-related function call."""
+    cl = client or weather_client
     if fn_name == "get_weather":
-        return await weather_client.get_weather(
+        return await cl.get_weather(
             latitude=args.get("latitude"),
             longitude=args.get("longitude"),
             place_label=args.get("place_label"),
