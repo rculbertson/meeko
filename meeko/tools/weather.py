@@ -394,13 +394,18 @@ class WeatherClient:
         return resp.json()
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client if owned by this instance."""
+        """Close the underlying HTTP client if owned by this instance.
+
+        Never raises: runs during teardown and must not interrupt cleanup.
+        """
         if self._client is not None and self._owns_client:
-            if hasattr(self._client, "aclose") and not getattr(
-                self._client, "is_closed", False
-            ):
-                await self._client.aclose()
+            client = self._client
             self._client = None
+            if hasattr(client, "aclose") and not getattr(client, "is_closed", False):
+                try:
+                    await client.aclose()
+                except Exception:
+                    logger.exception("Failed to close weather HTTP client")
 
 
 def _round(value: Any) -> str:

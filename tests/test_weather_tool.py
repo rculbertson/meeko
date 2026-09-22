@@ -70,6 +70,10 @@ class _StubClient:
     def __init__(self, responder: dict[str, list[Any]]):
         self._responder = responder
         self.calls: list[tuple[str, dict]] = []
+        self.is_closed = False
+
+    async def aclose(self) -> None:
+        self.is_closed = True
 
     async def __aenter__(self) -> _StubClient:
         return self
@@ -673,3 +677,35 @@ async def test_weather_client_reuses_http_client_and_aclose(monkeypatch):
 
     await client.aclose()
     assert client._client is None
+
+
+@pytest.mark.asyncio
+async def test_weather_client_with_custom_client_unowned():
+    custom_stub = _StubClient({_FORECAST: [_forecast_payload()]})
+    client = WeatherClient(client=custom_stub)
+    client.configure(latitude=40.7, longitude=-74.0, units="imperial")
+    await client.get_weather(None, None, None)
+    assert len(custom_stub.calls) == 1
+
+    # aclose should not close or discard unowned client
+    await client.aclose()
+    assert client._client is custom_stub
+    assert not custom_stub.is_closed
+
+
+@pytest.mark.asyncio
+async def test_weather_client_aclose_suppresses_exception(caplog):
+    class ErrorClient:
+        is_closed = False
+
+        async def aclose(self):
+            raise RuntimeError("network error on close")
+
+    client = WeatherClient()
+    client._client = ErrorClient()
+    client._owns_client = True
+
+    # Should not raise
+    await client.aclose()
+    assert client._client is None
+    assert "Failed to close weather HTTP client" in caplog.text
