@@ -151,3 +151,16 @@ async def test_handle_with_injected_manager():
     cancelled = await handle("cancel_timer", {"label": "tea"}, manager=mgr)
     assert "Timer 'tea' cancelled." in cancelled
     assert mgr.list_timers() == "No active timers."
+
+    await handle(
+        "set_timer",
+        {"duration_seconds": 30, "duration_display": "30 seconds", "label": "coffee"},
+        manager=mgr,
+    )
+    assert mgr.list_timers() != "No active timers."
+    cancelled_all = await handle("cancel_all_timers", {}, manager=mgr)
+    assert "Cancelled" in cancelled_all or "cancelled" in cancelled_all
+    assert mgr.list_timers() == "No active timers."
+
+    unknown = await handle("unknown_func", {}, manager=mgr)
+    assert "Unknown timer function" in unknown

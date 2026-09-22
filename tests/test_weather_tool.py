@@ -674,3 +674,6 @@ async def test_handle_with_injected_client():
         date_str=None,
         hourly=False,
     )
+
+    unknown = await handle("unknown_func", {}, client=fake_client)
+    assert "Unknown weather function" in unknown
