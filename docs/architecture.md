@@ -176,6 +176,12 @@ Exposing session control as tools rather than a separate intent classifier unifi
 2. Once speech playback finishes in `SPEAKING`, [`apply_post_turn_session_change`](../meeko/orchestrator/session_change.py) kicks off background summarization of the abandoned session.
 3. It loads the target transcript from SQLite, swaps Claude's in-memory message array via `claude.load_history()`, and rebinds the client to the restored session row. Subsequent turns hit Claude's prompt cache with the restored history.
 
+**Prompt Directives for Lifecycle Tools**:
+Because session tools mutate conversational state, each profile's system prompt gives Claude clear behavioral boundaries:
+- **Silent Teardown**: `end_session` is called silently when the user clearly signals intent to finish (*"that's enough for today"*, *"goodnight"*, *"Meeko stop"*), turning off LEDs without speaking. Ambiguous statements (*"stop interrupting me"*, *"that's enough about X, let's talk about Y"*) do not trigger session teardown.
+- **Verbal Confirmation**: Destructive or context-shifting operations (`load_session` to abandon active history, `new_session` to discard the current thread) require Claude to confirm verbally before invocation.
+- **Natural Recall**: `list_sessions` is called whenever the user asks about past topics or wants to pick up an old conversation.
+
 ### 4.6 Wake-Word Gating (`meeko/wake_word.py`, `mic_pump.py`)
 
 In `IDLE`, mic audio is evaluated purely on-device by [openWakeWord](https://github.com/dscripka/openWakeWord) running in an ONNX runtime. No audio leaves the local network until the wake phrase is detected.
@@ -383,23 +389,86 @@ The resume workflow is driven entirely by Claude calling the `list_sessions` and
 
 ---
 
-## 7. Prompt Guidance for Session Tools
+## 7. Concurrency & Threading Architecture
 
-Each profile's system prompt includes guidance directing Sonnet to:
+Real-time voice processing on a low-power host like the Raspberry Pi 5 requires strict isolation between blocking hardware/disk I/O and the asynchronous event loop. An event loop stalled for even 100ms causes audio buffer underruns, dropped WebSocket frames, or audible speech stutter.
 
-- Call `end_session` when the user clearly indicates they want to stop ("stop", "goodnight", "that's enough for today", "let's pick this up later"). `end_session` is called silently — Meeko turns off without a verbal goodbye. Do not call it when the user is ambiguous or immediately walks back the signal.
-- Call `list_sessions` when the user asks about prior conversations or wants to resume one.
-- Confirm verbally before destructive actions — especially `load_session` (which abandons the current context) and `new_session` (which discards the current thread).
+```mermaid
+flowchart TD
+    subgraph Threads["Operating System Threads"]
+        PA_In["PortAudio C Callback Thread\n(Hardware Mic Input)"]
+        PA_Out["Dedicated Single-Worker Executor: meeko-spk\n(PortAudio Blocking Writes)"]
+        DB_Worker["Dedicated Single-Worker Executor: meeko-db\n(SQLite WAL Disk Operations)"]
+    end
 
-**Example phrases Sonnet should treat as end-session signals:** "I think that's enough for today", "let's stop here", "save this", "goodnight", "Meeko stop".
+    subgraph AsyncLoop["Python asyncio Event Loop"]
+        MicQueue["asyncio.Queue (mic_queue)"]
+        Orchestrator["Orchestrator & State Machine"]
+        TurnTask["Isolated Turn Worker Task\n(Claude + TTS Pipeline)"]
+        STTTask["STT Supervisor & Keepalive Pump\n(Deepgram WebSocket)"]
+        SummaryTask["SummaryScheduler\n(Background Sonnet Summaries)"]
+    end
 
-**Example phrases that should NOT trigger `end_session`:** "stop interrupting me", "that's enough about X, let's talk about Y", "I was going to stop but…".
+    PA_In -->|loop.call_soon_threadsafe| MicQueue
+    MicQueue --> Orchestrator
+    Orchestrator --> TurnTask
+    TurnTask -->|loop.run_in_executor| PA_Out
+    TurnTask -->|asyncio.to_thread| DB_Worker
+    STTTask <--> Orchestrator
+    SummaryTask -->|asyncio.to_thread| DB_Worker
+```
 
-The fine-grained call/don't-call judgment is Sonnet's — the system prompt gives the policy, and Sonnet has full conversation context to apply it.
+### 7.1 Thread Isolation Boundaries
+
+1. **Hardware Mic Input (PortAudio C Thread ➔ Async Queue)**:
+   PortAudio captures microphone frames in low-level C callback threads. To prevent blocking the audio driver, callbacks perform zero processing: `AudioIO._mic_callback` extracts the left AEC channel and immediately hands off the 50ms chunk to Python's event loop via `loop.call_soon_threadsafe(self.mic_queue.put_nowait, mono)`.
+
+2. **Hardware Speaker Output (Dedicated `meeko-spk` Executor)**:
+   PortAudio's `write_stream` is a synchronous, blocking C function. Calling it from Python's general `asyncio.to_thread` pool is unsafe: PortAudio's stream API is strictly single-threaded, and if an utterance task is cancelled during barge-in while a write is in flight, a subsequent write on another worker thread would call `write_stream` concurrently, corrupting the stream or crashing ALSA. Meeko routes all speaker writes through a dedicated single-worker executor (`ThreadPoolExecutor(max_workers=1, thread_name_prefix="meeko-spk")`), guaranteeing strict FIFO serialization regardless of asyncio task cancellations.
+
+3. **Database Disk I/O (Dedicated `meeko-db` Executor)**:
+   SQLite operations — inserting turns, updating session timestamps, and executing FTS5 full-text searches — involve synchronous disk access. Meeko isolates SQLite calls inside a dedicated single-worker executor (`ThreadPoolExecutor(max_workers=1, thread_name_prefix="meeko-db")`). This eliminates database lock contention, guarantees sequential transaction writes under SQLite WAL mode, and ensures disk writes never stall voice streaming.
+
+4. **Event Loop Hygiene**:
+   The main asyncio event loop runs purely non-blocking coroutines: WebSocket frame routing, state machine transitions, and Claude token parsing. Running Meeko with `PYTHONASYNCIODEBUG=1` validates that no callback holds the event loop for 100ms or longer.
 
 ---
 
-## 8. Key Decisions
+## 8. Appliance Resilience & Fault Tolerance
+
+As an always-on tabletop appliance without a keyboard or monitor, Meeko must run unattended for weeks without manual restarts, surviving network dropouts, upstream API errors, and sudden power cuts.
+
+### 8.1 Network & STT Supervision (`meeko/stt_supervisor.py`)
+
+The connection to Deepgram's streaming STT endpoint is governed by [`STTSupervisor`](../meeko/stt_supervisor.py), which handles transient network outages transparently:
+
+- **Exponential Backoff with Jitter**:
+  When a WebSocket disconnects unexpectedly (e.g., DNS blip, server 1011 drop), the supervisor retries with exponential backoff: `(0.5s, 1s, 2s, 4s, 8s, 16s, 30s)`. A single failure logs a full traceback; prolonged outages log a single warning per attempt to prevent log flooding.
+- **Audio Grace Buffering (`RECONNECT_GRACE_S = 10s`)**:
+  During transient network hiccups, Meeko keeps capturing mic frames for up to 10 seconds. If connection is restored within the grace window, speech queued during the blip is delivered to Deepgram without losing the user's turn. If the outage exceeds 10 seconds, the mic queue is drained and audio capture is paused until the connection stabilizes.
+- **Server Keepalive Heartbeats**:
+  Deepgram STT requires periodic activity to prevent idle disconnections. When no mic audio is actively streaming (such as in `IDLE`), `keepalive_pump` sends a JSON `KeepAlive` text frame every 5 seconds.
+
+### 8.2 Crash-Proof Turn Persistence & Startup Backfill
+
+- **Zero-Data-Loss Invariant**:
+  Because turns are committed to SQLite immediately upon completion (§6.2), a sudden power pull never corrupts historical transcripts. SQLite runs with `PRAGMA synchronous = NORMAL` and `PRAGMA journal_mode = WAL`, providing crash durability with low write overhead.
+- **Orphaned Session Backfill**:
+  If a power outage occurs while a conversation is active, the session will lack a summary and title. On boot, [`SummaryScheduler.backfill()`](../meeko/session_summary.py) queries for unfinalized historical sessions, summarizes them asynchronously with Claude, and indexes them into FTS5 before the user wakes the device.
+- **Clean Shutdown Draining**:
+  When receiving `SIGINT` or `SIGTERM`, Meeko cancels the active turn, drains the background summary scheduler (`SummaryScheduler.aclose()`), stops PortAudio streams, and closes the database connection cleanly before exiting.
+
+### 8.3 Non-Fatal Turn Failures
+
+Turn-level errors never crash the application:
+- **API & Network Exceptions**: If Anthropic times out, Deepgram TTS fails, or Open-Meteo returns an error, `TurnWorker` catches the exception, logs it, pulses the LED ring in red (breathing error state for ~3 seconds), and returns the state machine cleanly to `LISTENING`.
+- **Tool Error Insulation**: All tool handlers (`set_timer`, `get_weather`, `list_sessions`) catch internal exceptions and return friendly natural-language error strings to Claude rather than raising. Claude can then explain the problem to the user (*"I couldn't reach the weather service just now"*).
+- **Process Supervision (`systemd`)**:
+  In the rare event of an unrecoverable failure (e.g. fatal hardware disconnect), `meeko` exits non-zero. A systemd unit configured with `Restart=always` and `RestartSec=2` reboots the process into a clean `IDLE` state.
+
+---
+
+## 9. Key Decisions
 
 ### Why call Claude directly instead of using Deepgram's managed Claude?
 
@@ -436,9 +505,3 @@ The XVF3800 performs acoustic echo cancellation using a reference signal — the
 ### Why not use Deepgram's built-in echo cancellation?
 
 Deepgram's documentation defers echo cancellation to the browser's WebRTC stack or telephone hardware. In a Python process on a Pi or laptop, neither is available. Hardware AEC (XVF3800) or software mic-muting (`mute_mic_while_speaking`) handle this instead.
-
----
-
-## 9. Deliberate Scope
-
-Meeko is intentionally a voice-only, single-user, single-device assistant. Features explicitly out of scope for now: web or mobile UI, multi-user support, semantic search over sessions (SQLite FTS5 is sufficient at expected volumes), session deletion or editing by voice, cross-device sync. These omissions keep the system small enough to reason about end-to-end; revisit any of them if real-world usage shows a clear need.
