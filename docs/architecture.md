@@ -254,52 +254,26 @@ stateDiagram-v2
 
 ### 5.3 Barge-In
 
-1. `StartOfTurn` fires while state is SPEAKING **or PROCESSING**.
-2. Immediately stop TTS audio playback.
-3. Cancel in-flight Claude API request if possible.
-4. Discard any partially generated response.
-5. Transition to LISTENING.
-6. Process user's barge-in as a new turn.
+In natural brainstorming conversations, people frequently interrupt — either talking over the assistant or changing their mind while the assistant is thinking. Meeko treats interruptions as first-class events: speaking at any point immediately cuts audio playback, cancels in-flight LLM generation, and pivots to the user's new thought without requiring a wake word.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Mic as ReSpeaker (Mic)
-    participant STT as Deepgram STT (Flux)
-    participant Worker as TurnWorker (Sub-task)
-    participant Claude as Claude Sonnet 5
-    participant TTS as Deepgram TTS
-    participant Spk as Speaker
+When `StartOfTurn` fires during `SPEAKING` or `PROCESSING`, Meeko executes four immediate actions:
+1. **Purge audio buffer**: Abort speaker output and flush the hardware ring buffer immediately so sound cuts off with zero audible lag.
+2. **Cancel cloud generation**: Drop the in-flight Claude stream and discard any partially generated reply so tokens aren't wasted.
+3. **Cancel turn sub-task**: Cancel the isolated asyncio turn task without interrupting the main orchestrator loop.
+4. **Reset state**: Transition synchronously to `LISTENING` (bright cyan LED) so the incoming speech is processed as a fresh turn.
 
-    Note over Worker,Spk: Meeko is SPEAKING or PROCESSING
-    Worker->>Claude: Streaming prompt...
-    Claude-->>Worker: Streaming tokens
-    Worker->>TTS: Stream text
-    TTS-->>Spk: Stream PCM audio
+#### Key Architectural Challenges
 
-    User->>Mic: "Wait, actually..." (Interrupts)
-    Mic->>STT: Left-channel audio (Speaker echo subtracted via AEC)
-    STT->>Worker: StartOfTurn event
+1. **Barging in while thinking (`PROCESSING`)**:
+   Users interrupt during the silent thinking gap (Claude TTFT + TTS synthesis, often >1s) just as often as during audible speech. To keep visual cues honest, Meeko defers entering `SPEAKING` until the first audio byte actually reaches the speaker. If a user interrupts during this gap, Meeko treats it as an identical barge-in, aborting generation before the reply ever becomes audible.
 
-    rect rgb(240, 220, 220)
-        Note over Worker,Spk: Barge-In Handling
-        Worker->>Spk: Abort playback & purge buffer
-        Worker->>Worker: Cancel active turn sub-task
-        Worker->>Claude: Drop stream connection
-        Worker->>Worker: Transition State -> LISTENING
-    end
+2. **Zero-Latency Silence (Buffer Purging)**:
+   Simply stopping the audio stream leaves up to 500ms of audio sitting in the hardware/driver output buffer, causing the assistant to awkwardly finish its syllable. `Speaker.abort()` explicitly flushes the hardware ring buffer to achieve instantaneous, crisp silence.
 
-    User->>Mic: "...tell me about Paris instead."
-    STT->>Worker: EndOfTurn event (New transcript)
-    Worker->>Claude: Launch fresh turn
-```
+3. **Concurrency & Sub-Task Cancellation**:
+   In Python asyncio, cancelling a long-running worker task would kill the assistant. In Meeko, [`TurnWorker`](../meeko/orchestrator/turn_worker.py) runs each Claude+TTS turn as an isolated sub-task (`asyncio.create_task`). On barge-in, `request_barge_in()` cancels *only* that sub-task and synchronously resets the state machine to `LISTENING`. A custom cancellation flag distinguishes a user barge-in from an application shutdown.
 
-The PROCESSING case matters as much as the SPEAKING one: the window between `EndOfTurn` and the first audio byte (Claude TTFT + Deepgram TTS first-byte synthesis) is often over a second, and `Speaker` deliberately defers entering SPEAKING until that first chunk arrives so the LEDs don't claim to be talking before there's audio. A user who changes their mind during that gap is barging in on a reply that exists but isn't audible yet, and is handled identically.
-
-Hardware AEC (on the XVF3800) ensures Deepgram STT does not hear speaker audio as user speech. `StartOfTurn` events during TTS playback are therefore genuine barge-ins, not echo artifacts. On hardware without AEC, software mic-muting (`mute_mic_while_speaking = true`) provides the equivalent guarantee at the cost of disallowing barge-in.
-
-Barge-in is implemented in `TurnWorker` ([meeko/orchestrator/turn_worker.py](../meeko/orchestrator/turn_worker.py)), the long-lived consumer of the turn queue. Each Claude+TTS turn runs as its own sub-task, so `request_barge_in()` can cancel that turn without stopping the worker. The worker lives at `run()` scope, outside the per-STT-session workers, so an STT reconnect mid-reply doesn't cut TTS off. A barge-in cancel and a shutdown cancel both reach the worker as a `CancelledError` from the turn. The first must leave the worker running and the second must propagate, and a flag set by `request_barge_in()` before it cancels is the only thing that tells them apart. `stop_event` can't be used, because asyncio's shutdown cancels the worker before `run()`'s `finally` sets it. `request_barge_in()` also switches to LISTENING synchronously, with or without a turn to cancel, because `SttEventRouter` handles the `EndOfTurn` that follows without yielding, and in SPEAKING that transcript would be dropped as echo.
+*(Note: Hardware AEC on the ReSpeaker XVF3800 subtracts speaker output from mic input so playback never triggers false barge-ins; see §4.1 for fallback mic-muting on devices without AEC.)*
 
 ---
 
