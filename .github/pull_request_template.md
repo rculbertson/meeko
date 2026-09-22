@@ -8,12 +8,12 @@ weekend. See CONTRIBUTING.md.
 
 **Related issue**
 
-<!-- Required for non-trivial changes. -->
+<!-- e.g. "Closes #123", "Fixes #45", or "N/A — docs only". Required for non-trivial changes. -->
 
 ---
 
 - [ ] Tests added or updated (`uv run pytest` passes)
-- [ ] `uv run ruff check .`, `uv run ruff format --check .` and `uv run pyright` pass
+- [ ] Quality checks pass (`uv run ruff check .`, `uv run ruff format --check .`, `uv run pyright`, and `./scripts/check_complexity.sh`)
 - [ ] Hardware paths: if this touches `meeko/leds.py`, `meeko/audio_io.py`, or `meeko/speaker.py`, say what you tested on below — CI cannot verify these.
 
 **Hardware tested on**
