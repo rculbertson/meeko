@@ -1,5 +1,9 @@
 # Meeko
 
+[![CI](https://github.com/rculbertson/meeko/actions/workflows/ci.yml/badge.svg)](https://github.com/rculbertson/meeko/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
+
 Meeko is a screenless, tabletop voice assistant powered by Claude. Built as a dedicated appliance for the **Raspberry Pi**, Meeko acts as an always-ready thinking partner that remembers the full context of every conversation. Brainstorm an idea, step away for days, and pick up right where you left off—just say, *"let's go back to the conversation about the app I'm building,"* and Meeko seamlessly resumes.
 
 *(You can also test and develop Meeko on a Mac before assembling dedicated hardware — see [Testing on macOS](#testing-on-macos).)*
