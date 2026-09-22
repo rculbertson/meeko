@@ -6,6 +6,7 @@ itself is exercised end-to-end (forecast fetch + format).
 
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -170,9 +171,7 @@ async def _get_weather(
         longitude=_HOME_LON if home else None,
         units=units,
     )
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", args or {})
+    result = await handle("get_weather", args or {}, client=client)
     params = stub.calls[0][1] if stub and stub.calls else None
     return result, params
 
@@ -654,3 +653,25 @@ async def test_live_weather_client_daily_and_hourly():
     )
     assert "San Francisco, next" in hourly_result
     assert "°F" in hourly_result
+
+
+@pytest.mark.asyncio
+async def test_handle_with_injected_client():
+    fake_client = MagicMock()
+    fake_client.get_weather = AsyncMock(return_value="sunny")
+    res = await handle(
+        "get_weather",
+        {"latitude": 10.0, "longitude": 20.0},
+        client=fake_client,
+    )
+    assert res == "sunny"
+    fake_client.get_weather.assert_awaited_once_with(
+        latitude=10.0,
+        longitude=20.0,
+        place_label=None,
+        date_str=None,
+        hourly=False,
+    )
+
+    unknown = await handle("unknown_func", {}, client=fake_client)
+    assert "Unknown weather function" in unknown
