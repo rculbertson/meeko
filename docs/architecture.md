@@ -25,46 +25,48 @@ flowchart TD
     Mic["ReSpeaker XVF3800 (Mic & LEDs)"]
     Speaker["Powered Speaker"]
 
-    subgraph Pi["Raspberry Pi 5"]
+    subgraph Pi["Raspberry Pi"]
         subgraph Meeko["Meeko Process"]
-            AudioIO["Audio Subsystem (PyAudio / MicPump / Speaker)"]
+            AudioIO["Audio I/O"]
             WakeWord["openWakeWord (Local ONNX)"]
-            Orchestrator["Orchestrator (TurnWorker, State Machine, Idle)"]
+            Orchestrator["Orchestrator & State Machine"]
             Tools["Tool Dispatcher (Weather, Timer, Profile, Session)"]
         end
         DB[("SQLite Database\n(~/.local/share/meeko/meeko.db)")]
     end
 
     subgraph Cloud["External Cloud APIs"]
-        DeepgramSTT["Deepgram Flux STT (WebSocket)"]
-        DeepgramTTS["Deepgram Aura-2 TTS (WebSocket)"]
+        DeepgramSTT["Deepgram Flux STT"]
+        DeepgramTTS["Deepgram Aura-2 TTS"]
         Claude["Anthropic Claude Sonnet 5"]
-        OpenMeteo["Open-Meteo Weather (Http)"]
+        OpenMeteo["Open-Meteo Weather"]
     end
 
-    %% Audio input path
+    %% Hardware I/O
     User -->|Voice| Mic
-    Mic -->|"Processed mic audio (USB)"| AudioIO
+    Mic -->|Mic audio| AudioIO
+    AudioIO -->|Playback audio| Speaker
+    Speaker -.->|AEC reference loop| Mic
+
+    %% Local Gating
     AudioIO -->|Audio in IDLE| WakeWord
-    WakeWord -->|Wake word detected| Orchestrator
-    AudioIO -->|Audio in LISTENING| DeepgramSTT
-    DeepgramSTT -->|Turn events & transcript| Orchestrator
+    WakeWord -->|Wake event| Orchestrator
+    AudioIO -->|Audio in LISTENING| Orchestrator
 
-    %% Reasoning and tools
-    Orchestrator <-->|Prompt, history, tools| Claude
-    Orchestrator -->|Dispatch tool| Tools
+    %% Cloud STT / LLM / TTS Pipeline
+    Orchestrator <-->|Mic audio & transcripts| DeepgramSTT
+    Orchestrator <-->|Prompts & response text| Claude
+    Orchestrator <-->|Text & synthesized audio| DeepgramTTS
+    Orchestrator -->|Synthesized audio| AudioIO
+
+    %% Tools & Persistence
+    Orchestrator -->|Tool calls| Tools
     Tools <-->|Weather queries| OpenMeteo
-    Tools <-->|Search & load sessions| DB
-    Orchestrator -->|Persist turns| DB
+    Tools <-->|Session queries| DB
+    Orchestrator -->|Turn persistence| DB
 
-    %% Audio output and AEC
-    Claude -->|Streaming text| DeepgramTTS
-    DeepgramTTS -->|Synthesized audio| AudioIO
-    AudioIO -->|Audio playback| Speaker
-    Speaker -.->|"AEC reference loop (3.5mm audio)"| Mic
-
-    %% Visual state cues
-    Orchestrator -->|"LED ring control (USB)"| Mic
+    %% Visual status
+    Orchestrator -->|LED control| Mic
 ```
 
 ---
