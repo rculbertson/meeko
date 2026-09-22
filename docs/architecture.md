@@ -20,40 +20,51 @@ It also handles quick everyday tasks (one-shot questions, timers, persona switch
 
 ```mermaid
 flowchart TD
-    subgraph Hardware["Local Hardware (Raspberry Pi 5 + ReSpeaker XVF3800)"]
-        User(["User"])
-        Mic["4-Mic Array (Left Ch / Hardware AEC)"]
-        Speaker["Powered Speaker (3.5mm AEC Ref)"]
-        LEDs["WS2812 LED Ring (libusb control)"]
+    User(["User"])
+
+    Mic["ReSpeaker XVF3800 (Mic & LEDs)"]
+    Speaker["Powered Speaker"]
+
+    subgraph Pi["Raspberry Pi 5"]
+        subgraph Meeko["Meeko Process"]
+            AudioIO["Audio Subsystem (PyAudio / MicPump / Speaker)"]
+            WakeWord["openWakeWord (Local ONNX)"]
+            Orchestrator["Orchestrator (TurnWorker, State Machine, Idle)"]
+            Tools["Tool Dispatcher (Weather, Timer, Profile, Session)"]
+        end
+        DB[("SQLite Database\n(~/.local/share/meeko/meeko.db)")]
     end
 
-    subgraph Appliance["Meeko Local Process"]
-        WakeGate["openWakeWord (ONNX) - 'Hey Meeko' Local Gate"]
-        Orchestrator["Orchestrator Engine (State Machine, TurnWorker, IdleController)"]
-        DB[("Local SQLite (Turns, Sessions, FTS5)")]
-        Tools["Tool Dispatcher (Weather, Timer, Profile, Session)"]
-    end
-
-    subgraph Cloud["External Cloud Services (BYOK)"]
+    subgraph Cloud["External Cloud APIs"]
         DeepgramSTT["Deepgram Flux STT (WebSocket)"]
         DeepgramTTS["Deepgram Aura-2 TTS (WebSocket)"]
-        Claude["Anthropic Claude Sonnet 5 (Prompt Cache + Compaction)"]
-        OpenMeteo["Open-Meteo (Free Weather API)"]
+        Claude["Anthropic Claude Sonnet 5"]
+        OpenMeteo["Open-Meteo Weather (Http)"]
     end
 
+    %% Audio input path
     User -->|Voice| Mic
-    Mic -->|Raw audio in IDLE| WakeGate
-    WakeGate -->|Wake event| Orchestrator
-    Mic -->|Live audio in LISTENING| DeepgramSTT
-    DeepgramSTT -->|StartOfTurn / EndOfTurn| Orchestrator
-    Orchestrator <-->|Prompt + History + Tools| Claude
-    Orchestrator -->|Dispatch| Tools
-    Tools <-->|Forecast HTTP| OpenMeteo
-    Tools <-->|Persist / FTS Search| DB
-    Claude -->|Streaming tokens| DeepgramTTS
-    DeepgramTTS -->|PCM audio| Speaker
-    Orchestrator -->|Synchronous state cues| LEDs
-    Speaker -.->|Hardware AEC Reference Loop| Mic
+    Mic -->|"Processed mic audio (USB)"| AudioIO
+    AudioIO -->|Audio in IDLE| WakeWord
+    WakeWord -->|Wake word detected| Orchestrator
+    AudioIO -->|Audio in LISTENING| DeepgramSTT
+    DeepgramSTT -->|Turn events & transcript| Orchestrator
+
+    %% Reasoning and tools
+    Orchestrator <-->|Prompt, history, tools| Claude
+    Orchestrator -->|Dispatch tool| Tools
+    Tools <-->|Weather queries| OpenMeteo
+    Tools <-->|Search & load sessions| DB
+    Orchestrator -->|Persist turns| DB
+
+    %% Audio output and AEC
+    Claude -->|Streaming text| DeepgramTTS
+    DeepgramTTS -->|Synthesized audio| AudioIO
+    AudioIO -->|Audio playback| Speaker
+    Speaker -.->|"AEC reference loop (3.5mm audio)"| Mic
+
+    %% Visual state cues
+    Orchestrator -->|"LED ring control (USB)"| Mic
 ```
 
 ---
