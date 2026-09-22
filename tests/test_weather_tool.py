@@ -171,9 +171,7 @@ async def _get_weather(
         longitude=_HOME_LON if home else None,
         units=units,
     )
-    weather_mod.weather_client = client
-
-    result = await handle("get_weather", args or {})
+    result = await handle("get_weather", args or {}, client=client)
     params = stub.calls[0][1] if stub and stub.calls else None
     return result, params
 
