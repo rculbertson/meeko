@@ -20,44 +20,50 @@ It also handles quick everyday tasks (one-shot questions, timers, persona switch
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        User                                  │
+│                        User                                 │
 └────────────────────────┬────────────────────────────────────┘
                          │ voice
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Microphone + speaker hardware                   │
-│   (e.g. ReSpeaker XVF3800: 4-mic array, hardware AEC,        │
-│    beamforming, VAD; speaker via 3.5mm jack for AEC ref)     │
+│              Microphone + speaker hardware                  │
+│   (e.g. ReSpeaker XVF3800: 4-mic array, hardware AEC,       │
+│    beamforming, VAD; speaker via 3.5mm jack for AEC ref)    │
 └────────────┬────────────────────────────┬───────────────────┘
-             │ mic audio                   │ audio out
-             ▼                             ▼
-┌────────────────────┐         ┌──────────────────────┐
-│   Deepgram STT     │         │    Deepgram TTS       │
-│   Flux model       │         │    Aura-2             │
-│   EndOfTurn events │         │    streamed playback  │
-│   StartOfTurn      │         └──────────────────────┘
-└────────────┬───────┘                    ▲
-             │ transcript                 │ text
-             ▼                            │
-┌─────────────────────────────────────────────────────────────┐
-│                  Meeko Orchestrator                          │
-│                                                              │
-│  ┌──────────────────┐   ┌────────────────┐                  │
-│  │  Tool dispatcher │   │ Session Manager│                  │
-│  │  timer / profile │   │ SQLite storage │                  │
-│  │  session tools   │   │ resume logic   │                  │
-│  └────────┬─────────┘   └───────┬────────┘                  │
-│           │                     │                            │
-│           └──────────┬──────────┘                           │
-│                      ▼                                       │
-│            ┌──────────────────┐                             │
-│            │  Claude API      │                             │
-│            │  Direct calls    │                             │
-│            │  Prompt caching  │                             │
-│            │  Tool use        │                             │
-│            │  Web search      │                             │
-│            │  Auto compaction │                             │
-│            └──────────────────┘                             │
+             │ mic audio                  │ audio out
+             ▼                            ▼
+┌─────────────────────────┐      ┌──────────────────────┐
+│  openWakeWord           │      │    Deepgram TTS      │
+│  (on-device ONNX gate)  │      │    Aura-2            │
+└────────────┬────────────┘      │    streamed playback │
+             │ post-wake audio   └──────────────────────┘
+             ▼                               ▲
+┌─────────────────────────┐                  │ text
+│   Deepgram STT          │                  │
+│   Flux model            │                  │
+│   EndOfTurn events      │                  │
+│   StartOfTurn           │                  │
+└────────────┬────────────┘                  │
+             │ transcript                    │
+             ▼                               │
+┌────────────────────────────────────────────┴────────────────┐
+│                  Meeko Orchestrator                         │
+│                                                             │
+│  ┌────────────────────┐ ┌────────────────┐ ┌─────────────┐  │
+│  │  Tool dispatcher   │ │ Session Manager│ │ LED Control │  │
+│  │  timer / profile   │ │ SQLite storage │ │ WS2812 ring │  │
+│  │  weather / session │ │ resume logic   │ │ state cues  │  │
+│  └─────────┬──────────┘ └───────┬────────┘ └─────────────┘  │
+│            │                    │                           │
+│            └──────────┬─────────┘                           │
+│                       ▼                                     │
+│             ┌──────────────────┐                            │
+│             │  Claude API      │                            │
+│             │  Direct calls    │                            │
+│             │  Prompt caching  │                            │
+│             │  Tool use        │                            │
+│             │  Web search      │                            │
+│             │  Auto compaction │                            │
+│             └──────────────────┘                            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -111,7 +117,10 @@ Meeko calls the Claude API directly — not via Deepgram's managed LLM. This is 
 
 **Model:** `claude-sonnet-5`
 
-**Prompt caching.** `cache_control` is stamped on the system prompt block and on the tail block of the latest message at send time. The breakpoint moves forward each turn, so the previous turn's tail becomes the longest cached prefix on the next call.
+**Prompt caching & system prompt prefix.** `cache_control` is stamped on the system prompt block and on the tail block of the latest message at send time. The breakpoint moves forward each turn, so the previous turn's tail becomes the longest cached prefix on the next call. The stable prefix consists of:
+1. Current local date and time block (`_date_block`)
+2. Optional approximate home coordinates block (`_location_block`, injected when `[location] latitude/longitude` are configured in `meeko.toml`)
+3. The active profile's persona system prompt (`_profile_prompt`)
 
 **Server-side compaction.** Enabled via `client.beta.messages.stream(...)` with `betas=["compact-2026-01-12"]` and `context_management={"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": compaction_trigger_tokens}}]}`. The threshold is configured via `[claude] compaction_trigger_tokens` in `meeko.toml` (default `150000`). When the API summarizes a prefix, it returns a `compaction` content block in the assistant message. The client round-trips that block in the in-memory message array (so the server doesn't re-summarize the same prefix on the next turn) and filters it out before SQLite persistence (so on-disk transcripts stay verbatim).
 
@@ -123,9 +132,15 @@ Meeko calls the Claude API directly — not via Deepgram's managed LLM. This is 
 
 Used for speech synthesis. Text is streamed to the TTS WebSocket as Claude generates tokens, and audio is played back in real time with sub-200ms latency to first audio byte. The Aura-2 voice id is per-profile (`voice = "mars"`, `"andromeda"`, etc.) — see §4.7.
 
-### 4.5 Session Management via Claude Tools
+### 4.5 Tool Architecture & Session Intents
 
-Session-management intents — end, new, list, and load (resume) — are exposed to Sonnet as Claude-native tools, not detected by a separate classifier. This mirrors the pattern already used for timers ([meeko/tools/timer.py](../meeko/tools/timer.py)) and profile switching ([meeko/tools/profile.py](../meeko/tools/profile.py)): tools are registered via `ToolDispatcher`, Sonnet decides when to call them based on the conversation, and `ClaudeClient`'s tool-use loop dispatches to the tool's handler, which executes the side effect, when Sonnet emits a `tool_use` block. (For the complete data model, persistence architecture, and resume flow, see §6 and §7.)
+Meeko exposes external capabilities and session-management intents to Sonnet as Claude-native tools, registered through `ToolDispatcher`:
+- **Timers** ([meeko/tools/timer.py](../meeko/tools/timer.py)): `set_timer` with natural language duration, backed by an async background timer loop.
+- **Profile switching** ([meeko/tools/profile.py](../meeko/tools/profile.py)): `switch_profile` and `list_profiles` to rotate personas on the fly.
+- **Weather** ([meeko/tools/weather.py](../meeko/tools/weather.py)): `get_weather` powered by Open-Meteo (free, no API key required), defaulting to configured home coordinates or reverse-geocoded coordinates for requested places.
+- **Session management** ([meeko/tools/session.py](../meeko/tools/session.py)): `end_session`, `new_session`, `list_sessions`, and `load_session`.
+
+Exposing session-management intents as tools rather than detecting them with a separate classifier mirrors the pattern used across all other tools: tools are registered via `ToolDispatcher`, Sonnet decides when to call them based on conversation context, and `ClaudeClient`'s tool-use loop dispatches to the tool's handler when Sonnet emits a `tool_use` block. (For the complete data model, persistence architecture, and resume flow, see §6 and §7.)
 
 **Tools exposed to Sonnet:**
 
@@ -182,15 +197,21 @@ This used to be two hardcoded modes selected by the profile name, which is why n
 
 **Voice-driven profile switching.** Profile changes are exposed to Sonnet as the `switch_profile` and `list_profiles` tools. The `switch_profile` description is built from the loaded profiles — one line per profile, from its `description` key ([meeko/tools/profile.py](../meeko/tools/profile.py)) — so Sonnet can match both "switch to conversation mode" and indirect asks like "let's have a long conversation" to a profile, including user-added ones. It calls `switch_profile(profile_name=...)`; the new system prompt is bound on the next Claude call and the new profile's idle behavior takes effect on the next turn. The active profile persists for the rest of the session, and the switch is also written to the session's `profile_name` in SQLite, so `--resume` and `load_session` bring the session back in the profile it was left in, not the one it started in. (`_build_dispatcher` in [meeko/main.py](../meeko/main.py) wraps the profile tools to do this; the write is best-effort, since the in-memory switch has already been confirmed to the user.)
 
-### 4.8 Session Manager
+### 4.8 Session Manager & Background Scheduling
 
-Responsible for storing and retrieving sessions. See §6 for the full SQLite data model, turn persistence, end-of-session summarization, and resume flow.
+The Session Manager coordinates immediate turn persistence to SQLite and delegates end-of-session summarization to `SummaryScheduler` ([meeko/session_summary.py](../meeko/session_summary.py)). Summarization runs asynchronously in the background so that session teardown and wake cycles never block. `SummaryScheduler` also backfills any unsummarized sessions on startup and guarantees clean task draining via `aclose()` before database shutdown. Full data models, FTS5 indexing, and resume workflows are covered in §6.
 
-**Responsibilities:**
-- Write every turn to SQLite immediately on completion
-- Generate end-of-session summary via a separate Claude API call
-- Match resume requests to stored sessions
-- Inject full transcript on resume
+### 4.9 LED Controller & Visual State Mirror
+
+On-device visual feedback is driven by `LedController` ([meeko/leds.py](../meeko/leds.py)) for the ReSpeaker XVF3800's WS2812 LED ring. To ensure the hardware ring can never disagree with the orchestrator, `StateManager` ([meeko/orchestrator/state.py](../meeko/orchestrator/state.py)) is the sole caller that updates LEDs synchronously on every state transition:
+- **`IDLE`**: Off
+- **`LISTENING`**: Solid cyan ("ready" cue)
+- **`LISTENING_ACTIVE`**: Bright cyan (active speech detected)
+- **`PROCESSING`**: Blue breathing pattern (waiting on Claude / TTS)
+- **`SPEAKING`**: Solid green (audio playing through speaker)
+- **Errors**: Red breathing pattern (~3 seconds)
+
+LED communication runs over direct USB vendor control transfers via `libusb` / `pyusb` without requiring root permissions (via `scripts/99-meeko-xvf3800.rules`). LED control is automatically disabled on unsupported hosts or when `led_disabled = true` in `meeko.toml`.
 
 ---
 
@@ -311,6 +332,8 @@ Turns are written to SQLite immediately on completion — not buffered and not d
 When a session ends, a separate Claude API call generates a `{title, summary}` pair from the full on-disk transcript. This is independent of whatever state compaction has left the in-memory message array in. The transcript is written to `sessions_fts.transcript` alongside `title` and `summary` so FTS search has a fallback match surface when the summarizer misses a specific keyword the user later recalls.
 
 **Model choice.** Summarization runs on `claude-sonnet-5`, not Haiku. Sessions routinely grow to 50k-150k tokens, and summary quality directly drives voice-resume recall — a weak title means the user says *"go back to the todo app"* and FTS misses. The call is once per session and runs in the background, so Haiku's cost/latency advantages don't apply.
+
+**Background scheduling.** Summarization tasks are managed by `SummaryScheduler` ([meeko/session_summary.py](../meeko/session_summary.py)). Rather than coupling summarization to the orchestrator's wake/turn loop, the scheduler launches tasks in the background (`fire()`), tracks in-flight executions, runs an automatic startup backfill (`backfill()`) for any prior sessions left unsummarized due to an ungraceful shutdown, and drains cleanly at exit (`aclose()`) before the database closes.
 
 **Not yet implemented: chunking.** The whole transcript is sent in one call. A transcript that exceeds Sonnet's context window errors, and since summarization is fire-and-forget the failure is logged and skipped — the session simply never gets a title or an FTS row, so it can't be recalled by voice. Splitting into chunks, summarizing each, then summarizing the summaries is the intended fix; at personal-use volumes it hasn't been worth building yet. See the note at the top of [meeko/session_summary.py](../meeko/session_summary.py).
 
