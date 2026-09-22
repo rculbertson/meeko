@@ -1956,3 +1956,11 @@ def test_main_registers_sigint_and_sigterm():
 
     assert signal.SIGINT in signals_registered
     assert signal.SIGTERM in signals_registered
+    assert signals_registered[signal.SIGINT] is signals_registered[signal.SIGTERM]
+
+    fake_task = MagicMock()
+    with patch("asyncio.all_tasks", return_value={fake_task}):
+        handler = signals_registered[signal.SIGINT]
+        assert callable(handler)
+        handler()
+        fake_task.cancel.assert_called_once()
