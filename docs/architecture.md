@@ -18,53 +18,42 @@ It also handles quick everyday tasks (one-shot questions, timers, persona switch
 
 ## 2. Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        User                                 │
-└────────────────────────┬────────────────────────────────────┘
-                         │ voice
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Microphone + speaker hardware                  │
-│   (e.g. ReSpeaker XVF3800: 4-mic array, hardware AEC,       │
-│    beamforming, VAD; speaker via 3.5mm jack for AEC ref)    │
-└────────────┬────────────────────────────┬───────────────────┘
-             │ mic audio                  │ audio out
-             ▼                            ▼
-┌─────────────────────────┐      ┌──────────────────────┐
-│  openWakeWord           │      │    Deepgram TTS      │
-│  (on-device ONNX gate)  │      │    Aura-2            │
-└────────────┬────────────┘      │    streamed playback │
-             │ post-wake audio   └──────────────────────┘
-             ▼                               ▲
-┌─────────────────────────┐                  │ text
-│   Deepgram STT          │                  │
-│   Flux model            │                  │
-│   EndOfTurn events      │                  │
-│   StartOfTurn           │                  │
-└────────────┬────────────┘                  │
-             │ transcript                    │
-             ▼                               │
-┌────────────────────────────────────────────┴────────────────┐
-│                  Meeko Orchestrator                         │
-│                                                             │
-│  ┌────────────────────┐ ┌────────────────┐ ┌─────────────┐  │
-│  │  Tool dispatcher   │ │ Session Manager│ │ LED Control │  │
-│  │  timer / profile   │ │ SQLite storage │ │ WS2812 ring │  │
-│  │  weather / session │ │ resume logic   │ │ state cues  │  │
-│  └─────────┬──────────┘ └───────┬────────┘ └─────────────┘  │
-│            │                    │                           │
-│            └──────────┬─────────┘                           │
-│                       ▼                                     │
-│             ┌──────────────────┐                            │
-│             │  Claude API      │                            │
-│             │  Direct calls    │                            │
-│             │  Prompt caching  │                            │
-│             │  Tool use        │                            │
-│             │  Web search      │                            │
-│             │  Auto compaction │                            │
-│             └──────────────────┘                            │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Hardware["Local Hardware (Raspberry Pi 5 + ReSpeaker XVF3800)"]
+        User(["User"])
+        Mic["4-Mic Array (Left Ch / Hardware AEC)"]
+        Speaker["Powered Speaker (3.5mm AEC Ref)"]
+        LEDs["WS2812 LED Ring (libusb control)"]
+    end
+
+    subgraph Appliance["Meeko Local Process"]
+        WakeGate["openWakeWord (ONNX) - 'Hey Meeko' Local Gate"]
+        Orchestrator["Orchestrator Engine (State Machine, TurnWorker, IdleController)"]
+        DB[("Local SQLite (Turns, Sessions, FTS5)")]
+        Tools["Tool Dispatcher (Weather, Timer, Profile, Session)"]
+    end
+
+    subgraph Cloud["External Cloud Services (BYOK)"]
+        DeepgramSTT["Deepgram Flux STT (WebSocket)"]
+        DeepgramTTS["Deepgram Aura-2 TTS (WebSocket)"]
+        Claude["Anthropic Claude Sonnet 5 (Prompt Cache + Compaction)"]
+        OpenMeteo["Open-Meteo (Free Weather API)"]
+    end
+
+    User -->|Voice| Mic
+    Mic -->|Raw audio in IDLE| WakeGate
+    WakeGate -->|Wake event| Orchestrator
+    Mic -->|Live audio in LISTENING| DeepgramSTT
+    DeepgramSTT -->|StartOfTurn / EndOfTurn| Orchestrator
+    Orchestrator <-->|Prompt + History + Tools| Claude
+    Orchestrator -->|Dispatch| Tools
+    Tools <-->|Forecast HTTP| OpenMeteo
+    Tools <-->|Persist / FTS Search| DB
+    Claude -->|Streaming tokens| DeepgramTTS
+    DeepgramTTS -->|PCM audio| Speaker
+    Orchestrator -->|Synchronous state cues| LEDs
+    Speaker -.->|Hardware AEC Reference Loop| Mic
 ```
 
 ---
@@ -219,35 +208,27 @@ LED communication runs over direct USB vendor control transfers via `libusb` / `
 
 ### 5.1 State Machine
 
-```
-┌─────────────┐
-│   IDLE      │ ◄─── app start, end_session tool call,
-└──────┬──────┘       idle-timeout close,
-       │              post-wake timeout (no first turn)
-       │ wake word detected ("Hey Meeko")
-       ▼
-┌─────────────┐
-│  LISTENING  │ ◄── before the first turn: post-wake monitor
-│             │     (post_wake_timeout_seconds → silent close, back to IDLE)
-│             │ ◄── after each turn: idle monitor
-│             │     (active profile's idle_* keys)
-└──────┬──────┘
-       │ EndOfTurn fires
-       ▼
-┌─────────────┐
-│  PROCESSING │ Claude API call with tool use
-└──────┬──────┘
-       │ response ready (possibly with tool_use blocks)
-       ▼
-┌─────────────┐
-│  SPEAKING   │ streaming TTS playback
-└──────┬──────┘
-       │ audio finishes  ──────► back to LISTENING
-       │                    OR ─► IDLE if end_session was tool-called
-       │
-       │ StartOfTurn fires during PROCESSING or SPEAKING
-       ▼
-   BARGE-IN: stop playback, cancel Claude request → LISTENING
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> LISTENING: Wake word detected ("Hey Meeko")
+
+    state LISTENING {
+        [*] --> Ready
+        Ready --> SpeechDetected: User speaks (StartOfTurn)
+        SpeechDetected --> Ready: Pause / speech ends
+    }
+
+    LISTENING --> IDLE: Post-wake timeout (15s silent) / Profile idle close
+    LISTENING --> PROCESSING: EndOfTurn fired (Transcript ready)
+
+    PROCESSING --> SPEAKING: First TTS audio chunk arrives
+    PROCESSING --> LISTENING: Barge-in (StartOfTurn) [Cancel Claude request]
+
+    SPEAKING --> LISTENING: Audio playback finishes naturally
+    SPEAKING --> IDLE: Playback finishes AND end_session tool called
+    SPEAKING --> LISTENING: Barge-in (StartOfTurn) [Abort speaker + flush buffer]
 ```
 
 *(Note: When user speech is actively detected during `LISTENING`, Meeko enters an internal `LISTENING_ACTIVE` sub-state to drive live visual indicators like the brighter cyan LED ring, before transitioning to `PROCESSING` once `EndOfTurn` fires.)*
@@ -272,6 +253,40 @@ LED communication runs over direct USB vendor control transfers via `libusb` / `
 4. Discard any partially generated response.
 5. Transition to LISTENING.
 6. Process user's barge-in as a new turn.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Mic as ReSpeaker (Mic)
+    participant STT as Deepgram STT (Flux)
+    participant Worker as TurnWorker (Sub-task)
+    participant Claude as Claude Sonnet 5
+    participant TTS as Deepgram TTS
+    participant Spk as Speaker
+
+    Note over Worker,Spk: Meeko is SPEAKING or PROCESSING
+    Worker->>Claude: Streaming prompt...
+    Claude-->>Worker: Streaming tokens
+    Worker->>TTS: Stream text
+    TTS-->>Spk: Stream PCM audio
+
+    User->>Mic: "Wait, actually..." (Interrupts)
+    Mic->>STT: Left-channel audio (Speaker echo subtracted via AEC)
+    STT->>Worker: StartOfTurn event
+
+    rect rgb(240, 220, 220)
+        Note over Worker,Spk: Barge-In Handling
+        Worker->>Spk: Abort playback & purge buffer
+        Worker->>Worker: Cancel active turn sub-task
+        Worker->>Claude: Drop stream connection
+        Worker->>Worker: Transition State -> LISTENING
+    end
+
+    User->>Mic: "...tell me about Paris instead."
+    STT->>Worker: EndOfTurn event (New transcript)
+    Worker->>Claude: Launch fresh turn
+```
 
 The PROCESSING case matters as much as the SPEAKING one: the window between `EndOfTurn` and the first audio byte (Claude TTFT + Deepgram TTS first-byte synthesis) is often over a second, and `Speaker` deliberately defers entering SPEAKING until that first chunk arrives so the LEDs don't claim to be talking before there's audio. A user who changes their mind during that gap is barging in on a reply that exists but isn't audible yet, and is handled identically.
 
