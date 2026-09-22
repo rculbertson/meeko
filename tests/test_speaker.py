@@ -181,6 +181,7 @@ async def test_state_hooks_called_on_exception(
 
     # Exit must still have run so the caller's state is restored.
     assert [c[0] for c in calls] == ["enter", "exit"]
+    audio_mock.abort_speaker.assert_called_once()
 
 
 async def test_speak_stream_does_not_drain_mic_when_mute_disabled(
