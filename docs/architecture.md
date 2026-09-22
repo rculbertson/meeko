@@ -225,23 +225,17 @@ LED communication runs over direct USB vendor control transfers via `libusb` / `
 stateDiagram-v2
     [*] --> IDLE
 
-    IDLE --> LISTENING: Wake word detected ("Hey Meeko")
+    IDLE --> LISTENING: Wake word
 
-    state LISTENING {
-        [*] --> Ready
-        Ready --> SpeechDetected: User speaks (StartOfTurn)
-        SpeechDetected --> Ready: Pause / speech ends
-    }
+    LISTENING --> PROCESSING: Speech completes
+    LISTENING --> IDLE: Idle timeout
 
-    LISTENING --> IDLE: Post-wake timeout (15s silent) / Profile idle close
-    LISTENING --> PROCESSING: EndOfTurn fired (Transcript ready)
+    PROCESSING --> SPEAKING: Audio arrives
+    PROCESSING --> LISTENING: Barge-in
 
-    PROCESSING --> SPEAKING: First TTS audio chunk arrives
-    PROCESSING --> LISTENING: Barge-in (StartOfTurn) [Cancel Claude request]
-
-    SPEAKING --> LISTENING: Audio playback finishes naturally
-    SPEAKING --> IDLE: Playback finishes AND end_session tool called
-    SPEAKING --> LISTENING: Barge-in (StartOfTurn) [Abort speaker + flush buffer]
+    SPEAKING --> LISTENING: Audio completes
+    SPEAKING --> IDLE: Session ends
+    SPEAKING --> LISTENING: Barge-in
 ```
 
 *(Note: When user speech is actively detected during `LISTENING`, Meeko enters an internal `LISTENING_ACTIVE` sub-state to drive live visual indicators like the brighter cyan LED ring, before transitioning to `PROCESSING` once `EndOfTurn` fires.)*
