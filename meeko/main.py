@@ -568,11 +568,12 @@ def main() -> None:
     args = _parse_args()
     loop = asyncio.new_event_loop()
 
-    def handle_sigint():
+    def handle_signal():
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
-    loop.add_signal_handler(signal.SIGINT, handle_sigint)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, handle_signal)
 
     try:
         loop.run_until_complete(
