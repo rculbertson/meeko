@@ -13,6 +13,7 @@ import functools
 import json
 import logging
 import logging.handlers
+import signal
 import time
 from importlib import resources
 from pathlib import Path
@@ -1928,3 +1929,30 @@ async def test_end_session_before_any_turn_fire_summary_is_noop(
     # No session row was created — lazy creation never fired and
     # fire_summary(None) was a no-op rather than crashing.
     assert await _list_sessions(db_path) == []
+
+
+def test_main_registers_sigint_and_sigterm():
+    """main() must register signal handlers for both SIGINT and SIGTERM."""
+    signals_registered: dict[int, object] = {}
+
+    class FakeLoop:
+        def add_signal_handler(self, sig, handler):
+            signals_registered[sig] = handler
+
+        def run_until_complete(self, coro):
+            coro.close()
+
+        def close(self):
+            pass
+
+    with (
+        patch("asyncio.new_event_loop", return_value=FakeLoop()),
+        patch(
+            "meeko.main._parse_args",
+            return_value=SimpleNamespace(resume=None, list_sessions=False),
+        ),
+    ):
+        meeko_main.main()
+
+    assert signal.SIGINT in signals_registered
+    assert signal.SIGTERM in signals_registered
