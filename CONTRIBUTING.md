@@ -35,12 +35,6 @@ uv run pre-commit install   # installs both the pre-commit and pre-push hooks
 
 Tests live in `tests/` and use **pytest** + **pytest-asyncio**. Anything that requires live API keys (Deepgram, Anthropic) is marked `@pytest.mark.integration`; everything else runs offline.
 
-Generate the WAV test fixtures once (requires `DEEPGRAM_API_KEY`):
-
-```bash
-uv run python tests/generate_fixtures.py
-```
-
 Run the unit tests (with coverage report):
 
 ```bash

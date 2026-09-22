@@ -38,7 +38,6 @@ uv run pytest                                            # Run offline test suit
 uv run pytest --no-cov                                   # Fast run (skips coverage)
 uv run pytest tests/test_turn_worker.py -k test_barge_in # Run a specific test
 uv run pytest -m integration                             # Run tests requiring live API keys (Deepgram, Anthropic)
-uv run python tests/generate_fixtures.py                 # Regenerate audio WAV fixtures (requires DEEPGRAM_API_KEY)
 ```
 
 ### Linting, Formatting, Typing & Complexity
