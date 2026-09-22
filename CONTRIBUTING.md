@@ -63,7 +63,8 @@ Neither CI nor the maintainer can validate every path. Changes to `meeko/leds.py
 
 ```bash
 uv run ruff check .
-uv run ruff format .
+uv run ruff format .           # format files in-place
+uv run ruff format --check .   # check formatting (runs in CI)
 uv run pyright
 ./scripts/check_complexity.sh
 ```
@@ -92,7 +93,7 @@ uv run radon cc meeko --total-average -n F  # just the package average
 - Implement features on a new branch, never directly on `main`.
 - Branch naming: `<github-username>/<short-description>`.
 - Commit when a discrete, working piece is complete; each commit should run correctly on its own.
-- Before opening a PR, commit outstanding changes and run `gh pr create` — ruff runs on commit, and the test suite, pyright and the complexity gate run on push.
+- Push your branch to GitHub (or your fork) and open a pull request (or run `gh pr create`) — ruff runs on commit, and the test suite, pyright and the complexity gate run on push and in CI.
 
 ## AI-assisted contributions
 
@@ -104,6 +105,10 @@ This repo tracks a `.claude/settings.json`, and trusting the workspace applies a
 - **Deepgram's [skills marketplace](https://github.com/deepgram/skills)** and its plugin, which supply the Deepgram API reference used throughout `meeko/deepgram_stt.py` and `meeko/deepgram_tts.py`. The plugin ships documentation skills only — no hooks or commands that execute — and `skillOverrides` turns off the two skills that would run setup actions.
 
 Claude Code asks you to trust the workspace before any of this loads, so nothing applies behind your back. To opt out, decline the trust prompt, or manage plugins with `/plugin`.
+
+## Code of Conduct
+
+Please review and follow our [Code of Conduct](CODE_OF_CONDUCT.md) in all project spaces.
 
 ## License
 
