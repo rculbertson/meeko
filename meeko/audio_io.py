@@ -67,7 +67,7 @@ class AudioIO:
         self._output_channels = output_channels
         self._pa = pyaudio.PyAudio()
         self.mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MIC_QUEUE_MAX)
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
         self._mic_capturing = False
 
         self._mic_stream = self._pa.open(

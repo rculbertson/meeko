@@ -181,6 +181,26 @@ async def test_state_hooks_called_on_exception(
 
     # Exit must still have run so the caller's state is restored.
     assert [c[0] for c in calls] == ["enter", "exit"]
+    audio_mock.abort_speaker.assert_called_once()
+
+
+async def test_speak_stream_cancelled_calls_abort_speaker(
+    profile, audio_mock, tts_mock, fast_sleep
+):
+    """When speak_stream is cancelled (e.g. barge-in), abort_speaker must be called."""
+    enter, exit_, calls = _state_hooks()
+    sp = Speaker(tts_mock, audio_mock, profile, enter, exit_)
+
+    async def cancel_write(chunk):
+        raise asyncio.CancelledError
+
+    audio_mock.write_speaker = AsyncMock(side_effect=cancel_write)
+
+    with pytest.raises(asyncio.CancelledError):
+        await sp.speak_stream(_aiter(["Hi."]))
+
+    audio_mock.abort_speaker.assert_called_once()
+    assert [c[0] for c in calls] == ["enter", "exit"]
 
 
 async def test_speak_stream_does_not_drain_mic_when_mute_disabled(

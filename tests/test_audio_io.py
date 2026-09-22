@@ -25,6 +25,7 @@ async def test_starts_not_capturing(pa_factory):
     _, mic_stream, _ = pa_factory
     io = AudioIO(asyncio.Event())
     assert io.mic_capturing is False
+    assert io._loop is asyncio.get_running_loop()
     mic_stream.start_stream.assert_not_called()
 
 
