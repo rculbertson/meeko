@@ -370,7 +370,7 @@ erDiagram
 ```
 
 - **Literal Token Sanitization**: Natural spoken queries frequently contain hyphens, quotes, or FTS5 reserved keywords (`AND`, `OR`, `NOT`). Spoken search text is tokenized and sanitized into quoted terms (`"todo" "app"`) to guarantee syntax-safe BM25 queries that will never error at runtime.
-- **Lazy Row Creation**: When Meeko starts without an explicit `--resume`, session row allocation is deferred until the user speaks their first turn, preventing database pollution from empty sessions when Meeko is started and immediately stopped.
+- **Lazy Session Creation**: Starting Meeko, switching profiles, or invoking `new_session` defers allocating a row in `sessions` until the first spoken turn is persisted (`session_id` remains unset). If the appliance boots and shuts down, if a post-wake timeout expires without speech, or if a user triggers `new_session` and walks away, no blank or untitled session rows ever pollute SQLite or the FTS5 index.
 
 ### 6.2 Immediate Turn Persistence
 
@@ -419,7 +419,7 @@ flowchart TD
     subgraph Threads["Operating System Threads"]
         PA_In["PortAudio C Callback Thread\n(Hardware Mic Input)"]
         PA_Out["Dedicated Single-Worker Executor: meeko-spk\n(PortAudio Blocking Writes)"]
-        DB_Worker["Dedicated Single-Worker Executor: meeko-db\n(SQLite WAL Disk Operations)"]
+        DB_Worker["Dedicated Single-Worker Executor\n(SessionStore SQLite Disk Operations)"]
     end
 
     subgraph AsyncLoop["Python asyncio Event Loop"]
@@ -434,9 +434,9 @@ flowchart TD
     MicQueue --> Orchestrator
     Orchestrator --> TurnTask
     TurnTask -->|loop.run_in_executor| PA_Out
-    TurnTask -->|asyncio.to_thread| DB_Worker
+    TurnTask -->|loop.run_in_executor| DB_Worker
     STTTask <--> Orchestrator
-    SummaryTask -->|asyncio.to_thread| DB_Worker
+    SummaryTask -->|loop.run_in_executor| DB_Worker
 ```
 
 ### 7.1 Thread Isolation Boundaries
@@ -447,8 +447,8 @@ flowchart TD
 2. **Hardware Speaker Output (Dedicated `meeko-spk` Executor)**:
    PortAudio's stream playback is a synchronous, blocking C call. Calling it from Python's general `asyncio.to_thread` pool is unsafe: PortAudio's stream API is strictly single-threaded, and if an utterance task is cancelled during barge-in while a write is in flight, a subsequent write on another worker thread would attempt concurrent stream writes, corrupting the stream or crashing ALSA. Meeko routes all speaker writes through a dedicated single-worker thread pool (`meeko-spk`), guaranteeing strict FIFO serialization regardless of asyncio task cancellations.
 
-3. **Database Disk I/O (Dedicated `meeko-db` Executor)**:
-   SQLite operations — inserting turns, updating session timestamps, and executing FTS5 full-text searches — involve synchronous disk access. Meeko isolates SQLite calls inside a dedicated single-worker thread pool (`meeko-db`). This eliminates database lock contention, guarantees sequential transaction writes under SQLite WAL mode, and ensures disk writes never stall voice streaming.
+3. **Database Disk I/O (Dedicated `SessionStore` Executor)**:
+   SQLite operations — inserting turns, updating session timestamps, and executing FTS5 full-text searches — involve synchronous disk access. Rather than relying on Python's shared global thread pool, `SessionStore` manages its own private single-worker `ThreadPoolExecutor` and dispatches calls via `loop.run_in_executor`. This eliminates database lock contention, guarantees sequential transaction writes under SQLite WAL mode, and ensures disk writes never stall voice streaming.
 
 4. **Event Loop Hygiene**:
    The main asyncio event loop runs purely non-blocking coroutines: WebSocket frame routing, state machine transitions, and Claude token parsing. Running Meeko with `PYTHONASYNCIODEBUG=1` validates that no callback holds the event loop for 100ms or longer.
@@ -467,8 +467,8 @@ The connection to Deepgram's streaming STT endpoint is governed by [`STTSupervis
   When a WebSocket disconnects unexpectedly (e.g., DNS blip, server 1011 drop), the supervisor retries with exponential backoff: `(0.5s, 1s, 2s, 4s, 8s, 16s, 30s)`. A single failure logs a full traceback; prolonged outages log a single warning per attempt to prevent log flooding.
 - **Audio Grace Buffering (`RECONNECT_GRACE_S = 10s`)**:
   During transient network hiccups, Meeko keeps capturing mic frames for up to 10 seconds. If connection is restored within the grace window, speech queued during the blip is delivered to Deepgram without losing the user's turn. If the outage exceeds 10 seconds, the mic queue is drained and audio capture is paused until the connection stabilizes.
-- **Server Keepalive Heartbeats**:
-  Deepgram STT requires periodic activity to prevent idle disconnections. When no mic audio is actively streaming (such as in `IDLE`), `keepalive_pump` sends a JSON `KeepAlive` text frame every 5 seconds.
+- **Server Keepalive Heartbeats & Rapid Socket Detection**:
+  Deepgram STT requires periodic activity to prevent idle disconnections. Because Deepgram v2 Flux dropped v1's application-layer JSON `KeepAlive` frames, Meeko sends raw WebSocket ping frames every 5 seconds when not streaming audio. Furthermore, Deepgram's Python SDK hard-codes default ping intervals to 20 seconds with a 20-second timeout. Under a silent network drop, a dead socket would take up to 40 seconds to be recognized—during which any user speech would buffer into a dead connection and be lost. Meeko patches the client connection to enforce tight 5-second ping and timeout intervals, ensuring dead sockets are caught and reconnected rapidly.
 
 ### 8.2 Crash-Proof Turn Persistence & Startup Backfill
 
