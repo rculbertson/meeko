@@ -20,10 +20,9 @@ How Meeko works under the hood — the components, the data flow, and the design
 ---
 
 ## 1. Overview
+Meeko is an open-source, personal voice assistant designed as a dedicated tabletop brainstorming partner. It is completely screenless and operated entirely through natural voice—with no companion app or graphical UI, all session control and conversational recall happen purely through dialogue.
 
-Meeko is an open-source, personal voice assistant designed as a dedicated tabletop brainstorming partner. Unlike command-and-control smart speakers (Siri, Alexa) or scripted customer support bots, Meeko is built for extended, wandering, technical discussions — conversations where you might pause for minutes at a time to think, resume without a wake word, or return days later to pick up a previous thread.
-
-While it readily handles quick daily utilities (timers, weather, one-shot questions), every layer of the architecture is optimized around the long-conversation problem.
+While Meeko readily handles one-shot questions and daily utilities like timers and weather, the system is engineered from the ground up for extended discussions. Meeko maintains a permanent, searchable record of every conversation in local SQLite, making it effortless to explore ideas at your own pace, pause without being cut off, and pick up previous brainstorming threads days or weeks later.
 
 ### Core Architectural Pillars
 
