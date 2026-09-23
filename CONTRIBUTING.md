@@ -6,20 +6,6 @@ Thanks for your interest in contributing. See [docs/architecture.md](docs/archit
 
 Meeko is maintained in spare time, and reviews happen in batches — expect weeks, not days. For anything beyond a small fix, **open an issue before writing code**. It costs you a minute and saves you from building something that gets declined.
 
-## Scope
-
-Meeko is deliberately a voice-only, single-user, single-device assistant. These are out of scope and PRs adding them will most likely be declined:
-
-- Web or mobile UI
-- Multi-user support
-- Semantic search over sessions (SQLite FTS5 is sufficient at expected volumes)
-- Session deletion or editing by voice
-- Cross-device sync
-
-See [docs/architecture.md §9](docs/architecture.md#9-deliberate-scope) for the reasoning. If you think real-world usage justifies revisiting one of these, open an issue and make the case — the list isn't permanent, it just isn't v1.
-
-Windows is also unsupported; the code targets macOS and Raspberry Pi OS.
-
 ## Dev setup
 
 First install PortAudio, which `pyaudio` compiles against — `brew install portaudio` on macOS, `sudo apt install portaudio19-dev` on Debian/Ubuntu/Raspberry Pi OS. Without it `uv sync` fails while building `pyaudio`.
