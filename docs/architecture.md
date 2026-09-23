@@ -2,6 +2,23 @@
 
 How Meeko works under the hood — the components, the data flow, and the design decisions behind them. If you just want to install and run Meeko, see [README.md](../README.md) instead.
 
+---
+
+## Contents
+
+1. [Overview](#1-overview)
+2. [Architecture Overview](#2-architecture-overview)
+3. [Hardware & Verified Configurations](#3-hardware--verified-configurations)
+4. [Component Details](#4-component-details)
+5. [Conversation Flow](#5-conversation-flow)
+6. [Session Persistence & Voice Recall](#6-session-persistence--voice-recall)
+7. [Concurrency & Threading Architecture](#7-concurrency--threading-architecture)
+8. [Appliance Resilience & Fault Tolerance](#8-appliance-resilience--fault-tolerance)
+9. [Key Decisions](#9-key-decisions)
+10. [Operational Privacy & Logging Architecture](#10-operational-privacy--logging-architecture)
+
+---
+
 ## 1. Overview
 
 Meeko is an open-source, personal voice assistant designed as a dedicated tabletop brainstorming partner. Unlike command-and-control smart speakers (Siri, Alexa) or scripted customer support bots, Meeko is built for extended, wandering, technical discussions — conversations where you might pause for minutes at a time to think, resume without a wake word, or return days later to pick up a previous thread.
@@ -11,7 +28,7 @@ While it readily handles quick daily utilities (timers, weather, one-shot questi
 ### Core Architectural Pillars
 
 1. **Massive Context at Low Cost**:
-   Brainstorming sessions naturally grow to 50k–150k tokens. Meeko communicates directly with Anthropic's Claude API to leverage **prompt caching** (90% cost reduction on conversation prefixes) and **server-side compaction** (summarizing early context when approaching token ceilings) while maintaining an unabridged verbatim record in local SQLite.
+   Extended brainstorming sessions naturally accumulate a large volume of tokens over time. Meeko communicates directly with Anthropic's Claude API to leverage **prompt caching** (90% cost reduction on conversation prefixes) and **server-side compaction** (summarizing early context when approaching token ceilings) while maintaining an unabridged verbatim record in local SQLite.
 
 2. **Conversational Fluidity & True Interruption**:
    Voice brainstorming demands natural pacing. Meeko couples semantic end-of-turn detection (Deepgram Flux) with on-device **hardware Acoustic Echo Cancellation (AEC)** on the ReSpeaker XVF3800. This enables true barge-in — you can speak over the assistant at any moment without the assistant interrupting itself on its own echo.
@@ -97,7 +114,7 @@ The author's primary tabletop setup is built around the **Raspberry Pi 5** and t
 - **Hardware Acoustic Echo Cancellation (AEC)**:
   The XVF3800 features an onboard XMOS DSP running real-time 4-microphone beamforming, noise suppression, and AEC. **The powered speaker must plug directly into the XVF3800's 3.5mm analog jack**, not the Pi's audio output. The onboard DSP uses this analog output as its far-end reference signal to subtract speaker audio before passing clean voice frames to Meeko.
 - **Detailed Setup Walkthrough**:
-  One-time AEC double-talk sensitivity tuning (`PP_DTSENSITIVE`), Linux USB permissions (`udev` rules for non-root LED control), and systemd boot service setup are documented in [docs/raspberry-pi-setup.md](raspberry-pi-setup.md).
+  One-time hardware AEC tuning, Linux USB permissions (`udev` rules for non-root LED control), and systemd boot service setup are documented in [docs/raspberry-pi-setup.md](raspberry-pi-setup.md).
 
 ### Other Configurations
 
@@ -114,11 +131,11 @@ Other hardware (e.g., Raspberry Pi 4, standard USB microphones, Linux desktops) 
 Audio hardware interaction is built on PyAudio / PortAudio. Unlike high-level libraries (like `sounddevice`), PortAudio provides strict control over native hardware channel counts without silent OS-level sample rate or channel conversions.
 
 Key responsibilities of the local audio layer:
-- **Left-Channel AEC Extraction**: The ReSpeaker XVF3800 sends a 2-channel interleaved PCM stream over USB, but only the left channel (channel 0) contains the hardware AEC-processed audio. `AudioIO._left_channel` extracts this stream before feeding it into the application.
-- **Mono-to-Stereo Playback Expansion**: Deepgram TTS outputs mono audio, while the XVF3800 analog DAC expects stereo. `AudioIO._mono_to_stereo` duplicates mono chunks into interleaved stereo frames.
-- **Thread-Safe Async Bridging**: PortAudio runs low-level C callback threads. `AudioIO` safely bridges captured PCM frames into Python's `asyncio.Queue` via `loop.call_soon_threadsafe()`.
-- **Non-Blocking Playback**: Playback writes (`_write_stream`) run in dedicated thread pool executors so audio I/O never blocks Meeko's async event loop.
-- **Instant Buffer Purging**: [`Speaker.abort()`](../meeko/speaker.py) immediately purges the output buffer and stops playback the moment a barge-in occurs.
+- **Left-Channel AEC Extraction**: The ReSpeaker XVF3800 sends a 2-channel interleaved PCM stream over USB, but only the left channel (channel 0) contains the hardware AEC-processed audio. `AudioIO` isolates and extracts this left-channel stream before feeding it into the application.
+- **Mono-to-Stereo Playback Expansion**: Deepgram TTS outputs mono audio, while the XVF3800 analog DAC expects stereo. `AudioIO` duplicates mono chunks into interleaved stereo frames.
+- **Thread-Safe Async Bridging**: PortAudio runs low-level C callback threads. `AudioIO` safely bridges captured PCM frames into Python's async queue via `loop.call_soon_threadsafe()`.
+- **Non-Blocking Playback**: Playback writes run in dedicated worker threads so blocking audio driver calls never stall Meeko's async event loop.
+- **Instant Buffer Purging**: [`Speaker`](../meeko/speaker.py) immediately purges the output buffer and stops playback the moment a barge-in occurs.
 
 ### 4.2 Deepgram STT (Flux)
 
@@ -137,20 +154,34 @@ Meeko calls the Anthropic Messages API directly rather than using managed voice 
 - **Model**: `claude-sonnet-5` (used for both conversation turns and background session summaries).
 - **Prompt Caching**:
   Meeko stamps `cache_control` on the system prompt prefix and dynamically slides a cache breakpoint to the tail of the message array on every turn. The cached stable prefix includes:
-  1. Local timestamp block (`_date_block`)
-  2. Approximate home coordinates block (`_location_block`, if configured)
-  3. Active profile persona prompt (`_profile_prompt`)
+  1. Current date and local time
+  2. Approximate home coordinates (if configured)
+  3. Active profile persona prompt
 - **Server-Side Compaction**:
-  Enabled via `betas=["compact-2026-01-12"]` with automatic trigger thresholds (`[claude] compaction_trigger_tokens`, default `150000`). When Sonnet approaches the token ceiling, the API automatically replaces early conversation history with an internal summary block. Meeko preserves this block in memory so Claude does not re-summarize, while maintaining verbatim transcripts in SQLite.
+  Leveraging Anthropic's server-side context compaction (triggered automatically as conversations approach token limits), Sonnet replaces early conversational history with an internal summary block. Meeko preserves this block in memory so Claude does not re-summarize, while maintaining the complete verbatim transcript in SQLite.
 - **Web Search & Nested Tool Invariant**:
-  Exposes Anthropic's `web_search_20260209` server tool (capped at `web_search_max_uses` attempts per turn). When Claude performs searches, it often nests them inside a `code_execution` container.
+  Exposes Anthropic's native web search server tool with a configurable per-turn budget acting as a circuit breaker against hanging queries. When Claude performs searches, it often nests them inside a `code_execution` container.
 
   > [!IMPORTANT]
   > When serializing assistant message blocks for replay, **never drop the `caller` field** on nested tool results. Without `caller`, the Anthropic API cannot match searches to their parent execution container and rejects subsequent turns with a `400 Bad Request`.
 
-### 4.4 Deepgram TTS (Aura-2)
+- **Send-Time History Repair**:
+  If a user interrupts (barges in) while Claude is waiting on a tool call, or if a network disconnect cancels a turn mid-execution, assistant history can be left with unreciprocated `tool_use` blocks. The Messages API strictly rejects any request containing unreciprocated tool calls. Rather than mutating the permanent SQLite database, `ClaudeClient` applies send-time repair dynamically on the in-memory message array:
+  - Client tool calls receive a synthetic error `tool_result` (`"is_error": True`, `"content": "Tool call cancelled by user interruption"`).
+  - Stranded server tool calls (web search) are pruned, because client code cannot forge server-side search results.
 
-Speech synthesis is handled by Deepgram Aura-2 over a persistent WebSocket connection. As Claude streams tokens, Meeko batches them into phrase/sentence chunks and streams text to Deepgram, playing synthesized PCM chunks with sub-200ms time-to-first-audio. Voices are configured per profile (`voice = "mars"`, `"andromeda"`, etc.).
+### 4.4 Deepgram TTS (Aura-2) & Playback Pipelining
+
+Speech synthesis is handled by Deepgram Aura-2 over a persistent WebSocket connection. Rather than waiting for Claude to finish generating a complete paragraph, Meeko pipelines sentence generation, audio synthesis, and playback concurrently:
+
+1. **Sentence Boundary Slicing**:
+   As Claude streams text tokens, Meeko buffers the stream and slices it at natural sentence boundaries (splitting on terminal punctuation while accounting for common abbreviations and numbers). This allows completed thoughts to be dispatched to speech synthesis immediately rather than waiting for the full response to finish generating.
+2. **Concurrent $N+1$ Prefetch Pipeline**:
+   [`Speaker`](../meeko/speaker.py) runs an async producer-consumer pipeline. While sentence $N$ is actively being played to the DAC, synthesis for sentence $N+1$ is initiated concurrently over the Deepgram WebSocket. When sentence $N$ finishes playing, the initial PCM bytes for sentence $N+1$ are already buffered, eliminating time-to-first-byte gaps at sentence boundaries.
+3. **Inter-Sentence Smoothing**:
+   A calibrated 200ms silence buffer is inserted between adjacent synthesized sentences to maintain natural conversational cadence and prevent back-to-back audio collisions.
+4. **Deferred State Entry**:
+   The transition to `State.SPEAKING` (green LED) is deferred until the first synthesized audio chunk actually reaches the speaker hardware. This prevents visual indicators from flipping prematurely while Claude TTFT and Deepgram TTFB are still pending. Voices are configured per profile (`voice = "mars"`, `"andromeda"`, etc.).
 
 ### 4.5 Tool Architecture & Session Intents
 
@@ -191,32 +222,19 @@ In `IDLE`, mic audio is evaluated purely on-device by [openWakeWord](https://git
 
 ### 4.7 Profiles and Idle Behavior
 
-Meeko's persona and conversational pacing are configured via `[profiles.<name>]` tables in `meeko.toml`. Profiles bundle four attributes:
+Meeko's persona and conversational pacing are configured via profiles in `meeko.toml`. Profiles bundle four key attributes:
 1. **Persona Prompt**: The system prompt injected into Claude's cached prefix.
-2. **Voice**: Deepgram Aura-2 voice identifier (e.g., `asteria`, `mars`).
-3. **Tool Description**: Guidance instructing Claude when to switch to this profile.
+2. **Voice**: The Deepgram Aura-2 voice identifier (e.g. `asteria`, `mars`).
+3. **Tool Description**: Natural-language guidance instructing Claude when to switch to this persona.
 4. **Idle Timing Windows**: Pacing parameters that control how Meeko behaves during silence.
 
-```toml
-[profiles.query]
-prompt = "You are a concise, helpful assistant. Answer briefly."
-voice = "asteria"
-description = "Quick, factual questions and one-shot commands."
-idle_timeout_seconds = 5.0   # Closes silently after 5s of silence
-
-[profiles.conversation]
-prompt = "You are a thoughtful technical brainstorming partner..."
-voice = "mars"
-description = "Deep, multi-turn brainstorming and extended discussion."
-idle_timeout_seconds = 60.0  # Waits 60s, then asks: "Still thinking, or wrap up?"
-idle_prompt = "Still thinking, or should we wrap up?"
-idle_close_seconds = 20.0
-idle_close_text = "Ending the session now. Talk later."
-```
+By default, Meeko defines two distinct conversational modes:
+- **`query`**: Optimized for quick factual lookups and one-shot commands. Uses a concise persona, short silence timeouts (~5s), and closes silently.
+- **`conversation`**: Optimized for extended, reflective brainstorming. Uses a thoughtful collaborative persona, extended thinking windows (~60s), and speaks a gentle check-in prompt (*"Still thinking, or should we wrap up?"*) before eventually concluding the session.
 
 **Silence Windows**:
-- **Post-Wake Timeout** (`post_wake_timeout_seconds`, default `15.0s`): Covers the silence gap if someone says *"Hey Meeko"* but never follows up with a question. Closes silently back to `IDLE`.
-- **Post-Turn Idle Window**: Managed by [`IdleController`](../meeko/orchestrator/idle.py). After speech finishes, it monitors silence according to the active profile. In `conversation` mode, it speaks a gentle check-in prompt before eventually closing. Any user speech (`StartOfTurn`) or barge-in instantly cancels the pending idle timer.
+- **Post-Wake Timeout** (default `15.0s`): Covers the silence gap if someone says *"Hey Meeko"* but never follows up with a question. Closes silently back to `IDLE`.
+- **Post-Turn Idle Window**: Managed by [`IdleController`](../meeko/orchestrator/idle.py). After speech finishes, it monitors silence according to the active profile, speaking check-in prompts or ending the session when appropriate. Any user speech (`StartOfTurn`) or barge-in instantly cancels the pending idle timer.
 
 ### 4.8 Session Manager & Background Scheduling (`meeko/session_summary.py`)
 
@@ -306,10 +324,10 @@ When `StartOfTurn` fires during `SPEAKING` or `PROCESSING`, Meeko executes four 
    Users interrupt during the silent thinking gap (Claude TTFT + TTS synthesis, often >1s) just as often as during audible speech. To keep visual cues honest, Meeko defers entering `SPEAKING` until the first audio byte actually reaches the speaker. If a user interrupts during this gap, Meeko treats it as an identical barge-in, aborting generation before the reply ever becomes audible.
 
 2. **Zero-Latency Silence (Buffer Purging)**:
-   Simply stopping the audio stream leaves up to 500ms of audio sitting in the hardware/driver output buffer, causing the assistant to awkwardly finish its syllable. `Speaker.abort()` explicitly flushes the hardware ring buffer to achieve instantaneous, crisp silence.
+   Simply stopping the audio stream leaves up to 500ms of audio sitting in the hardware/driver output buffer, causing the assistant to awkwardly finish its syllable. `Speaker` explicitly flushes the hardware ring buffer to achieve instantaneous, crisp silence.
 
 3. **Concurrency & Sub-Task Cancellation**:
-   In Python asyncio, cancelling a long-running worker task would kill the assistant. In Meeko, [`TurnWorker`](../meeko/orchestrator/turn_worker.py) runs each Claude+TTS turn as an isolated sub-task (`asyncio.create_task`). On barge-in, `request_barge_in()` cancels *only* that sub-task and synchronously resets the state machine to `LISTENING`. A custom cancellation flag distinguishes a user barge-in from an application shutdown.
+   In Python asyncio, cancelling a long-running worker task would kill the assistant. In Meeko, [`TurnWorker`](../meeko/orchestrator/turn_worker.py) runs each Claude+TTS turn as an isolated sub-task. On barge-in, `TurnWorker` cancels *only* that sub-task and synchronously resets the state machine to `LISTENING`. A custom cancellation flag distinguishes a user barge-in from an application shutdown.
 
 *(Note: Hardware AEC on the ReSpeaker XVF3800 subtracts speaker output from mic input so playback never triggers false barge-ins; see §4.1 for fallback mic-muting on devices without AEC.)*
 
@@ -321,35 +339,38 @@ Because Meeko has no graphical display, historical sessions must be accessible a
 
 ### 6.1 SQLite Data Model
 
-```sql
-CREATE TABLE sessions (
-    id            TEXT PRIMARY KEY,     -- UUID
-    profile_name  TEXT NOT NULL,        -- profile active when last used
-    title         TEXT,                 -- generated at session end
-    summary       TEXT,                 -- generated at session end
-    created_at    TEXT NOT NULL,        -- ISO 8601 UTC
-    last_active   TEXT NOT NULL         -- ISO 8601 UTC
-);
+```mermaid
+erDiagram
+    sessions ||--o{ turns : contains
+    sessions ||--o| sessions_fts : indexed_in
 
-CREATE TABLE turns (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(id),
-    role        TEXT NOT NULL,          -- 'user' or 'assistant'
-    content     TEXT NOT NULL,          -- JSON string or assistant tool blocks
-    timestamp   TEXT NOT NULL           -- ISO 8601 UTC
-);
+    sessions {
+        TEXT id PK "UUID4"
+        TEXT profile_name "Active persona"
+        TEXT title "Sonnet-generated title"
+        TEXT summary "Sonnet-generated summary"
+        TEXT created_at "ISO-8601 UTC"
+        TEXT last_active "ISO-8601 UTC"
+    }
 
-CREATE INDEX idx_turns_session ON turns(session_id, id);
+    turns {
+        INTEGER id PK "Auto-increment"
+        TEXT session_id FK "References sessions(id)"
+        TEXT role "user | assistant"
+        TEXT content "JSON-encoded text or block list"
+        TEXT timestamp "ISO-8601 UTC"
+    }
 
--- Standalone FTS5 table (not external-content, because sessions.id is a UUID).
--- Populated once per session upon background summarization.
-CREATE VIRTUAL TABLE sessions_fts USING fts5(
-    session_id UNINDEXED,
-    title,
-    summary,
-    transcript                          -- Flattened turn text for keyword fallback
-);
+    sessions_fts {
+        TEXT session_id "UNINDEXED FK"
+        TEXT title "Indexed title"
+        TEXT summary "Indexed summary"
+        TEXT transcript "Flattened turn text"
+    }
 ```
+
+- **Literal Token Sanitization**: Natural spoken queries frequently contain hyphens, quotes, or FTS5 reserved keywords (`AND`, `OR`, `NOT`). Spoken search text is tokenized and sanitized into quoted terms (`"todo" "app"`) to guarantee syntax-safe BM25 queries that will never error at runtime.
+- **Lazy Row Creation**: When Meeko starts without an explicit `--resume`, session row allocation is deferred until the user speaks their first turn, preventing database pollution from empty sessions when Meeko is started and immediately stopped.
 
 ### 6.2 Immediate Turn Persistence
 
@@ -421,13 +442,13 @@ flowchart TD
 ### 7.1 Thread Isolation Boundaries
 
 1. **Hardware Mic Input (PortAudio C Thread ➔ Async Queue)**:
-   PortAudio captures microphone frames in low-level C callback threads. To prevent blocking the audio driver, callbacks perform zero processing: `AudioIO._mic_callback` extracts the left AEC channel and immediately hands off the 50ms chunk to Python's event loop via `loop.call_soon_threadsafe(self.mic_queue.put_nowait, mono)`.
+   PortAudio captures microphone frames in low-level C callback threads. To prevent blocking the audio driver, callbacks perform zero processing: the callback extracts the left AEC channel and immediately hands off the 50ms chunk to Python's event loop via `loop.call_soon_threadsafe(self.mic_queue.put_nowait, mono)`.
 
 2. **Hardware Speaker Output (Dedicated `meeko-spk` Executor)**:
-   PortAudio's `write_stream` is a synchronous, blocking C function. Calling it from Python's general `asyncio.to_thread` pool is unsafe: PortAudio's stream API is strictly single-threaded, and if an utterance task is cancelled during barge-in while a write is in flight, a subsequent write on another worker thread would call `write_stream` concurrently, corrupting the stream or crashing ALSA. Meeko routes all speaker writes through a dedicated single-worker executor (`ThreadPoolExecutor(max_workers=1, thread_name_prefix="meeko-spk")`), guaranteeing strict FIFO serialization regardless of asyncio task cancellations.
+   PortAudio's stream playback is a synchronous, blocking C call. Calling it from Python's general `asyncio.to_thread` pool is unsafe: PortAudio's stream API is strictly single-threaded, and if an utterance task is cancelled during barge-in while a write is in flight, a subsequent write on another worker thread would attempt concurrent stream writes, corrupting the stream or crashing ALSA. Meeko routes all speaker writes through a dedicated single-worker thread pool (`meeko-spk`), guaranteeing strict FIFO serialization regardless of asyncio task cancellations.
 
 3. **Database Disk I/O (Dedicated `meeko-db` Executor)**:
-   SQLite operations — inserting turns, updating session timestamps, and executing FTS5 full-text searches — involve synchronous disk access. Meeko isolates SQLite calls inside a dedicated single-worker executor (`ThreadPoolExecutor(max_workers=1, thread_name_prefix="meeko-db")`). This eliminates database lock contention, guarantees sequential transaction writes under SQLite WAL mode, and ensures disk writes never stall voice streaming.
+   SQLite operations — inserting turns, updating session timestamps, and executing FTS5 full-text searches — involve synchronous disk access. Meeko isolates SQLite calls inside a dedicated single-worker thread pool (`meeko-db`). This eliminates database lock contention, guarantees sequential transaction writes under SQLite WAL mode, and ensures disk writes never stall voice streaming.
 
 4. **Event Loop Hygiene**:
    The main asyncio event loop runs purely non-blocking coroutines: WebSocket frame routing, state machine transitions, and Claude token parsing. Running Meeko with `PYTHONASYNCIODEBUG=1` validates that no callback holds the event loop for 100ms or longer.
@@ -455,8 +476,13 @@ The connection to Deepgram's streaming STT endpoint is governed by [`STTSupervis
   Because turns are committed to SQLite immediately upon completion (§6.2), a sudden power pull never corrupts historical transcripts. SQLite runs with `PRAGMA synchronous = NORMAL` and `PRAGMA journal_mode = WAL`, providing crash durability with low write overhead.
 - **Orphaned Session Backfill**:
   If a power outage occurs while a conversation is active, the session will lack a summary and title. On boot, [`SummaryScheduler.backfill()`](../meeko/session_summary.py) queries for unfinalized historical sessions, summarizes them asynchronously with Claude, and indexes them into FTS5 before the user wakes the device.
-- **Clean Shutdown Draining**:
-  When receiving `SIGINT` or `SIGTERM`, Meeko cancels the active turn, drains the background summary scheduler (`SummaryScheduler.aclose()`), stops PortAudio streams, and closes the database connection cleanly before exiting.
+- **Ordered Graceful Shutdown**:
+  When receiving `SIGINT` or `SIGTERM`, Meeko executes a strict teardown sequence:
+  1. Cancels the STT supervisor and drains active idle silence monitors.
+  2. Cancels the active turn worker sub-task and purges running timers.
+  3. Awaits background summarization draining (`SummaryScheduler.aclose()`) to guarantee any in-flight session summary finishes writing to disk before the database connection closes.
+  4. Releases hardware resources (PortAudio audio streams and XVF3800 USB LED controls).
+  5. Closes the SQLite database store cleanly.
 
 ### 8.3 Non-Fatal Turn Failures
 
@@ -474,8 +500,8 @@ Turn-level errors never crash the application:
 
 All-in-one managed voice services (such as Deepgram's Voice Agent API or OpenAI's Realtime API) package STT, LLM inference, and TTS into a single WebSocket connection. While convenient, they obscure the underlying LLM call and strip away critical context management features:
 
-- **Prompt Caching**: Long brainstorming sessions regularly reach 50k–150k tokens. Direct Anthropic API calls allow Meeko to stamp `cache_control` breakpoints, slashing input token costs by ~90% on cached prefixes.
-- **Server-Side Compaction**: Using the Anthropic compaction beta (`betas=["compact-2026-01-12"]`), Sonnet automatically summarizes earlier conversational turns when approaching token thresholds, keeping sessions running indefinitely without manual context clipping.
+- **Prompt Caching**: Extended brainstorming sessions naturally accumulate a large volume of tokens over time. Direct Anthropic API calls allow Meeko to stamp `cache_control` breakpoints, slashing input token costs by ~90% on cached prefixes.
+- **Server-Side Compaction**: Leveraging Anthropic's server-side context compaction, Sonnet automatically summarizes earlier conversational turns when approaching token thresholds, keeping sessions running indefinitely without manual context clipping.
 - **Verbatim Session Persistence**: Managed services handle history ephemerally. Direct control allows Meeko to commit every raw turn to local SQLite immediately upon completion, preserving an immutable transcript even after in-memory compaction.
 
 ### 2. Deepgram Flux STT vs. Local Whisper & Silence VAD
@@ -503,3 +529,32 @@ Continuous cloud audio streaming has two major drawbacks for a tabletop assistan
 - **Bandwidth and API Costs**: Streaming live audio to cloud STT services continuously costs hundreds of dollars per month just to transcribe the silence of an empty room, while consuming unnecessary upstream bandwidth.
 
 Running [openWakeWord](https://github.com/dscripka/openWakeWord) locally on the Raspberry Pi via an ONNX runtime evaluates audio chunks in ~2ms with minimal CPU overhead, providing a rock-solid privacy boundary at zero operational cost.
+
+---
+
+## 10. Operational Privacy & Logging Architecture
+
+Meeko is designed to sit continuously in private living or working spaces. Beyond the local wake-word privacy gate (§9.4), the architecture guarantees that personal conversational content is never leaked to persistent system logs (such as `systemd` journal logs or syslog) under default settings:
+
+```mermaid
+flowchart LR
+    subgraph INFO_LOGS ["Standard Operations (INFO Level - journald / stderr)"]
+        T1["State Transitions ([state] LISTENING -> PROCESSING)"]
+        T2["Tool Invocations (Function call: get_weather - No Arguments)"]
+        T3["Hardware Status (Mic active, Wake word accepted)"]
+        T4["HTTP & WebSocket Status (Connecting to Deepgram STT...)"]
+    end
+
+    subgraph DEBUG_LOGS ["Sensitive Data (DEBUG Level Only)"]
+        D1["User Utterances ([user] What was our plan for the garden?)"]
+        D2["Assistant Speech ([assistant] We decided to plant tomatoes...)"]
+        D3["Tool Arguments (coordinates, timer labels, search queries)"]
+        D4["Session Summaries & Raw Transcripts"]
+        D5["Compaction Token Counts & Latency Metrics"]
+    end
+```
+
+- **Content-Free Default Logging (`INFO`)**: Emits only structural status: state transitions, unparameterized tool names, connection handshakes, and operational metrics.
+- **Content Restricted to `DEBUG`**: Spoken transcripts, assistant replies, timer labels, location coordinates, web search queries, and session summaries are logged strictly at `DEBUG` level. This privacy boundary is actively verified by automated tests (`tests/test_logging_privacy.py`).
+
+*(For configuration file locations, XDG precedence rules, and runtime logging flags, see [configuration.md](configuration.md).)*
