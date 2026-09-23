@@ -47,7 +47,7 @@ While it readily handles quick daily utilities (timers, weather, one-shot questi
 flowchart TD
     User(["User"])
 
-    Mic["ReSpeaker XVF3800 (Mic & LEDs)"]
+    Mic["ReSpeaker XVF3800 Microphone"]
     Speaker["Powered Speaker"]
 
     subgraph Pi["Raspberry Pi"]
@@ -69,9 +69,9 @@ flowchart TD
 
     %% Hardware I/O
     User -->|Voice| Mic
-    Mic -->|Mic audio| AudioIO
-    AudioIO -->|Playback audio| Speaker
-    Speaker -.->|AEC reference loop| Mic
+    Mic -->|"Mic audio (left AEC channel)"| AudioIO
+    AudioIO -->|Playback audio| Mic
+    Mic -->|3.5mm analog output| Speaker
 
     %% Local Gating
     AudioIO -->|Audio in IDLE| WakeWord
@@ -136,6 +136,7 @@ Key responsibilities of the local audio layer:
 - **Thread-Safe Async Bridging**: PortAudio runs low-level C callback threads. `AudioIO` safely bridges captured PCM frames into Python's async queue via `loop.call_soon_threadsafe()`.
 - **Non-Blocking Playback**: Playback writes run in dedicated worker threads so blocking audio driver calls never stall Meeko's async event loop.
 - **Instant Buffer Purging**: [`Speaker`](../meeko/speaker.py) immediately purges the output buffer and stops playback the moment a barge-in occurs.
+- **Software Mic-Muting Fallback**: On hardware lacking hardware AEC (e.g., MacBook built-in mics), `AudioIO` supports temporarily muting the microphone stream during TTS playback (`mute_mic_while_speaking = true`) to prevent self-interruption (§3).
 
 ### 4.2 Deepgram STT (Flux)
 
@@ -329,7 +330,7 @@ When `StartOfTurn` fires during `SPEAKING` or `PROCESSING`, Meeko executes four 
 3. **Concurrency & Sub-Task Cancellation**:
    In Python asyncio, cancelling a long-running worker task would kill the assistant. In Meeko, [`TurnWorker`](../meeko/orchestrator/turn_worker.py) runs each Claude+TTS turn as an isolated sub-task. On barge-in, `TurnWorker` cancels *only* that sub-task and synchronously resets the state machine to `LISTENING`. A custom cancellation flag distinguishes a user barge-in from an application shutdown.
 
-*(Note: Hardware AEC on the ReSpeaker XVF3800 subtracts speaker output from mic input so playback never triggers false barge-ins; see §4.1 for fallback mic-muting on devices without AEC.)*
+*(Note: Hardware AEC on the ReSpeaker XVF3800 subtracts speaker output from mic input so playback never triggers false barge-ins; see §3 for fallback mic-muting on devices without AEC.)*
 
 ---
 
@@ -496,7 +497,7 @@ Turn-level errors never crash the application:
 
 ## 9. Key Decisions
 
-### 1. Direct Claude API vs. Managed Voice Platforms
+### 9.1 Direct Claude API vs. Managed Voice Platforms
 
 All-in-one managed voice services (such as Deepgram's Voice Agent API or OpenAI's Realtime API) package STT, LLM inference, and TTS into a single WebSocket connection. While convenient, they obscure the underlying LLM call and strip away critical context management features:
 
@@ -504,7 +505,7 @@ All-in-one managed voice services (such as Deepgram's Voice Agent API or OpenAI'
 - **Server-Side Compaction**: Leveraging Anthropic's server-side context compaction, Sonnet automatically summarizes earlier conversational turns when approaching token thresholds, keeping sessions running indefinitely without manual context clipping.
 - **Verbatim Session Persistence**: Managed services handle history ephemerally. Direct control allows Meeko to commit every raw turn to local SQLite immediately upon completion, preserving an immutable transcript even after in-memory compaction.
 
-### 2. Deepgram Flux STT vs. Local Whisper & Silence VAD
+### 9.2 Deepgram Flux STT vs. Local Whisper & Silence VAD
 
 Many open-source voice assistants run Whisper (or `faster-whisper`) paired with a local Voice Activity Detector (such as Silero VAD) to avoid recurring cloud STT costs. 
 
@@ -512,7 +513,7 @@ For a brainstorming assistant, traditional VAD breaks conversational pacing. Sta
 
 Deepgram Flux performs **semantic end-of-turn detection** in the cloud. Rather than relying purely on silence timers, it analyzes the grammatical and conversational completeness of the incoming speech, cleanly distinguishing between a thoughtful pause and an actual finished turn.
 
-### 3. Hardware Echo Cancellation via 3.5mm Jack vs. Software AEC
+### 9.3 Hardware Echo Cancellation via 3.5mm Jack vs. Software AEC
 
 The ReSpeaker XVF3800's onboard XMOS DSP chip performs hardware-level acoustic echo cancellation (AEC), noise suppression, and 4-microphone beamforming. 
 
@@ -520,7 +521,7 @@ For hardware AEC to work, the DSP must receive the exact "far-end" reference sig
 
 Plugging speakers into the Raspberry Pi's audio output, an HDMI display, or a Bluetooth speaker bypasses the DSP chip. Without a reference signal, the microphones capture the assistant's own voice as incoming speech, resulting in false barge-in triggers, feedback loops, and hallucinated user turns. Offloading AEC to dedicated DSP hardware also frees the Pi's CPU from the heavy latency and processing overhead of running software echo cancellation algorithms.
 
-### 4. On-Device Wake-Word Gating vs. Continuous Cloud Streaming
+### 9.4 On-Device Wake-Word Gating vs. Continuous Cloud Streaming
 
 A developer new to voice systems might wonder why Meeko doesn't simply leave a streaming STT connection open to the cloud 24/7 and detect *"Hey Meeko"* directly in the transcription stream.
 
@@ -550,11 +551,11 @@ flowchart LR
         D2["Assistant Speech ([assistant] We decided to plant tomatoes...)"]
         D3["Tool Arguments (coordinates, timer labels, search queries)"]
         D4["Session Summaries & Raw Transcripts"]
-        D5["Compaction Token Counts & Latency Metrics"]
+        D5["Per-Turn Timing & Cache Metrics ([timing])"]
     end
 ```
 
-- **Content-Free Default Logging (`INFO`)**: Emits only structural status: state transitions, unparameterized tool names, connection handshakes, and operational metrics.
-- **Content Restricted to `DEBUG`**: Spoken transcripts, assistant replies, timer labels, location coordinates, web search queries, and session summaries are logged strictly at `DEBUG` level. This privacy boundary is actively verified by automated tests (`tests/test_logging_privacy.py`).
+- **Content-Free Default Logging (`INFO`)**: Emits only structural status: state transitions, unparameterized tool names, connection handshakes, and operational lifecycle events (such as compaction round triggers).
+- **Content Restricted to `DEBUG`**: Spoken transcripts, assistant replies, timer labels, location coordinates, web search queries, session summaries, and granular per-turn token timing metrics (`[timing]`) are logged strictly at `DEBUG` level. This privacy boundary is actively verified by automated tests (`tests/test_logging_privacy.py`).
 
 *(For configuration file locations, XDG precedence rules, and runtime logging flags, see [configuration.md](configuration.md).)*
