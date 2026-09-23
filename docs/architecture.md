@@ -27,17 +27,17 @@ While it readily handles quick daily utilities (timers, weather, one-shot questi
 
 ### Core Architectural Pillars
 
-1. **Massive Context at Low Cost**:
-   Extended brainstorming sessions naturally accumulate a large volume of tokens over time. Meeko communicates directly with Anthropic's Claude API to leverage **prompt caching** (90% cost reduction on conversation prefixes) and **server-side compaction** (summarizing early context when approaching token ceilings) while maintaining an unabridged verbatim record in local SQLite.
-
-2. **Conversational Fluidity & True Interruption**:
+1. **Conversational Fluidity & True Interruption**:
    Voice brainstorming demands natural pacing. Meeko couples semantic end-of-turn detection (Deepgram Flux) with on-device **hardware Acoustic Echo Cancellation (AEC)** on the ReSpeaker XVF3800. This enables true barge-in — you can speak over the assistant at any moment without the assistant interrupting itself on its own echo.
 
-3. **Voice-Native Session Persistence**:
+2. **Voice-Native Session Persistence**:
    Meeko has no screen or companion phone app. Session boundaries and recall are managed entirely by voice through Claude tool-use (`new_session`, `end_session`, `list_sessions`, `load_session`). Completed sessions are automatically summarized in the background and indexed into SQLite FTS5, allowing you to recall prior discussions naturally (*"Let's go back to our discussion on database migrations"*).
 
-4. **Local Hardware Privacy with Cloud Intelligence**:
+3. **Local Hardware Privacy with Cloud Intelligence**:
    Running on a Raspberry Pi, Meeko uses an on-device ONNX model (openWakeWord) to gate all audio in `IDLE`. No audio or ambient room sound leaves your local network until you explicitly say *"Hey Meeko"*.
+
+4. **Extended Context at Low Cost**:
+   Extended brainstorming sessions naturally accumulate a large volume of tokens over time. Meeko communicates directly with Anthropic's Claude API to leverage **prompt caching** (90% cost reduction on conversation prefixes) and **server-side compaction** (summarizing early context when approaching token ceilings) while maintaining an unabridged verbatim record in local SQLite.
 
 ---
 
