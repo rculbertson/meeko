@@ -27,8 +27,10 @@ While it readily handles quick daily utilities (timers, weather, one-shot questi
 
 ### Core Architectural Pillars
 
-1. **Conversational Fluidity & True Interruption**:
-   Voice brainstorming demands natural pacing. Meeko couples semantic end-of-turn detection (Deepgram Flux) with on-device **hardware Acoustic Echo Cancellation (AEC)** on the ReSpeaker XVF3800. This enables true barge-in — you can speak over the assistant at any moment without the assistant interrupting itself on its own echo.
+1. **Conversational Fluidity & Natural Pacing**:
+   Deep brainstorming requires room to think. Traditional voice assistants break conversational rhythm by cutting users off after short silence windows and immediately closing the session. In Meeko, once a conversation starts, the session stays open—you can pause to reflect between turns without being kicked out or needing to repeat a wake word.
+
+   While you are speaking, Meeko relies on **semantic end-of-turn detection** (Deepgram Flux) to recognize when a thought is actually complete, rather than cutting you off during mid-sentence hesitations. Pipelining Claude's tokens directly into streaming TTS delivers natural sub-second response pacing, while on-device **hardware Acoustic Echo Cancellation (AEC)** ensures you can speak over or redirect the assistant at any moment.
 
 2. **Voice-Native Session Persistence**:
    Meeko has no screen or companion phone app. Session boundaries and recall are managed entirely by voice through Claude tool-use (`new_session`, `end_session`, `list_sessions`, `load_session`). Completed sessions are automatically summarized in the background and indexed into SQLite FTS5, allowing you to recall prior discussions naturally (*"Let's go back to our discussion on database migrations"*).
