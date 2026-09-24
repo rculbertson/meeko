@@ -8,7 +8,7 @@ replies, tool arguments and session titles are logged at DEBUG only, and
 transitions, tool names and errors but nothing that was said.
 
 Each test drives the real log site twice: once with the logger at INFO
-(the secret must be absent) and once at DEBUG (it must be present, so a
+(the canary must be absent) and once at DEBUG (it must be present, so a
 line that was deleted outright rather than demoted still fails).
 """
 
@@ -33,7 +33,7 @@ from meeko.tools.dispatch import ToolDispatcher
 from meeko.tools.timer import TimerManager
 from meeko.tools.weather import WeatherClient
 
-SECRET = "my therapist said something unrepeatable"
+CANARY = "my therapist said something unrepeatable"
 
 
 class _NullLeds:
@@ -74,7 +74,7 @@ async def test_user_transcript_only_logged_at_debug(caplog, level):
     )
     with caplog.at_level(level, logger="meeko"):
         task = asyncio.create_task(worker.run())
-        await queue.put(SECRET)
+        await queue.put(CANARY)
         while not queue.empty():
             await asyncio.sleep(0)
         await asyncio.sleep(0)
@@ -83,7 +83,7 @@ async def test_user_transcript_only_logged_at_debug(caplog, level):
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    assert (SECRET in caplog.text) is (level == logging.DEBUG)
+    assert (CANARY in caplog.text) is (level == logging.DEBUG)
 
 
 @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
@@ -99,12 +99,12 @@ async def test_echo_transcript_only_logged_at_debug(caplog, level):
     )
     ev = MagicMock()
     ev.event = "EndOfTurn"
-    ev.transcript = SECRET
+    ev.transcript = CANARY
 
     with caplog.at_level(level, logger="meeko"):
         await router.handle(ev)
 
-    assert (SECRET in caplog.text) is (level == logging.DEBUG)
+    assert (CANARY in caplog.text) is (level == logging.DEBUG)
 
 
 @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
@@ -131,12 +131,12 @@ async def test_assistant_sentences_only_logged_at_debug(caplog, level):
     )
 
     async def _sentences():
-        yield SECRET
+        yield CANARY
 
     with caplog.at_level(level, logger="meeko"):
         await speaker.speak_stream(_sentences())
 
-    assert (SECRET in caplog.text) is (level == logging.DEBUG)
+    assert (CANARY in caplog.text) is (level == logging.DEBUG)
 
 
 @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
@@ -150,10 +150,10 @@ async def test_tool_arguments_only_logged_at_debug(caplog, level):
     )
 
     with caplog.at_level(level, logger="meeko"):
-        await dispatcher.dispatch("list_sessions", {"query": SECRET})
+        await dispatcher.dispatch("list_sessions", {"query": CANARY})
 
     assert "list_sessions" in caplog.text
-    assert (SECRET in caplog.text) is (level == logging.DEBUG)
+    assert (CANARY in caplog.text) is (level == logging.DEBUG)
 
 
 @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
@@ -164,7 +164,7 @@ async def test_session_title_only_logged_at_debug(tmp_path, caplog, level):
     store = SessionStore.open(tmp_path / "meeko.db")
     try:
         session_id = await store.create_session("query")
-        await store.persist_turn(session_id, "user", SECRET)
+        await store.persist_turn(session_id, "user", CANARY)
         client = MagicMock()
         client.messages = MagicMock()
         client.messages.create = AsyncMock(
@@ -172,7 +172,7 @@ async def test_session_title_only_logged_at_debug(tmp_path, caplog, level):
                 content=[
                     SimpleNamespace(
                         type="text",
-                        text=json.dumps({"title": SECRET, "summary": SECRET}),
+                        text=json.dumps({"title": CANARY, "summary": CANARY}),
                     )
                 ],
                 stop_reason="end_turn",
@@ -186,7 +186,7 @@ async def test_session_title_only_logged_at_debug(tmp_path, caplog, level):
         await store.close()
 
     assert "wrote summary" in caplog.text
-    assert (SECRET in caplog.text) is (level == logging.DEBUG)
+    assert (CANARY in caplog.text) is (level == logging.DEBUG)
 
 
 @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
@@ -200,7 +200,7 @@ async def test_summarizer_raw_response_only_logged_at_debug(tmp_path, caplog, le
         client.messages = MagicMock()
         client.messages.create = AsyncMock(
             return_value=SimpleNamespace(
-                content=[SimpleNamespace(type="text", text=f"not json: {SECRET}")],
+                content=[SimpleNamespace(type="text", text=f"not json: {CANARY}")],
                 stop_reason="end_turn",
             )
         )
@@ -212,7 +212,7 @@ async def test_summarizer_raw_response_only_logged_at_debug(tmp_path, caplog, le
         await store.close()
 
     assert "invalid JSON" in caplog.text
-    assert (SECRET in caplog.text) is (level == logging.DEBUG)
+    assert (CANARY in caplog.text) is (level == logging.DEBUG)
 
 
 @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
@@ -223,11 +223,11 @@ async def test_timer_label_only_logged_at_debug(caplog, level):
     manager = TimerManager(speak_callback=speak)
     with pytest.MonkeyPatch.context() as mp, caplog.at_level(level, logger="meeko"):
         mp.setattr(asyncio, "sleep", AsyncMock())
-        await manager.set_timer(60, "1 minute", SECRET)
-        await manager._timers[SECRET][0]
+        await manager.set_timer(60, "1 minute", CANARY)
+        await manager._timers[CANARY][0]
 
     assert "Timer announcement failed" in caplog.text
-    assert (SECRET in caplog.text) is (level == logging.DEBUG)
+    assert (CANARY in caplog.text) is (level == logging.DEBUG)
 
 
 @pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
