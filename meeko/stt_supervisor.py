@@ -179,9 +179,9 @@ class STTSupervisor:
                 # Raised by run() itself: the traceback would add nothing.
                 logger.warning("%s; reconnecting", exc)
             elif isinstance(exc, ConnectionClosed):
-                logger.exception("STT websocket closed; reconnecting")
+                logger.error("STT websocket closed; reconnecting", exc_info=exc)
             else:
-                logger.exception("STT session failed; reconnecting")
+                logger.error("STT session failed; reconnecting", exc_info=exc)
         else:
             logger.warning(
                 "STT reconnect failed (attempt %d): %s",

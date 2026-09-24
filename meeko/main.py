@@ -247,7 +247,7 @@ def _build_dispatcher(
         if after != before and session_id is not None:
             try:
                 await store.set_session_profile(session_id, after)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # The in-memory switch already happened and the user will
                 # hear it confirmed, so don't fail the tool call. The cost
                 # is only that a later resume restores the prior profile.

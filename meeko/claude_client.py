@@ -731,7 +731,7 @@ class ClaudeClient:
         # next-turn correctness; the on-disk record is nice-to-have.
         try:
             await self._persist("assistant", partial)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug(
                 "partial-turn persist skipped (store likely closed)",
                 exc_info=True,
@@ -803,7 +803,7 @@ class ClaudeClient:
             # store may already be closed.
             try:
                 await self._persist("user", tool_results)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("interrupted tool-results persist skipped", exc_info=True)
             raise
         self._messages.append({"role": "user", "content": tool_results})
