@@ -31,7 +31,7 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 dependencies = [
-    "anthropic>=0.40.0",
+    "anthropic>=1.8.0",
     "deepgram-sdk>=6.1.1",
     "httpx>=0.27",
     "onnxruntime>=1.17.0",
