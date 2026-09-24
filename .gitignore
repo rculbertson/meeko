@@ -27,11 +27,14 @@ meeko.toml
 
 # Tool-specific config (personal)
 mise.toml
-.claude/settings.local.json
-# Claude Code runtime state (transient; .claude/settings.json stays tracked)
-.claude/scheduled_tasks.lock
-.claude/worktrees/
-.claude/.cc-writes/
+skills-lock.json
+
+# Claude Code (transient runtime state & skills; .claude/settings.json stays tracked)
+.claude/*
+!.claude/settings.json
+
+# Local agent customizations & skills
+.agents/
 
 # Test fixtures (generated — see README)
 tests/fixtures/
